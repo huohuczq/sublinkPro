@@ -299,9 +299,9 @@ export default function TemplateList() {
                 sx={
                   loading
                     ? {
-                        animation: 'spin 1s linear infinite',
-                        '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } }
-                      }
+                      animation: 'spin 1s linear infinite',
+                      '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } }
+                    }
                     : {}
                 }
               />
@@ -317,9 +317,9 @@ export default function TemplateList() {
               sx={
                 loading
                   ? {
-                      animation: 'spin 1s linear infinite',
-                      '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } }
-                    }
+                    animation: 'spin 1s linear infinite',
+                    '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } }
+                  }
                   : {}
               }
             />
@@ -527,13 +527,13 @@ export default function TemplateList() {
                   onChange={(e) => setFormData({ ...formData, enableIncludeAll: e.target.checked })}
                 />
               }
-              label="启用 Include-All 模式"
+              label="使用 Include-All 模式"
             />
             <Typography variant="caption" color="textSecondary" component="div" sx={{ ml: 6, mt: -0.5, lineHeight: 1.6 }}>
-              • 开启：配置文件更小，生成更快，但节点排序由客户端控制，系统排序将失效
+              • 开启：配置更精简，使用客户端 include-all 自动匹配节点，不遵循系统排序
             </Typography>
             <Typography variant="caption" color="textSecondary" component="div" sx={{ ml: 6, lineHeight: 1.6 }}>
-              • 关闭：保持系统节点排序，配置文件包含完整节点列表
+              • 关闭（推荐）：由系统按顺序插入节点，遵循系统排序和过滤规则
             </Typography>
             <Stack direction="row" spacing={1}>
               <Button
