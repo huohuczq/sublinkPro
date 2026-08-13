@@ -2,9 +2,26 @@ package monitor
 
 import (
 	"runtime"
+	"strconv"
+	"strings"
+	"sublink/config"
 	"sync"
 	"time"
 )
+
+type RuntimeConfigItem struct {
+	Label       string         `json:"label"`
+	Key         string         `json:"key"`
+	Value       string         `json:"value"`
+	ValueKey    string         `json:"value_key,omitempty"`
+	ValueParams map[string]any `json:"value_params,omitempty"`
+	Env         string         `json:"env"`
+}
+
+type RuntimeConfigSummary struct {
+	SafeToShow    []RuntimeConfigItem `json:"safe_to_show"`
+	MaskedSummary []RuntimeConfigItem `json:"masked_summary"`
+}
 
 // SystemStats 系统监控统计信息
 type SystemStats struct {
@@ -40,6 +57,8 @@ type SystemStats struct {
 	GoVersion string `json:"go_version"` // Go版本
 	GOARCH    string `json:"goarch"`     // 目标架构
 	GOOS      string `json:"goos"`       // 目标操作系统
+
+	RuntimeConfig RuntimeConfigSummary `json:"runtime_config"`
 }
 
 var (
@@ -47,10 +66,8 @@ var (
 	once      sync.Once
 
 	// CPU使用率计算相关
-	lastCPUTime  time.Time
-	lastUserTime float64
-	lastSysTime  float64
-	cpuMutex     sync.Mutex
+	lastCPUTime time.Time
+	cpuMutex    sync.Mutex
 )
 
 // init 初始化启动时间
@@ -114,7 +131,340 @@ func GetSystemStats() SystemStats {
 		GoVersion: runtime.Version(),
 		GOARCH:    runtime.GOARCH,
 		GOOS:      runtime.GOOS,
+
+		RuntimeConfig: buildRuntimeConfigSummary(),
 	}
+}
+
+func buildRuntimeConfigSummary() RuntimeConfigSummary {
+	cfg := config.Get()
+	captchaCfg := config.GetCaptchaConfig()
+	features := config.GetEnabledFeatures()
+
+	safeToShow := []RuntimeConfigItem{
+		{Label: "端口", Key: "port", Value: formatIntValue(cfg.Port, ""), ValueKey: intValueKey(cfg.Port, "plain"), ValueParams: intValueParams(cfg.Port), Env: "SUBLINK_PORT"},
+		{Label: "登录令牌有效期", Key: "expire_days", Value: formatIntValue(cfg.ExpireDays, "天"), ValueKey: intValueKey(cfg.ExpireDays, "days"), ValueParams: intValueParams(cfg.ExpireDays), Env: "SUBLINK_EXPIRE_DAYS"},
+		{Label: "登录失败次数限制", Key: "login_fail_count", Value: formatIntValue(cfg.LoginFailCount, "次"), ValueKey: intValueKey(cfg.LoginFailCount, "times"), ValueParams: intValueParams(cfg.LoginFailCount), Env: "SUBLINK_LOGIN_FAIL_COUNT"},
+		{Label: "登录失败统计窗口", Key: "login_fail_window", Value: formatIntValue(cfg.LoginFailWindow, "分钟"), ValueKey: intValueKey(cfg.LoginFailWindow, "minutes"), ValueParams: intValueParams(cfg.LoginFailWindow), Env: "SUBLINK_LOGIN_FAIL_WINDOW"},
+		{Label: "登录封禁时长", Key: "login_ban_duration", Value: formatIntValue(cfg.LoginBanDuration, "分钟"), ValueKey: intValueKey(cfg.LoginBanDuration, "minutes"), ValueParams: intValueParams(cfg.LoginBanDuration), Env: "SUBLINK_LOGIN_BAN_DURATION"},
+		{Label: "日志级别", Key: "log_level", Value: emptyFallback(strings.ToUpper(cfg.LogLevel), "未设置"), ValueKey: nonEmptyValueKey(cfg.LogLevel, "literal", "unset"), ValueParams: literalValueParams(strings.ToUpper(cfg.LogLevel)), Env: "SUBLINK_LOG_LEVEL"},
+		{Label: "验证码模式", Key: "captcha_mode", Value: formatCaptchaMode(captchaCfg), ValueKey: captchaModeValueKey(captchaCfg), Env: "SUBLINK_CAPTCHA_MODE"},
+		{Label: "可信代理规则", Key: "trusted_proxies", Value: formatTrustedProxies(cfg.TrustedProxies), ValueKey: trustedProxiesValueKey(cfg.TrustedProxies), ValueParams: countValueParams(len(cfg.TrustedProxies)), Env: "SUBLINK_TRUSTED_PROXIES"},
+		{Label: "功能开关", Key: "feature", Value: formatEnabledFeatures(features), ValueKey: enabledFeaturesValueKey(features), ValueParams: listValueParams(features), Env: "SUBLINK_FEATURE"},
+	}
+
+	maskedSummary := []RuntimeConfigItem{
+		{Label: "数据库连接", Key: "dsn", Value: summarizeDSN(cfg.DSN), ValueKey: dsnSummaryValueKey(cfg.DSN), ValueParams: dsnSummaryValueParams(cfg.DSN), Env: "SUBLINK_DSN"},
+		{Label: "本地数据目录", Key: "db_path", Value: summarizePathSetting(cfg.DBPath, config.DefaultDBPath), ValueKey: pathSettingValueKey(cfg.DBPath, config.DefaultDBPath), Env: "SUBLINK_DB_PATH"},
+		{Label: "日志目录路径", Key: "log_path", Value: summarizePathSetting(cfg.LogPath, config.DefaultLogPath), ValueKey: pathSettingValueKey(cfg.LogPath, config.DefaultLogPath), Env: "SUBLINK_LOG_PATH"},
+		{Label: "GeoIP 数据库", Key: "geoip_path", Value: summarizeOptionalPathSetting(cfg.GeoIPPath), ValueKey: optionalPathSettingValueKey(cfg.GeoIPPath), Env: "SUBLINK_GEOIP_PATH"},
+		{Label: "前端访问基础路径", Key: "web_base_path", Value: summarizeWebBasePath(cfg.WebBasePath), ValueKey: webBasePathValueKey(cfg.WebBasePath), Env: "SUBLINK_WEB_BASE_PATH"},
+		{Label: "Turnstile 站点密钥", Key: "turnstile_site_key", Value: configuredSummary(cfg.TurnstileSiteKey), ValueKey: configuredSummaryValueKey(cfg.TurnstileSiteKey), Env: "SUBLINK_TURNSTILE_SITE_KEY"},
+		{Label: "Turnstile 验证代理", Key: "turnstile_proxy_link", Value: configuredSummary(cfg.TurnstileProxyLink), ValueKey: configuredSummaryValueKey(cfg.TurnstileProxyLink), Env: "SUBLINK_TURNSTILE_PROXY_LINK"},
+	}
+
+	return RuntimeConfigSummary{SafeToShow: safeToShow, MaskedSummary: maskedSummary}
+}
+
+func valueKey(name string) string {
+	return "components.systemMonitor.config.values." + name
+}
+
+func intValueKey(value int, unit string) string {
+	if value <= 0 {
+		return valueKey("unset")
+	}
+	return valueKey(unit)
+}
+
+func intValueParams(value int) map[string]any {
+	if value <= 0 {
+		return nil
+	}
+	return map[string]any{"count": value}
+}
+
+func countValueParams(count int) map[string]any {
+	return map[string]any{"count": count}
+}
+
+func literalValueParams(value string) map[string]any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return map[string]any{"value": value}
+}
+
+func listValueParams(values []string) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	return map[string]any{"value": strings.Join(values, ", ")}
+}
+
+func nonEmptyValueKey(value, nonEmptyKey, emptyKey string) string {
+	if strings.TrimSpace(value) == "" {
+		return valueKey(emptyKey)
+	}
+	return valueKey(nonEmptyKey)
+}
+
+func captchaModeValueKey(cfg config.CaptchaConfig) string {
+	switch cfg.Mode {
+	case config.CaptchaModeDisabled:
+		return valueKey("captchaDisabled")
+	case config.CaptchaModeTurnstile:
+		return valueKey("captchaTurnstile")
+	default:
+		if cfg.ConfiguredMode == config.CaptchaModeTurnstile && cfg.Degraded {
+			return valueKey("captchaTurnstileDegraded")
+		}
+		return valueKey("captchaLegacy")
+	}
+}
+
+func trustedProxiesValueKey(proxies []string) string {
+	if len(proxies) == 0 {
+		return valueKey("disabled")
+	}
+	return valueKey("rules")
+}
+
+func enabledFeaturesValueKey(features []string) string {
+	if len(features) == 0 {
+		return valueKey("disabled")
+	}
+	return valueKey("literal")
+}
+
+func configuredSummaryValueKey(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return valueKey("notConfigured")
+	}
+	return valueKey("configured")
+}
+
+func pathSettingValueKey(value, defaultValue string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return valueKey("defaultPath")
+	}
+	if strings.TrimSpace(defaultValue) != "" && trimmed == defaultValue {
+		return valueKey("defaultPath")
+	}
+	return valueKey("customPath")
+}
+
+func optionalPathSettingValueKey(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return valueKey("autoDetect")
+	}
+	return valueKey("customPath")
+}
+
+func webBasePathValueKey(basePath string) string {
+	if strings.TrimSpace(basePath) == "" {
+		return valueKey("rootPath")
+	}
+	return valueKey("customPath")
+}
+
+func dsnSummaryValueKey(dsn string) string {
+	trimmed := strings.TrimSpace(dsn)
+	if trimmed == "" {
+		return valueKey("databaseConfigured")
+	}
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.HasPrefix(lower, "sqlite"):
+		return valueKey("databaseConfigured")
+	case strings.HasPrefix(lower, "mysql://") || strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://"):
+		kind, host, database := parseSQLDSNSummary(trimmed)
+		if host != "" && database != "" {
+			_ = kind
+			return valueKey("databaseHost")
+		}
+		return valueKey("databaseConfigured")
+	default:
+		return valueKey("configuredHidden")
+	}
+}
+
+func dsnSummaryValueParams(dsn string) map[string]any {
+	trimmed := strings.TrimSpace(dsn)
+	if trimmed == "" {
+		return map[string]any{"kind": "SQLite"}
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "sqlite") {
+		return map[string]any{"kind": "SQLite"}
+	}
+	if strings.HasPrefix(lower, "mysql://") || strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://") {
+		kind, host, database := parseSQLDSNSummary(trimmed)
+		params := map[string]any{"kind": kind}
+		if host != "" {
+			params["host"] = host
+		}
+		if database != "" {
+			params["database"] = database
+		}
+		return params
+	}
+	return nil
+}
+
+func parseSQLDSNSummary(dsn string) (string, string, string) {
+	kind := "PostgreSQL"
+	if strings.HasPrefix(strings.ToLower(dsn), "mysql://") {
+		kind = "MySQL"
+	}
+
+	parts := strings.SplitN(dsn, "@", 2)
+	if len(parts) != 2 {
+		return kind, "", ""
+	}
+
+	hostAndDB := parts[1]
+	hostAndDB = strings.TrimPrefix(hostAndDB, "tcp(")
+	hostAndDB = strings.TrimPrefix(hostAndDB, "unix(")
+	hostAndDB = strings.ReplaceAll(hostAndDB, ")", "")
+	hostAndDB = strings.TrimPrefix(hostAndDB, "/")
+
+	segments := strings.SplitN(hostAndDB, "/", 2)
+	host := strings.TrimSpace(segments[0])
+	database := ""
+	if len(segments) == 2 {
+		database = strings.SplitN(segments[1], "?", 2)[0]
+	}
+	return kind, host, database
+}
+
+func formatIntValue(value int, unit string) string {
+	if value <= 0 {
+		return "未设置"
+	}
+	if unit == "" {
+		return intToString(value)
+	}
+	return intToString(value) + " " + unit
+}
+
+func intToString(value int) string {
+	return strconv.Itoa(value)
+}
+
+func emptyFallback(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func formatCaptchaMode(cfg config.CaptchaConfig) string {
+	switch cfg.Mode {
+	case config.CaptchaModeDisabled:
+		return "关闭"
+	case config.CaptchaModeTurnstile:
+		return "Cloudflare Turnstile"
+	default:
+		if cfg.ConfiguredMode == config.CaptchaModeTurnstile && cfg.Degraded {
+			return "Cloudflare Turnstile（已降级为传统验证码）"
+		}
+		return "传统验证码"
+	}
+}
+
+func formatTrustedProxies(proxies []string) string {
+	if len(proxies) == 0 {
+		return "未启用"
+	}
+	return intToString(len(proxies)) + " 条规则"
+}
+
+func formatEnabledFeatures(features []string) string {
+	if len(features) == 0 {
+		return "未启用"
+	}
+	return strings.Join(features, "、")
+}
+
+func configuredSummary(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "未配置"
+	}
+	return "已配置"
+}
+
+func summarizePathSetting(value, defaultValue string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "默认路径"
+	}
+	if strings.TrimSpace(defaultValue) != "" && trimmed == defaultValue {
+		return "默认路径"
+	}
+	return "已自定义"
+}
+
+func summarizeOptionalPathSetting(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "自动检测"
+	}
+	return "已自定义"
+}
+
+func summarizeDSN(dsn string) string {
+	trimmed := strings.TrimSpace(dsn)
+	if trimmed == "" {
+		return "SQLite · 已配置"
+	}
+
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.HasPrefix(lower, "sqlite"):
+		return "SQLite · 已配置"
+	case strings.HasPrefix(lower, "mysql://"):
+		return summarizeSQLDSN("MySQL", trimmed)
+	case strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://"):
+		return summarizeSQLDSN("PostgreSQL", trimmed)
+	default:
+		return "已配置（详情已隐藏）"
+	}
+}
+
+func summarizeSQLDSN(kind, dsn string) string {
+	parts := strings.SplitN(dsn, "@", 2)
+	if len(parts) != 2 {
+		return kind + " · 已配置（详情已隐藏）"
+	}
+
+	hostAndDB := parts[1]
+	hostAndDB = strings.TrimPrefix(hostAndDB, "tcp(")
+	hostAndDB = strings.TrimPrefix(hostAndDB, "unix(")
+	hostAndDB = strings.ReplaceAll(hostAndDB, ")", "")
+	hostAndDB = strings.TrimPrefix(hostAndDB, "/")
+
+	segments := strings.SplitN(hostAndDB, "/", 2)
+	host := strings.TrimSpace(segments[0])
+	database := ""
+	if len(segments) == 2 {
+		database = strings.SplitN(segments[1], "?", 2)[0]
+	}
+
+	if host == "" && database == "" {
+		return kind + " · 已配置（详情已隐藏）"
+	}
+	if database == "" || host == "" {
+		return kind + " · 已配置"
+	}
+	return kind + " · " + host + " · " + database
+}
+
+func summarizeWebBasePath(basePath string) string {
+	if strings.TrimSpace(basePath) == "" {
+		return "根路径"
+	}
+	return "已自定义"
 }
 
 // calculateCPUUsage 计算进程CPU使用率

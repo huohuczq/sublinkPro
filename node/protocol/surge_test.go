@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -95,11 +97,12 @@ func TestEncodeSurge_Trojan(t *testing.T) {
 // TestEncodeSurge_HY2 测试 Hysteria2 节点的 Surge 格式输出
 func TestEncodeSurge_HY2(t *testing.T) {
 	hy2 := HY2{
-		Name:     "测试节点-HY2",
-		Host:     "example.com",
-		Port:     443,
-		Password: "test-password",
-		Sni:      "sni.example.com",
+		Name:        "测试节点-HY2",
+		Host:        "example.com",
+		Port:        443,
+		Password:    "test-password",
+		Sni:         "sni.example.com",
+		Fingerprint: "16dac3717024eb319093d1c95290c14adc850e2814b2208d11c7b7a436923859",
 	}
 	link := EncodeHY2URL(hy2)
 
@@ -113,8 +116,30 @@ func TestEncodeSurge_HY2(t *testing.T) {
 	assertEqualIntInterface(t, "Port", hy2.Port, decoded.Port)
 	assertEqualString(t, "Password", hy2.Password, decoded.Password)
 	assertEqualString(t, "Sni", hy2.Sni, decoded.Sni)
+	assertEqualString(t, "Fingerprint", hy2.Fingerprint, decoded.Fingerprint)
+
+	line, _, err := buildHY2SurgeLine(link, OutputConfig{})
+	if err != nil {
+		t.Fatalf("buildHY2SurgeLine 失败: %v", err)
+	}
+	assertContains(t, "SurgeFingerprint", line, "server-cert-fingerprint-sha256="+hy2.Fingerprint)
 
 	t.Logf("✓ Hysteria2 Surge 格式数据完整性测试通过，名称: %s", decoded.Name)
+}
+
+func TestHY2SurgeLineRejectsInvalidCertificateFingerprint(t *testing.T) {
+	link := "hy2://test-password@example.com:443/?sni=sni.example.com&pinSHA256=abc%2Cskip-cert-verify%3Dtrue#测试节点-HY2"
+
+	line, _, err := buildHY2SurgeLine(link, OutputConfig{})
+	if err != nil {
+		t.Fatalf("buildHY2SurgeLine 失败: %v", err)
+	}
+	if strings.Contains(line, "server-cert-fingerprint-sha256=") {
+		t.Fatalf("非法证书指纹不应输出到 Surge 行: %s", line)
+	}
+	if strings.Contains(line, "abc,skip-cert-verify=true") {
+		t.Fatalf("Surge 行不应包含注入后的参数片段: %s", line)
+	}
 }
 
 // TestEncodeSurge_TUIC 测试 TUIC 节点的 Surge 格式输出
@@ -235,7 +260,7 @@ func TestProxyStruct(t *testing.T) {
 func TestConvertToInt(t *testing.T) {
 	testCases := []struct {
 		name     string
-		input    interface{}
+		input    any
 		expected int
 		hasError bool
 	}{
@@ -266,14 +291,14 @@ func TestConvertToInt(t *testing.T) {
 
 // TestDeleteOpts 测试空值删除函数
 func TestDeleteOpts(t *testing.T) {
-	opts := map[string]interface{}{
+	opts := map[string]any{
 		"key1": "value1",
 		"key2": "",
-		"key3": map[string]interface{}{
+		"key3": map[string]any{
 			"nested1": "value",
 			"nested2": "",
 		},
-		"key4": map[string]interface{}{},
+		"key4": map[string]any{},
 	}
 
 	DeleteOpts(opts)
@@ -294,7 +319,7 @@ func TestDeleteOpts(t *testing.T) {
 	}
 
 	// nested2 应该被删除
-	if nested, ok := opts["key3"].(map[string]interface{}); ok {
+	if nested, ok := opts["key3"].(map[string]any); ok {
 		if _, exists := nested["nested2"]; exists {
 			t.Error("nested2 应该被删除")
 		}
@@ -356,4 +381,59 @@ func TestAllProtocolsToProxy(t *testing.T) {
 			t.Logf("✓ %s 协议 LinkToProxy 测试通过", p.name)
 		})
 	}
+}
+
+// TestEncodeSurge 使用真实模板验证 Surge 配置输出
+func TestEncodeSurge(t *testing.T) {
+	tempDir := t.TempDir()
+	templatePath := filepath.Join(tempDir, "surge-template.conf")
+	template := "[Proxy]\n\n[Proxy Group]\nProxy = select\nAuto = url-test, url=http://www.gstatic.com/generate_204, interval=300\n"
+	if err := os.WriteFile(templatePath, []byte(template), 0o600); err != nil {
+		t.Fatalf("写入模板失败: %v", err)
+	}
+
+	ss := Ss{
+		Name:   "Surge-SS",
+		Server: "original.example.com",
+		Port:   8388,
+		Param: Param{
+			Cipher:   "aes-256-gcm",
+			Password: "password",
+		},
+		Plugin: SsPlugin{
+			Name: "obfs-local",
+			Mode: "http",
+			Host: "bing.com",
+		},
+	}
+	trojan := Trojan{
+		Name:     "Surge-Trojan",
+		Hostname: "trojan.example.com",
+		Port:     443,
+		Password: "password",
+		Query: TrojanQuery{
+			Sni: "sni.example.com",
+		},
+	}
+
+	output, err := EncodeSurge([]string{
+		EncodeSSURL(ss),
+		EncodeTrojanURL(trojan),
+	}, OutputConfig{
+		Surge:                 templatePath,
+		Udp:                   true,
+		ReplaceServerWithHost: true,
+		HostMap: map[string]string{
+			"original.example.com": "1.2.3.4",
+		},
+	})
+	if err != nil {
+		t.Fatalf("EncodeSurge 失败: %v", err)
+	}
+
+	assertContains(t, "Surge SS 节点", output, "Surge-SS = ss, 1.2.3.4, 8388")
+	assertContains(t, "Surge SS 插件", output, "obfs=http, obfs-host=bing.com")
+	assertContains(t, "Surge Trojan 节点", output, "Surge-Trojan = trojan, trojan.example.com, 443, password=password")
+	assertContains(t, "Surge 代理组", output, "Proxy = select, Surge-SS, Surge-Trojan")
+	assertContains(t, "Surge 自动组", output, "Auto = url-test, url=http://www.gstatic.com/generate_204, interval=300, Surge-SS, Surge-Trojan")
 }

@@ -1,69 +1,40 @@
 import { useState } from 'react';
 import PropTypes from 'prop-types';
+import { Trans, useTranslation } from 'react-i18next';
 
-// material-ui
 import Autocomplete from '@mui/material/Autocomplete';
 import Box from '@mui/material/Box';
 import Chip from '@mui/material/Chip';
 import Collapse from '@mui/material/Collapse';
-import Divider from '@mui/material/Divider';
 import Paper from '@mui/material/Paper';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import Alert from '@mui/material/Alert';
 import { useTheme } from '@mui/material/styles';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
+import { getReadableTextTokens, getSurfaceTokens } from 'themes/surfaceTokens';
+import { withAlpha } from 'utils/colorUtils';
+import { getProtocolOptions, getProtocolPresentation } from 'utils/protocolPresentation';
 
-// icons
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import RouterIcon from '@mui/icons-material/Router';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import BlockIcon from '@mui/icons-material/Block';
 
-// 协议颜色映射
-const protocolColors = {
-  vmess: '#1976d2',
-  vless: '#7b1fa2',
-  trojan: '#d32f2f',
-  ss: '#2e7d32',
-  ssr: '#e64a19',
-  hysteria: '#f9a825',
-  hysteria2: '#ef6c00',
-  tuic: '#0277bd',
-  wireguard: '#88171a',
-  naiveproxy: '#5d4037',
-  anytls: '#20a84c',
-  socks5: '#116ea4',
-  socks: '#dd4984'
-};
-
-// 协议显示名称映射
-const protocolLabels = {
-  vmess: 'VMess',
-  vless: 'VLESS',
-  trojan: 'Trojan',
-  ss: 'SS',
-  ssr: 'SSR',
-  hysteria: 'Hysteria',
-  hysteria2: 'Hysteria2',
-  tuic: 'TUIC',
-  wireguard: 'WireGuard',
-  naiveproxy: 'NaiveProxy',
-  anytls: 'AnyTLS',
-  socks5: 'SOCKS5',
-  socks: 'SOCKS'
-};
-
-/**
- * 节点协议过滤器
- * 用于订阅设置中按协议类型过滤节点（白名单/黑名单模式）
- */
 export default function NodeProtocolFilter({ protocolOptions, whitelistValue, blacklistValue, onWhitelistChange, onBlacklistChange }) {
+  const { t } = useTranslation();
   const theme = useTheme();
+  const { isDark } = useResolvedColorScheme();
+  const { palette, dialogSurface, dialogSurfaceGradient, mutedPanelSurface, nestedPanelSurface, panelBorder } = getSurfaceTokens(
+    theme,
+    isDark
+  );
+  const { primaryText, secondaryText, tertiaryText } = getReadableTextTokens(theme, isDark);
+  const insetHighlight = isDark ? `inset 0 1px 0 ${withAlpha(palette.common.white, 0.03)}` : 'none';
   const [expanded, setExpanded] = useState(false);
 
-  // 解析逗号分隔的协议字符串为数组
   const parseProtocolString = (str) => {
     if (!str) return [];
     return str
@@ -72,190 +43,242 @@ export default function NodeProtocolFilter({ protocolOptions, whitelistValue, bl
       .filter((p) => p);
   };
 
-  // 将数组转换为逗号分隔的字符串
-  const toProtocolString = (arr) => {
-    return arr.join(',');
-  };
+  const toProtocolString = (arr) => arr.join(',');
 
   const whitelistProtocols = parseProtocolString(whitelistValue);
   const blacklistProtocols = parseProtocolString(blacklistValue);
   const hasAnyRules = whitelistProtocols.length > 0 || blacklistProtocols.length > 0;
+  const options = getProtocolOptions(protocolOptions);
 
-  // 获取协议选项（确保有颜色和显示名称）
-  const getProtocolOption = (protocol) => {
-    const p = protocol.toLowerCase();
+  const headerHoverSurface = isDark ? withAlpha(palette.background.paper, 0.2) : withAlpha(palette.primary.main, 0.04);
+  const contentSurface = isDark
+    ? `linear-gradient(180deg, ${withAlpha(palette.background.paper, 0.08)} 0%, ${dialogSurface} 100%)`
+    : 'none';
+  const infoAlertSx = {
+    borderColor: withAlpha(palette.info.main, isDark ? 0.28 : 0.18),
+    bgcolor: withAlpha(palette.info.main, isDark ? 0.12 : 0.05),
+    boxShadow: insetHighlight,
+    '& .MuiAlert-icon, & .MuiAlert-message': {
+      color: primaryText
+    }
+  };
+
+  const getOptionChipSx = (color, fallbackColor) => {
+    const resolvedColor = color || fallbackColor;
     return {
-      value: p,
-      label: protocolLabels[p] || p.toUpperCase(),
-      color: protocolColors[p] || '#757575'
+      bgcolor: withAlpha(resolvedColor, isDark ? 0.18 : 0.1),
+      color: resolvedColor,
+      border: '1px solid',
+      borderColor: withAlpha(resolvedColor, isDark ? 0.34 : 0.2),
+      '& .MuiChip-deleteIcon': {
+        color: withAlpha(resolvedColor, 0.72),
+        '&:hover': {
+          color: resolvedColor
+        }
+      }
     };
   };
 
-  // 构建选项列表
-  const options = (protocolOptions || []).map((p) => getProtocolOption(p));
+  const sectionCardSx = {
+    p: 1.75,
+    borderRadius: 2,
+    bgcolor: nestedPanelSurface,
+    border: '1px solid',
+    borderColor: panelBorder,
+    boxShadow: insetHighlight
+  };
+
+  const autocompleteSx = {
+    '& .MuiOutlinedInput-root': {
+      bgcolor: mutedPanelSurface,
+      transition: 'background-color 0.2s ease, border-color 0.2s ease',
+      '& fieldset': {
+        borderColor: panelBorder
+      },
+      '&:hover fieldset': {
+        borderColor: withAlpha(palette.primary.main, isDark ? 0.34 : 0.22)
+      },
+      '&.Mui-focused': {
+        bgcolor: dialogSurface
+      }
+    },
+    '& .MuiAutocomplete-tag': {
+      maxWidth: '100%'
+    }
+  };
+
+  const renderOption = (props, option) => (
+    <Box component="li" {...props} key={option.value} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+      <Box
+        sx={{
+          width: 10,
+          height: 10,
+          borderRadius: '50%',
+          bgcolor: option.color || palette.primary.main,
+          flexShrink: 0,
+          boxShadow: `0 0 0 1px ${withAlpha(option.color || palette.primary.main, 0.22)}`
+        }}
+      />
+      {option.label}
+    </Box>
+  );
 
   return (
     <Paper
       elevation={0}
       sx={{
-        mb: 2,
+        mb: 0,
         border: '1px solid',
-        borderColor: 'divider',
+        borderColor: panelBorder,
         borderRadius: 2,
-        overflow: 'hidden'
+        overflow: 'hidden',
+        bgcolor: dialogSurface,
+        backgroundImage: dialogSurfaceGradient,
+        boxShadow: insetHighlight
       }}
     >
-      {/* 标题栏 */}
       <Box
         sx={{
-          p: 1.5,
+          px: 1.75,
+          py: 1.5,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          background: `linear-gradient(145deg, ${theme.palette.mode === 'dark' ? '#1a2027' : '#f5f5f5'} 0%, ${theme.palette.mode === 'dark' ? '#121417' : '#fafafa'} 100%)`,
+          bgcolor: expanded ? nestedPanelSurface : mutedPanelSurface,
+          borderBottom: expanded ? '1px solid' : 'none',
+          borderColor: panelBorder,
           cursor: 'pointer',
+          transition: 'background-color 0.2s ease, border-color 0.2s ease',
           '&:hover': {
-            bgcolor: 'action.hover'
+            bgcolor: expanded ? nestedPanelSurface : headerHoverSurface
           }
         }}
         onClick={() => setExpanded(!expanded)}
       >
-        <Stack direction="row" alignItems="center" spacing={1}>
+        <Stack direction="row" alignItems="center" spacing={1.25} sx={{ minWidth: 0, flex: 1 }}>
           <RouterIcon color="primary" fontSize="small" />
-          <Typography variant="subtitle2" fontWeight={600}>
-            协议类型过滤
+          <Typography variant="subtitle2" fontWeight={600} sx={{ color: primaryText }}>
+            {t('components.nodeProtocolFilter.title')}
           </Typography>
           {hasAnyRules && (
-            <Typography variant="caption" color="textSecondary">
-              (白名单 {whitelistProtocols.length} / 黑名单 {blacklistProtocols.length} 个协议)
-            </Typography>
+            <Chip
+              size="small"
+              variant="outlined"
+              label={t('components.nodeProtocolFilter.summary', {
+                whitelist: whitelistProtocols.length,
+                blacklist: blacklistProtocols.length
+              })}
+              sx={{
+                height: 22,
+                color: tertiaryText,
+                bgcolor: withAlpha(palette.primary.main, isDark ? 0.14 : 0.06),
+                borderColor: withAlpha(palette.primary.main, isDark ? 0.28 : 0.16)
+              }}
+            />
           )}
         </Stack>
-        <Stack direction="row" alignItems="center" spacing={0.5}>
-          {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-        </Stack>
+        <Box sx={{ display: 'flex', alignItems: 'center', color: tertiaryText, ml: 1 }}>
+          {expanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+        </Box>
       </Box>
 
       <Collapse in={expanded} timeout="auto">
-        <Box sx={{ p: 2, pt: 1 }}>
-          {/* 说明 */}
-          <Alert variant={'standard'} severity="info" sx={{ mb: 2 }}>
-            <Typography variant="body2">
-              按节点协议类型过滤。<strong>黑名单优先级高于白名单</strong>：黑名单协议的节点会被排除，剩余节点必须匹配白名单协议才会保留。
+        <Box sx={{ px: 2.25, py: 2.25, bgcolor: dialogSurface, backgroundImage: contentSurface }}>
+          <Stack spacing={2.25}>
+            <Typography variant="body2" sx={{ color: secondaryText }}>
+              {t('components.nodeProtocolFilter.description')}
             </Typography>
-          </Alert>
 
-          {/* 白名单协议选择 */}
-          <Box sx={{ mb: 2 }}>
-            <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
-              <CheckCircleOutlineIcon color="success" fontSize="small" />
-              <Typography variant="subtitle2" fontWeight={600} color="success.main">
-                白名单协议
+            <Alert variant="outlined" severity="info" sx={infoAlertSx}>
+              <Typography variant="body2" sx={{ color: secondaryText }}>
+                <Trans i18nKey="components.nodeProtocolFilter.priorityHint" components={{ strong: <strong /> }} />
               </Typography>
-            </Stack>
-            <Autocomplete
-              multiple
-              options={options}
-              getOptionLabel={(option) => option.label || option}
-              value={whitelistProtocols.map(getProtocolOption)}
-              onChange={(e, newValue) => onWhitelistChange(toProtocolString(newValue.map((v) => v.value || v)))}
-              isOptionEqualToValue={(option, value) => (option.value || option) === (value.value || value)}
-              filterSelectedOptions
-              renderTags={(value, getTagProps) =>
-                value.map((option, index) => {
-                  const { key, ...tagProps } = getTagProps({ index });
-                  return (
-                    <Chip
-                      key={key}
-                      label={option.label || option}
-                      size="small"
-                      sx={{
-                        backgroundColor: option.color || '#4caf50',
-                        color: '#fff',
-                        '& .MuiChip-deleteIcon': { color: 'rgba(255,255,255,0.7)' }
-                      }}
-                      {...tagProps}
-                    />
-                  );
-                })
-              }
-              renderOption={(props, option) => (
-                <Box component="li" {...props} key={option.value}>
-                  <Box
-                    sx={{
-                      width: 12,
-                      height: 12,
-                      borderRadius: '50%',
-                      backgroundColor: option.color || '#1976d2',
-                      mr: 1
-                    }}
-                  />
-                  {option.label}
-                </Box>
-              )}
-              renderInput={(params) => <TextField {...params} placeholder="选择白名单协议（只保留这些协议的节点）" size="small" />}
-            />
-            <Typography variant="caption" color="textSecondary" sx={{ mt: 0.5, display: 'block' }}>
-              仅保留使用白名单协议的节点
-            </Typography>
-          </Box>
+            </Alert>
 
-          <Divider sx={{ my: 2 }} />
+            <Box sx={sectionCardSx}>
+              <Stack spacing={1.25}>
+                <Stack direction="row" alignItems="center" spacing={1}>
+                  <CheckCircleOutlineIcon color="success" fontSize="small" />
+                  <Typography variant="subtitle2" fontWeight={600} sx={{ color: theme.palette.success.main }}>
+                    {t('components.nodeProtocolFilter.whitelist')}
+                  </Typography>
+                </Stack>
+                <Autocomplete
+                  multiple
+                  options={options}
+                  getOptionLabel={(option) => option.label || option}
+                  value={whitelistProtocols.map((protocol) => getProtocolPresentation(protocol))}
+                  onChange={(_, newValue) => onWhitelistChange(toProtocolString(newValue.map((v) => v.value || v)))}
+                  isOptionEqualToValue={(option, value) => (option.value || option) === (value.value || value)}
+                  filterSelectedOptions
+                  sx={autocompleteSx}
+                  renderTags={(value, getTagProps) =>
+                    value.map((option, index) => {
+                      const { key, ...tagProps } = getTagProps({ index });
+                      return (
+                        <Chip
+                          key={key}
+                          label={option.label || option}
+                          size="small"
+                          sx={getOptionChipSx(option.color, theme.palette.success.main)}
+                          {...tagProps}
+                        />
+                      );
+                    })
+                  }
+                  renderOption={renderOption}
+                  renderInput={(params) => (
+                    <TextField {...params} placeholder={t('components.nodeProtocolFilter.whitelistPlaceholder')} size="small" />
+                  )}
+                />
+                <Typography variant="caption" sx={{ color: secondaryText }}>
+                  {t('components.nodeProtocolFilter.whitelistHelper')}
+                </Typography>
+              </Stack>
+            </Box>
 
-          {/* 黑名单协议选择 */}
-          <Box>
-            <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
-              <BlockIcon color="error" fontSize="small" />
-              <Typography variant="subtitle2" fontWeight={600} color="error.main">
-                黑名单协议
-              </Typography>
-            </Stack>
-            <Autocomplete
-              multiple
-              options={options}
-              getOptionLabel={(option) => option.label || option}
-              value={blacklistProtocols.map(getProtocolOption)}
-              onChange={(e, newValue) => onBlacklistChange(toProtocolString(newValue.map((v) => v.value || v)))}
-              isOptionEqualToValue={(option, value) => (option.value || option) === (value.value || value)}
-              filterSelectedOptions
-              renderTags={(value, getTagProps) =>
-                value.map((option, index) => {
-                  const { key, ...tagProps } = getTagProps({ index });
-                  return (
-                    <Chip
-                      key={key}
-                      label={option.label || option}
-                      size="small"
-                      sx={{
-                        backgroundColor: option.color || '#f44336',
-                        color: '#fff',
-                        '& .MuiChip-deleteIcon': { color: 'rgba(255,255,255,0.7)' }
-                      }}
-                      {...tagProps}
-                    />
-                  );
-                })
-              }
-              renderOption={(props, option) => (
-                <Box component="li" {...props} key={option.value}>
-                  <Box
-                    sx={{
-                      width: 12,
-                      height: 12,
-                      borderRadius: '50%',
-                      backgroundColor: option.color || '#1976d2',
-                      mr: 1
-                    }}
-                  />
-                  {option.label}
-                </Box>
-              )}
-              renderInput={(params) => <TextField {...params} placeholder="选择黑名单协议（排除这些协议的节点）" size="small" />}
-            />
-            <Typography variant="caption" color="textSecondary" sx={{ mt: 0.5, display: 'block' }}>
-              使用黑名单协议的节点将被排除
-            </Typography>
-          </Box>
+            <Box sx={sectionCardSx}>
+              <Stack spacing={1.25}>
+                <Stack direction="row" alignItems="center" spacing={1}>
+                  <BlockIcon color="error" fontSize="small" />
+                  <Typography variant="subtitle2" fontWeight={600} sx={{ color: theme.palette.error.main }}>
+                    {t('components.nodeProtocolFilter.blacklist')}
+                  </Typography>
+                </Stack>
+                <Autocomplete
+                  multiple
+                  options={options}
+                  getOptionLabel={(option) => option.label || option}
+                  value={blacklistProtocols.map((protocol) => getProtocolPresentation(protocol))}
+                  onChange={(_, newValue) => onBlacklistChange(toProtocolString(newValue.map((v) => v.value || v)))}
+                  isOptionEqualToValue={(option, value) => (option.value || option) === (value.value || value)}
+                  filterSelectedOptions
+                  sx={autocompleteSx}
+                  renderTags={(value, getTagProps) =>
+                    value.map((option, index) => {
+                      const { key, ...tagProps } = getTagProps({ index });
+                      return (
+                        <Chip
+                          key={key}
+                          label={option.label || option}
+                          size="small"
+                          sx={getOptionChipSx(option.color, theme.palette.error.main)}
+                          {...tagProps}
+                        />
+                      );
+                    })
+                  }
+                  renderOption={renderOption}
+                  renderInput={(params) => (
+                    <TextField {...params} placeholder={t('components.nodeProtocolFilter.blacklistPlaceholder')} size="small" />
+                  )}
+                />
+                <Typography variant="caption" sx={{ color: secondaryText }}>
+                  {t('components.nodeProtocolFilter.blacklistHelper')}
+                </Typography>
+              </Stack>
+            </Box>
+          </Stack>
         </Box>
       </Collapse>
     </Paper>

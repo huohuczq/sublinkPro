@@ -85,7 +85,9 @@ func loadDatabase() error {
 
 	// 关闭旧的 reader
 	if geoIP != nil {
-		geoIP.Close()
+		if err := geoIP.Close(); err != nil {
+			utils.Warn("关闭旧 GeoIP 数据库失败: %v", err)
+		}
 	}
 
 	geoIP = reader
@@ -166,7 +168,6 @@ func GetLocation(ipStr string) (string, error) {
 
 	country := ""
 	city := ""
-	isocode := ""
 
 	geoCountry, err := geoIP.Country(ip)
 	if err != nil {
@@ -174,7 +175,7 @@ func GetLocation(ipStr string) (string, error) {
 	}
 	if geoCountry.Country.HasData() {
 		country = geoCountry.Country.Names.SimplifiedChinese
-		isocode = geoCountry.Country.ISOCode
+		isocode := geoCountry.Country.ISOCode
 		flag := ISOCodeToFlag(isocode)
 		if flag != "" {
 			country = fmt.Sprintf("%s%s", flag, country)
@@ -206,9 +207,9 @@ func ISOCodeToFlag(isoCode string) string {
 	flag := ""
 	for _, char := range isoCode {
 		if char >= 'A' && char <= 'Z' {
-			flag += string(rune(0x1F1E6 + (char - 'A')))
+			flag += string(0x1F1E6 + (char - 'A'))
 		} else if char >= 'a' && char <= 'z' {
-			flag += string(rune(0x1F1E6 + (char - 'a')))
+			flag += string(0x1F1E6 + (char - 'a'))
 		}
 	}
 	return flag

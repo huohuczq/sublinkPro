@@ -1,12 +1,9 @@
 import PropTypes from 'prop-types';
-import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 // material-ui
 import { useTheme, alpha } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
-import Accordion from '@mui/material/Accordion';
-import AccordionSummary from '@mui/material/AccordionSummary';
-import AccordionDetails from '@mui/material/AccordionDetails';
 import Avatar from '@mui/material/Avatar';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -25,6 +22,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
+import TuneIcon from '@mui/icons-material/Tune';
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import PublicIcon from '@mui/icons-material/Public';
 import FolderIcon from '@mui/icons-material/Folder';
@@ -34,98 +32,57 @@ import RouterIcon from '@mui/icons-material/Router';
 import FilterVintageIcon from '@mui/icons-material/FilterVintage';
 import VpnLockIcon from '@mui/icons-material/VpnLock';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
-
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
-import CodeIcon from '@mui/icons-material/Code';
+import LockOpenIcon from '@mui/icons-material/LockOpen';
 
 // dialog
 import Dialog from '@mui/material/Dialog';
 
 import Zoom from '@mui/material/Zoom';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
 
 // utils
-import { formatDateTime, formatCountry, getDelayDisplay, getSpeedDisplay } from '../utils';
+import {
+  formatDateTime,
+  getCountryDisplay,
+  getDelayDisplay,
+  getFraudScoreDisplay,
+  getIpTypeDisplay,
+  getNodeUnlockSummaryDisplay,
+  getQualityStatusDisplay,
+  getResidentialDisplay,
+  getSpeedDisplay
+} from '../utils';
+import { resolveProtocolPresentationFromLink } from 'utils/protocolPresentation';
 
 // components
-import NodeRawInfoEditor from './NodeRawInfoEditor';
+import {
+  getNodeActionButtonSx,
+  getNodeDialogPaperSx,
+  getNodeIconButtonSx,
+  getNodeStatusMetricSx,
+  getNodeTagChipSx,
+  getNodeThemeTokens
+} from '../nodeTheme';
 
 /**
  * 解析节点协议类型
  * 支持使用后端协议元数据或本地映射
  */
 const getProtocolInfo = (link, protocolMeta) => {
-  if (!link) return { name: '未知', color: '#9e9e9e', icon: <FilterVintageIcon /> };
+  const presentation = resolveProtocolPresentationFromLink(link, protocolMeta);
 
-  // 如果有后端协议元数据，优先使用
-  if (protocolMeta && protocolMeta.length > 0) {
-    const linkLower = link.toLowerCase();
-    for (const proto of protocolMeta) {
-      if (linkLower.startsWith(proto.name + '://') || (proto.name === 'hysteria2' && linkLower.startsWith('hy2://'))) {
-        return {
-          name: proto.label,
-          color: proto.color || '#616161',
-          icon: proto.icon || proto.label.charAt(0).toUpperCase()
-        };
-      }
-    }
+  if (!link) {
+    return { name: presentation.label, color: presentation.color, icon: <FilterVintageIcon /> };
   }
 
-  // 后备的本地映射
-  const protocolMap = {
-    'vmess://': { name: 'VMess', color: '#1976d2', icon: 'V' },
-    'vless://': { name: 'VLESS', color: '#7b1fa2', icon: 'V' },
-    'trojan://': { name: 'Trojan', color: '#d32f2f', icon: 'T' },
-    'ss://': { name: 'Shadowsocks', color: '#2e7d32', icon: 'S' },
-    'ssr://': { name: 'ShadowsocksR', color: '#e64a19', icon: 'R' },
-    'hysteria://': { name: 'Hysteria', color: '#f9a825', icon: 'H' },
-    'hysteria2://': { name: 'Hysteria2', color: '#ef6c00', icon: 'H' },
-    'hy2://': { name: 'Hysteria2', color: '#ef6c00', icon: 'H' },
-    'tuic://': { name: 'TUIC', color: '#0277bd', icon: 'T' },
-    'wireguard://': { name: 'WireGuard', color: '#455a64', icon: 'W' },
-    'wg://': { name: 'WireGuard', color: '#455a64', icon: 'W' },
-    'naive://': { name: 'Naive', color: '#5d4037', icon: 'N' },
-    'reality://': { name: 'Reality', color: '#c2185b', icon: 'R' },
-    'socks5://': { name: 'Socks5', color: '#116ea4ff', icon: 'S' },
-    'socks://': { name: 'Socks', color: '#dd4984ff', icon: 'S' },
-    'anytls://': { name: 'AnyTLS', color: '#20a84c', icon: 'A' }
-  };
-
-  const linkLower = link.toLowerCase();
-  for (const [prefix, info] of Object.entries(protocolMap)) {
-    if (linkLower.startsWith(prefix)) {
-      return info;
-    }
+  if (!presentation.value) {
+    return { name: presentation.label, color: presentation.color, icon: <VpnLockIcon /> };
   }
-  return { name: '其他', color: '#616161', icon: <VpnLockIcon /> };
-};
-
-/**
- * 获取状态相关样式配置
- * 增强红黄区分度，避免使用难以辨识的浅色
- */
-const getStatusStyles = (theme, colorName) => {
-  const mode = theme.palette.mode;
-
-  // 定义高对比度颜色
-  const colors = {
-    warning: mode === 'dark' ? '#c69800ff' : '#d19a04ff', // 深橙色用于浅色模式，确保不像红色
-    error: mode === 'dark' ? '#ef5350' : '#d32f2f', // 鲜艳红
-    success: mode === 'dark' ? '#66bb6a' : '#2e7d32', // 深绿
-    info: mode === 'dark' ? '#4fc3f7' : '#0277bd', // 深蓝
-    default: theme.palette.text.secondary
-  };
-
-  // 映射 colorName 到具体颜色
-  let mainColor = colors.default;
-  if (colorName === 'warning' || colorName === 'yellow') mainColor = colors.warning;
-  else if (colorName === 'error') mainColor = colors.error;
-  else if (colorName === 'success') mainColor = colors.success;
-  else if (colorName === 'info') mainColor = colors.info;
 
   return {
-    color: mainColor,
-    bg: alpha(mainColor, 0.1),
-    border: alpha(mainColor, 0.3)
+    name: presentation.label,
+    color: presentation.color,
+    icon: presentation.icon
   };
 };
 
@@ -211,20 +168,34 @@ export default function NodeDetailsPanel({
   onDelete,
   onIPClick,
   onNodeUpdate,
-  showMessage
+  showMessage,
+  onOpenRawProtocol
 }) {
+  const { t } = useTranslation();
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
-  const [rawInfoExpanded, setRawInfoExpanded] = useState(false);
+  const { isDark } = useResolvedColorScheme();
+  const tokens = getNodeThemeTokens(theme, isDark);
 
   if (!node) return null;
 
   const delayDisplay = getDelayDisplay(node.DelayTime, node.DelayStatus);
   const speedDisplay = getSpeedDisplay(node.Speed, node.SpeedStatus);
+  const countryDisplay = getCountryDisplay(node.LinkCountry, { unknownLabel: t('common.unknown') });
   const protocolInfo = getProtocolInfo(node.Link, protocolMeta);
+  const ipTypeDisplay = getIpTypeDisplay(node.IsBroadcast, node.QualityStatus, node.QualityFamily);
+  const residentialDisplay = getResidentialDisplay(node.IsResidential, node.QualityStatus, node.QualityFamily);
+  const fraudScoreDisplay = getFraudScoreDisplay(node.FraudScore, node.QualityStatus, node.QualityFamily);
+  const qualityStatusDisplay = getQualityStatusDisplay(node.QualityStatus, node.QualityFamily);
+  const unlockDisplay = getNodeUnlockSummaryDisplay(node, { limit: 99 });
+  const effectiveName = node.EffectiveName || node.Name || node.LinkName;
+  const usesRemarkName = (node.NameMode || 'link') === 'remark';
+  const nameModeHint = usesRemarkName && node.LinkName ? t('nodes.details.nameHints.original', { name: node.LinkName }) : '';
+  const remarkHint =
+    !usesRemarkName && node.Name && node.Name !== effectiveName ? t('nodes.details.nameHints.remark', { name: node.Name }) : '';
 
-  const delayStyles = getStatusStyles(theme, delayDisplay.color);
-  const speedStyles = getStatusStyles(theme, speedDisplay.color);
+  const delayStyles = getNodeStatusMetricSx(tokens, delayDisplay.color);
+  const speedStyles = getNodeStatusMetricSx(tokens, speedDisplay.color);
 
   // Common content to be reused in both Dialog and Drawer
   const NodeContent = (
@@ -233,18 +204,30 @@ export default function NodeDetailsPanel({
       <Box
         sx={{
           position: 'relative',
-          background: `linear-gradient(135deg, ${alpha(protocolInfo.color, 0.08)} 0%, ${theme.palette.background.paper} 100%)`,
+          bgcolor: tokens.mutedPanelSurface,
           pb: 3,
           pt: isMobile ? 2 : 3,
           px: 3,
           borderBottom: '1px solid',
-          borderColor: 'divider',
-          flexShrink: 0 // Prevent shrinking
+          borderColor: tokens.panelBorder,
+          flexShrink: 0,
+          '&::after': {
+            content: '""',
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            top: 0,
+            height: 3,
+            bgcolor: protocolInfo.color
+          }
         }}
       >
         {/* 关闭按钮 (Only needed if not using DialogTitle/Actions standard close in mobile or custom layout) */}
         {!isMobile && (
-          <IconButton onClick={onClose} sx={{ position: 'absolute', right: 16, top: 16, color: 'text.secondary' }}>
+          <IconButton
+            onClick={onClose}
+            sx={{ position: 'absolute', right: 16, top: 16, ...getNodeIconButtonSx(theme, tokens, tokens.palette.text.secondary) }}
+          >
             <CloseIcon />
           </IconButton>
         )}
@@ -272,11 +255,11 @@ export default function NodeDetailsPanel({
                 width: 80,
                 height: 80,
                 bgcolor: protocolInfo.color,
-                color: '#fff',
+                color: theme.palette.common.white,
                 fontSize: 36,
                 fontWeight: 'bold',
                 boxShadow: `0 8px 24px ${alpha(protocolInfo.color, 0.25)}`,
-                border: `4px solid ${theme.palette.background.paper}`
+                border: `4px solid ${tokens.dialogSurface}`
               }}
             >
               {protocolInfo.icon}
@@ -290,7 +273,7 @@ export default function NodeDetailsPanel({
                 bottom: -10,
                 left: '50%',
                 transform: 'translateX(-50%)',
-                bgcolor: 'background.paper',
+                bgcolor: tokens.elevatedSurface,
                 color: protocolInfo.color,
                 fontWeight: 700,
                 fontSize: 11,
@@ -310,7 +293,12 @@ export default function NodeDetailsPanel({
           </Box>
 
           <Typography variant="h5" fontWeight="800" sx={{ mt: 2, mb: 0.5, lineHeight: 1.3, wordBreak: 'break-word' }}>
-            {node.Name}
+            {effectiveName}
+          </Typography>
+
+          <Typography variant="caption" sx={{ color: tokens.secondaryText, display: 'block', mb: 0.75 }}>
+            {usesRemarkName ? t('nodes.details.currentRemarkName') : t('nodes.details.currentOriginalName')}
+            {nameModeHint || remarkHint}
           </Typography>
 
           {node.Group && (
@@ -320,7 +308,7 @@ export default function NodeDetailsPanel({
               variant="outlined"
               sx={{
                 color: 'text.secondary',
-                borderColor: 'divider',
+                borderColor: tokens.softBorder,
                 height: 20,
                 fontSize: 11,
                 fontWeight: 500
@@ -344,7 +332,7 @@ export default function NodeDetailsPanel({
               }}
             >
               <Typography variant="caption" fontWeight={600} sx={{ color: delayStyles.color, opacity: 0.9, display: 'block', mb: 0.5 }}>
-                延迟
+                {t('nodes.details.metrics.delay')}
               </Typography>
               <Typography variant="h5" fontWeight="800" sx={{ color: delayStyles.color }}>
                 {node.DelayTime > 0 ? node.DelayTime : '-'}
@@ -373,7 +361,7 @@ export default function NodeDetailsPanel({
               }}
             >
               <Typography variant="caption" fontWeight={600} sx={{ color: speedStyles.color, opacity: 0.9, display: 'block', mb: 0.5 }}>
-                速度
+                {t('nodes.details.metrics.speed')}
               </Typography>
               <Typography variant="h5" fontWeight="800" sx={{ color: speedStyles.color }}>
                 {node.Speed > 0 ? node.Speed.toFixed(1) : '-'}
@@ -392,7 +380,7 @@ export default function NodeDetailsPanel({
       </Box>
 
       {/* 滚动详情区域 */}
-      <Box sx={{ flex: 1, overflowY: 'auto', px: 3, py: 2 }}>
+      <Box sx={{ flex: 1, overflowY: 'auto', px: 3, py: 2, bgcolor: tokens.dialogSurface }}>
         <List disablePadding sx={{ mb: 3 }}>
           <ListItem disablePadding sx={{ py: 1.5, borderBottom: '1px dashed', borderColor: 'divider', display: 'block' }}>
             <Stack direction="row" alignItems="flex-start" spacing={2} width="100%">
@@ -413,22 +401,31 @@ export default function NodeDetailsPanel({
               </Box>
               <Box sx={{ flex: 1 }}>
                 <Typography variant="caption" color="text.secondary" display="block" mb={0.5}>
-                  原始名称
+                  {t('nodes.details.nameSettings.title')}
                 </Typography>
-                <Typography variant="body2" sx={{ wordBreak: 'break-word', fontWeight: 500 }}>
-                  {node.LinkName || '-'}
-                </Typography>
-                {node.LinkName === node.Name && (
-                  <Typography variant="caption" color="text.secondary" display="block" mt={0.3} sx={{ fontSize: 11 }}>
-                    名称与订阅一致
+                <Stack spacing={0.4}>
+                  <Typography variant="body2" sx={{ wordBreak: 'break-word', fontWeight: 600 }}>
+                    {t('nodes.details.nameSettings.effectiveName', { name: effectiveName || '-' })}
                   </Typography>
-                )}
+                  <Typography variant="caption" color="text.secondary" display="block" sx={{ fontSize: 11, wordBreak: 'break-word' }}>
+                    {t('nodes.details.nameSettings.originalName', { name: node.LinkName || '-' })}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" display="block" sx={{ fontSize: 11, wordBreak: 'break-word' }}>
+                    {t('nodes.details.nameSettings.remarkName', { name: node.Name || '-' })}
+                  </Typography>
+                </Stack>
               </Box>
             </Stack>
           </ListItem>
 
-          <DetailItem icon={<SourceIcon fontSize="small" />} label="来源" value={node.Source === 'manual' ? '手动添加' : node.Source} />
-          {node.DialerProxyName && <DetailItem icon={<LinkIcon fontSize="small" />} label="前置代理" value={node.DialerProxyName} />}
+          <DetailItem
+            icon={<SourceIcon fontSize="small" />}
+            label={t('nodes.details.labels.source')}
+            value={node.Source === 'manual' ? t('nodes.details.values.manualAdd') : node.Source}
+          />
+          {node.DialerProxyName && (
+            <DetailItem icon={<LinkIcon fontSize="small" />} label={t('nodes.details.labels.dialerProxy')} value={node.DialerProxyName} />
+          )}
 
           {node.Tags && (
             <ListItem disablePadding sx={{ py: 1.5, borderBottom: '1px dashed', borderColor: 'divider', display: 'block' }}>
@@ -448,9 +445,9 @@ export default function NodeDetailsPanel({
                 >
                   <FolderIcon fontSize="small" />
                 </Box>
-                <Box sx={{ flex: 1 }}>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Typography variant="caption" color="text.secondary" display="block" mb={0.8}>
-                    标签
+                    {t('nodes.details.labels.tags')}
                   </Typography>
                   <Stack direction="row" flexWrap="wrap" gap={0.8}>
                     {node.Tags.split(',')
@@ -461,13 +458,9 @@ export default function NodeDetailsPanel({
                           label={tag.trim()}
                           size="small"
                           sx={{
-                            bgcolor: tagColorMap?.[tag.trim()] || theme.palette.action.selected,
-                            color: tagColorMap?.[tag.trim()] ? '#fff' : 'text.primary',
                             fontSize: 11,
                             height: 24,
-                            border: 'none',
-                            fontWeight: 600,
-                            borderRadius: 1.5
+                            ...getNodeTagChipSx(theme, tokens, tagColorMap?.[tag.trim()] || theme.palette.primary.main)
                           }}
                         />
                       ))}
@@ -478,66 +471,112 @@ export default function NodeDetailsPanel({
           )}
         </List>
 
-        {/* 原始协议信息区域 */}
-        <Accordion
-          expanded={rawInfoExpanded}
-          onChange={() => setRawInfoExpanded(!rawInfoExpanded)}
-          disableGutters
-          elevation={0}
-          sx={{
-            bgcolor: 'transparent',
-            '&:before': { display: 'none' },
-            border: '1px solid',
-            borderColor: 'divider',
-            borderRadius: 3,
-            mb: 3,
-            overflow: 'hidden'
-          }}
-        >
-          <AccordionSummary
-            expandIcon={<ExpandMoreIcon />}
-            sx={{
-              minHeight: 48,
-              '& .MuiAccordionSummary-content': { my: 1 }
-            }}
-          >
-            <Stack direction="row" alignItems="center" spacing={1}>
-              <CodeIcon fontSize="small" color="primary" />
-              <Typography variant="subtitle2" fontWeight={600}>
-                原始协议信息
-              </Typography>
-            </Stack>
-          </AccordionSummary>
-          <AccordionDetails sx={{ pt: 0 }}>
-            <NodeRawInfoEditor node={node} protocolMeta={protocolMeta} onUpdate={onNodeUpdate} showMessage={showMessage} />
-          </AccordionDetails>
-        </Accordion>
-
-        <Typography
-          variant="subtitle2"
-          color="text.secondary"
-          fontWeight={700}
-          sx={{ mb: 1, fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}
-        >
-          网络与状态
-        </Typography>
-        <List disablePadding sx={{ mb: 3 }}>
-          <DetailItem
-            icon={<PublicIcon fontSize="small" />}
-            label="国家/地区"
-            value={node.LinkCountry ? formatCountry(node.LinkCountry) : '-'}
-          />
+        <List disablePadding sx={{ mt: 1, mb: 3 }}>
+          <DetailItem icon={<PublicIcon fontSize="small" />} label={t('nodes.details.labels.countryRegion')} value={countryDisplay.text} />
           {node.LandingIP && (
             <DetailItem
               icon={<RouterIcon fontSize="small" />}
-              label="落地 IP"
+              label={t('nodes.details.labels.landingIP')}
               value={node.LandingIP}
               isLink
               onClick={() => onIPClick && onIPClick(node.LandingIP)}
-              secondary="点击查看 IP 详细信息"
+              secondary={t('nodes.details.viewIpDetails')}
             />
           )}
-          <DetailItem icon={<AccessTimeIcon fontSize="small" />} label="更新时间" value={formatDateTime(node.UpdatedAt)} noBorder />
+          <DetailItem icon={<PublicIcon fontSize="small" />} label={t('nodes.details.labels.ipType')} value={ipTypeDisplay.label} />
+          <DetailItem
+            icon={<PublicIcon fontSize="small" />}
+            label={t('nodes.details.labels.residential')}
+            value={residentialDisplay.label}
+          />
+          <DetailItem
+            icon={<PublicIcon fontSize="small" />}
+            label={t('nodes.details.labels.qualityStatus')}
+            value={qualityStatusDisplay.label}
+          />
+          <DetailItem
+            icon={<PublicIcon fontSize="small" />}
+            label={t('nodes.details.labels.fraudScore')}
+            value={fraudScoreDisplay.detailLabel || fraudScoreDisplay.label}
+          />
+          {unlockDisplay && (
+            <ListItem disablePadding sx={{ py: 1.5, borderBottom: '1px dashed', borderColor: 'divider', display: 'block' }}>
+              <Stack direction="row" alignItems="flex-start" spacing={2} width="100%">
+                <Box
+                  sx={{
+                    minWidth: 36,
+                    height: 36,
+                    borderRadius: 12,
+                    bgcolor: (theme) => alpha(theme.palette.info.main, 0.1),
+                    color: 'info.main',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    mt: 0.5
+                  }}
+                >
+                  <LockOpenIcon fontSize="small" />
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Typography variant="caption" color="text.secondary" display="block" mb={0.8}>
+                    {t('nodes.details.unlockCheck')}
+                  </Typography>
+                  {unlockDisplay.items.length > 0 ? (
+                    <Stack spacing={1}>
+                      <Stack direction="row" flexWrap="wrap" gap={0.8} useFlexGap>
+                        {unlockDisplay.items.map((item) => (
+                          <Chip
+                            key={`unlock-detail-${item.provider}`}
+                            label={`${item.providerLabel} · ${item.statusLabel}${item.region ? ` · ${item.region}` : ''}`}
+                            size="small"
+                            color={item.color}
+                            variant={item.variant}
+                            sx={{ fontSize: 11, height: 24, borderRadius: 1.5 }}
+                          />
+                        ))}
+                      </Stack>
+                      <Stack spacing={0.8}>
+                        {unlockDisplay.items
+                          .filter((item) => item.reason || item.detail)
+                          .map((item) => (
+                            <Typography
+                              key={`unlock-reason-${item.provider}`}
+                              variant="caption"
+                              color="text.secondary"
+                              display="block"
+                              sx={{
+                                lineHeight: 1.7,
+                                whiteSpace: 'pre-wrap',
+                                wordBreak: 'break-word',
+                                overflowWrap: 'anywhere'
+                              }}
+                            >
+                              <Box component="span" sx={{ color: 'text.primary', fontWeight: 700 }}>
+                                {item.providerLabel}：
+                              </Box>
+                              {[item.reason, item.detail].filter(Boolean).join(' · ')}
+                            </Typography>
+                          ))}
+                      </Stack>
+                      <Typography variant="caption" color="text.secondary">
+                        {t('nodes.details.recentCheck', { time: formatDateTime(unlockDisplay.checkedAt) })}
+                      </Typography>
+                    </Stack>
+                  ) : (
+                    <Typography variant="body2" color="text.disabled">
+                      {t('nodes.details.noUnlockResults')}
+                    </Typography>
+                  )}
+                </Box>
+              </Stack>
+            </ListItem>
+          )}
+          <DetailItem
+            icon={<AccessTimeIcon fontSize="small" />}
+            label={t('nodes.details.labels.updatedAt')}
+            value={formatDateTime(node.UpdatedAt)}
+            noBorder
+          />
         </List>
       </Box>
     </>
@@ -549,9 +588,9 @@ export default function NodeDetailsPanel({
       sx={{
         p: 2,
         pb: isMobile ? 3 : 2, // Extra padding for bottom safe area on mobile
-        bgcolor: 'background.paper',
+        bgcolor: tokens.mutedPanelSurface,
         borderTop: '1px solid',
-        borderColor: 'divider',
+        borderColor: tokens.panelBorder,
         display: 'flex',
         alignItems: 'center',
         gap: 1.5,
@@ -568,35 +607,51 @@ export default function NodeDetailsPanel({
         }}
         fullWidth
         sx={{
+          ...getNodeActionButtonSx(theme, tokens, tokens.palette.primary.main, { variant: 'solid' }),
           borderRadius: 3,
           height: 48,
           fontWeight: 700,
           fontSize: 15,
-          boxShadow: theme.shadows[4],
           textTransform: 'none'
         }}
       >
-        立即检测
+        {t('nodes.details.actions.runNow')}
       </Button>
 
       <Stack direction="row" spacing={1}>
-        <Tooltip title="复制链接">
+        <Tooltip title={t('nodes.details.actions.copyLink')}>
           <IconButton
             onClick={() => onCopy(node.Link)}
             color="primary"
             sx={{
-              border: '1px solid',
-              borderColor: 'divider',
               borderRadius: 3,
               width: 48,
-              height: 48
+              height: 48,
+              ...getNodeIconButtonSx(theme, tokens, tokens.palette.primary.main)
             }}
           >
             <ContentCopyIcon fontSize="small" />
           </IconButton>
         </Tooltip>
 
-        <Tooltip title="编辑">
+        <Tooltip title={t('nodes.details.actions.editProtocol')}>
+          <IconButton
+            onClick={() => {
+              onOpenRawProtocol?.(node);
+            }}
+            color="warning"
+            sx={{
+              borderRadius: 3,
+              width: 48,
+              height: 48,
+              ...getNodeIconButtonSx(theme, tokens, tokens.palette.warning.main)
+            }}
+          >
+            <TuneIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+
+        <Tooltip title={t('nodes.details.actions.edit')}>
           <IconButton
             onClick={() => {
               onEdit(node);
@@ -604,18 +659,17 @@ export default function NodeDetailsPanel({
             }}
             color="info"
             sx={{
-              border: '1px solid',
-              borderColor: 'divider',
               borderRadius: 3,
               width: 48,
-              height: 48
+              height: 48,
+              ...getNodeIconButtonSx(theme, tokens, tokens.palette.info.main)
             }}
           >
             <EditIcon fontSize="small" />
           </IconButton>
         </Tooltip>
 
-        <Tooltip title="删除">
+        <Tooltip title={t('nodes.details.actions.delete')}>
           <IconButton
             onClick={() => {
               onDelete(node);
@@ -623,11 +677,10 @@ export default function NodeDetailsPanel({
             }}
             color="error"
             sx={{
-              border: '1px solid',
-              borderColor: 'divider',
               borderRadius: 3,
               width: 48,
-              height: 48
+              height: 48,
+              ...getNodeIconButtonSx(theme, tokens, tokens.palette.error.main)
             }}
           >
             <DeleteIcon fontSize="small" />
@@ -651,7 +704,11 @@ export default function NodeDetailsPanel({
               maxHeight: '85vh',
               overflow: 'hidden', // Let children scroll
               display: 'flex',
-              flexDirection: 'column'
+              flexDirection: 'column',
+              bgcolor: tokens.dialogSurface,
+              backgroundImage: tokens.dialogSurfaceGradient,
+              borderTop: '1px solid',
+              borderColor: tokens.panelBorder
             }
           }}
         >
@@ -667,10 +724,8 @@ export default function NodeDetailsPanel({
           TransitionComponent={Zoom}
           PaperProps={{
             sx: {
+              ...getNodeDialogPaperSx(theme, tokens, protocolInfo.color || tokens.palette.primary.main),
               borderRadius: 4,
-              overflow: 'hidden',
-              bgcolor: 'background.paper',
-              backgroundImage: 'none',
               display: 'flex',
               flexDirection: 'column',
               maxHeight: 'calc(100% - 64px)'
@@ -697,5 +752,6 @@ NodeDetailsPanel.propTypes = {
   onDelete: PropTypes.func.isRequired,
   onIPClick: PropTypes.func,
   onNodeUpdate: PropTypes.func, // 节点更新后的回调
-  showMessage: PropTypes.func // 消息提示函数
+  showMessage: PropTypes.func, // 消息提示函数
+  onOpenRawProtocol: PropTypes.func // 打开原始协议对话框
 };

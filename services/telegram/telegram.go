@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sublink/models"
+	"sublink/services/notifications"
 	"sublink/utils"
 	"sync"
 	"time"
@@ -44,13 +45,13 @@ type Config struct {
 	ChatID    int64
 	UseProxy  bool
 	ProxyLink string
+	EventKeys []string
 }
 
 // 全局机器人实例
 var (
 	globalBot *TelegramBot
 	botMutex  sync.RWMutex
-	botOnce   sync.Once
 )
 
 // GetBot 获取全局机器人实例
@@ -115,6 +116,10 @@ func LoadConfig() (*Config, error) {
 	chatIDStr, _ := models.GetSetting("telegram_chat_id")
 	useProxy, _ := models.GetSetting("telegram_use_proxy")
 	proxyLink, _ := models.GetSetting("telegram_proxy_link")
+	eventKeys, err := notifications.LoadTelegramEventKeys()
+	if err != nil {
+		return nil, err
+	}
 
 	var chatID int64
 	if chatIDStr != "" {
@@ -127,6 +132,7 @@ func LoadConfig() (*Config, error) {
 		ChatID:    chatID,
 		UseProxy:  useProxy == "true",
 		ProxyLink: proxyLink,
+		EventKeys: eventKeys,
 	}, nil
 }
 
@@ -154,6 +160,9 @@ func SaveConfig(config *Config) error {
 		return err
 	}
 	if err := models.SetSetting("telegram_proxy_link", config.ProxyLink); err != nil {
+		return err
+	}
+	if err := notifications.SaveTelegramEventKeys(config.EventKeys); err != nil {
 		return err
 	}
 
@@ -245,7 +254,7 @@ func (b *TelegramBot) validateToken() error {
 	}
 
 	if !result.OK {
-		return fmt.Errorf("Token 无效")
+		return fmt.Errorf("token 无效")
 	}
 
 	utils.Info("Telegram 机器人验证成功: @%s", result.Result.Username)
@@ -272,7 +281,7 @@ func (b *TelegramBot) SetCommands() error {
 		{"command": "airports", "description": "✈️ 机场管理"},
 	}
 
-	_, err := b.apiRequest("setMyCommands", map[string]interface{}{
+	_, err := b.apiRequest("setMyCommands", map[string]any{
 		"commands": commands,
 	})
 
@@ -368,7 +377,7 @@ func (b *TelegramBot) startPolling() {
 
 // getUpdates 获取更新（长轮询）
 func (b *TelegramBot) getUpdates() ([]Update, error) {
-	params := map[string]interface{}{
+	params := map[string]any{
 		"offset":  b.updateOffset,
 		"timeout": 30,
 	}
@@ -430,7 +439,7 @@ func (b *TelegramBot) handleMessage(message *Message) {
 	// 如果 Chat ID 未配置，自动绑定第一个发送 /start 的用户
 	if b.ChatID == 0 && strings.HasPrefix(message.Text, "/start") {
 		b.ChatID = message.Chat.ID
-		models.SetSetting("telegram_chat_id", strconv.FormatInt(message.Chat.ID, 10))
+		_ = models.SetSetting("telegram_chat_id", strconv.FormatInt(message.Chat.ID, 10))
 		utils.Info("[Telegram] 自动绑定 Chat ID: %d", message.Chat.ID)
 	}
 
@@ -447,13 +456,13 @@ func (b *TelegramBot) handleMessage(message *Message) {
 			utils.Debug("[Telegram] 找到处理器: %s", handler.Description())
 			if err := handler.Handle(b, message); err != nil {
 				utils.Warn("[Telegram] 处理命令 /%s 失败: %v", command, err)
-				b.SendMessage(message.Chat.ID, "❌ 命令执行失败: "+err.Error(), "")
+				_ = b.SendMessage(message.Chat.ID, "❌ 命令执行失败: "+err.Error(), "")
 			} else {
 				utils.Debug("[Telegram] 命令 /%s 执行成功", command)
 			}
 		} else {
 			utils.Debug("[Telegram] 未找到命令处理器: /%s", command)
-			b.SendMessage(message.Chat.ID, "❓ 未知命令，使用 /help 查看帮助", "")
+			_ = b.SendMessage(message.Chat.ID, "❓ 未知命令，使用 /help 查看帮助", "")
 		}
 	}
 }
@@ -470,11 +479,11 @@ func (b *TelegramBot) handleCallback(callback *CallbackQuery) {
 	}
 
 	// 应答回调
-	b.answerCallback(callback.ID, "")
+	_ = b.answerCallback(callback.ID, "")
 }
 
 // apiRequest 发送 API 请求
-func (b *TelegramBot) apiRequest(method string, params map[string]interface{}) ([]byte, error) {
+func (b *TelegramBot) apiRequest(method string, params map[string]any) ([]byte, error) {
 	url := TelegramAPIBase + b.Token + "/" + method
 
 	var req *http.Request
@@ -501,7 +510,7 @@ func (b *TelegramBot) apiRequest(method string, params map[string]interface{}) (
 	if err != nil {
 		return nil, fmt.Errorf("请求失败: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -513,7 +522,7 @@ func (b *TelegramBot) apiRequest(method string, params map[string]interface{}) (
 
 // SendMessage 发送消息
 func (b *TelegramBot) SendMessage(chatID int64, text string, parseMode string) error {
-	params := map[string]interface{}{
+	params := map[string]any{
 		"chat_id": chatID,
 		"text":    text,
 	}
@@ -528,10 +537,10 @@ func (b *TelegramBot) SendMessage(chatID int64, text string, parseMode string) e
 
 // SendMessageWithKeyboard 发送带键盘的消息
 func (b *TelegramBot) SendMessageWithKeyboard(chatID int64, text string, parseMode string, keyboard [][]InlineKeyboardButton) error {
-	params := map[string]interface{}{
+	params := map[string]any{
 		"chat_id": chatID,
 		"text":    text,
-		"reply_markup": map[string]interface{}{
+		"reply_markup": map[string]any{
 			"inline_keyboard": keyboard,
 		},
 	}
@@ -546,7 +555,7 @@ func (b *TelegramBot) SendMessageWithKeyboard(chatID int64, text string, parseMo
 
 // EditMessage 编辑消息
 func (b *TelegramBot) EditMessage(chatID int64, messageID int, text string, parseMode string, keyboard [][]InlineKeyboardButton) error {
-	params := map[string]interface{}{
+	params := map[string]any{
 		"chat_id":    chatID,
 		"message_id": messageID,
 		"text":       text,
@@ -557,7 +566,7 @@ func (b *TelegramBot) EditMessage(chatID int64, messageID int, text string, pars
 	}
 
 	if keyboard != nil {
-		params["reply_markup"] = map[string]interface{}{
+		params["reply_markup"] = map[string]any{
 			"inline_keyboard": keyboard,
 		}
 	}
@@ -568,7 +577,7 @@ func (b *TelegramBot) EditMessage(chatID int64, messageID int, text string, pars
 
 // answerCallback 应答回调查询
 func (b *TelegramBot) answerCallback(callbackID string, text string) error {
-	params := map[string]interface{}{
+	params := map[string]any{
 		"callback_query_id": callbackID,
 	}
 	if text != "" {
@@ -580,10 +589,10 @@ func (b *TelegramBot) answerCallback(callbackID string, text string) error {
 }
 
 // GetStatus 获取机器人状态
-func GetStatus() map[string]interface{} {
+func GetStatus() map[string]any {
 	bot := GetBot()
 	if bot == nil {
-		return map[string]interface{}{
+		return map[string]any{
 			"enabled":     false,
 			"connected":   false,
 			"error":       "",
@@ -597,7 +606,7 @@ func GetStatus() map[string]interface{} {
 	botID := bot.botID
 	bot.mutex.RUnlock()
 
-	return map[string]interface{}{
+	return map[string]any{
 		"enabled":     true,
 		"connected":   bot.IsConnected(),
 		"error":       bot.GetLastError(),

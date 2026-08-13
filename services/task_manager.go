@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sublink/models"
+	"sublink/services/notifications"
 	"sublink/services/sse"
 	"sublink/utils"
 	"sync"
@@ -65,8 +66,12 @@ func (tm *TaskManager) CreateTask(taskType models.TaskType, name string, trigger
 		return nil, nil, err
 	}
 
-	// 创建可取消的 context
-	ctx, cancel := context.WithCancel(context.Background())
+	// 所有任务统一使用 24 小时超时（全局最大时长）
+	// 实际的超时控制由僵尸任务检测器根据任务类型细分管理
+	timeout := 24 * time.Hour
+
+	// 创建带超时的可取消 context
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
 	// 注册到运行中任务
 	tm.runningTasks[task.ID] = &RunningTask{
@@ -79,7 +84,7 @@ func (tm *TaskManager) CreateTask(taskType models.TaskType, name string, trigger
 	// 广播任务开始
 	tm.broadcastProgress(task, "started")
 
-	utils.Info("任务创建成功: ID=%s, Type=%s, Name=%s, Trigger=%s", task.ID, task.Type, task.Name, task.Trigger)
+	utils.Info("任务创建成功: ID=%s, Type=%s, Name=%s, Trigger=%s, Timeout=%v", task.ID, task.Type, task.Name, task.Trigger, timeout)
 
 	return task, ctx, nil
 }
@@ -87,7 +92,7 @@ func (tm *TaskManager) CreateTask(taskType models.TaskType, name string, trigger
 // UpdateProgress 更新任务进度
 // 仅更新内存状态并通过 SSE 广播，不写入数据库
 // 数据库同步延迟到任务结束时统一处理
-func (tm *TaskManager) UpdateProgress(taskID string, progress int, currentItem string, result interface{}) error {
+func (tm *TaskManager) UpdateProgress(taskID string, progress int, currentItem string, result any) error {
 	tm.mutex.Lock()
 	defer tm.mutex.Unlock()
 
@@ -127,7 +132,7 @@ func (tm *TaskManager) UpdateTotal(taskID string, total int) error {
 }
 
 // CompleteTask 完成任务
-func (tm *TaskManager) CompleteTask(taskID string, message string, result interface{}) error {
+func (tm *TaskManager) CompleteTask(taskID string, message string, result any) error {
 	tm.mutex.Lock()
 	defer tm.mutex.Unlock()
 
@@ -140,8 +145,7 @@ func (tm *TaskManager) CompleteTask(taskID string, message string, result interf
 	running.Task.Status = models.TaskStatusCompleted
 	running.Task.Message = message
 	running.Task.Progress = running.Task.Total
-	now := time.Now()
-	running.Task.CompletedAt = &now
+	running.Task.CompletedAt = new(time.Now())
 
 	// 设置结果
 	if result != nil {
@@ -190,8 +194,7 @@ func (tm *TaskManager) FailTask(taskID string, errMsg string) error {
 	// 更新状态
 	running.Task.Status = models.TaskStatusError
 	running.Task.Message = errMsg
-	now := time.Now()
-	running.Task.CompletedAt = &now
+	running.Task.CompletedAt = new(time.Now())
 
 	// 同步最终状态到数据库（任务结束时一次性写入）
 	if err := running.Task.SyncFinalStatus(); err != nil {
@@ -238,16 +241,14 @@ func (tm *TaskManager) CancelTask(taskID string) error {
 		// 更新数据库状态
 		task.Status = models.TaskStatusCancelled
 		task.Message = "用户取消"
-		now := time.Now()
-		task.CompletedAt = &now
+		task.CompletedAt = new(time.Now())
 		return task.SyncFinalStatus()
 	}
 
 	// 更新状态
 	running.Task.Status = models.TaskStatusCancelled
 	running.Task.Message = "用户取消"
-	now := time.Now()
-	running.Task.CompletedAt = &now
+	running.Task.CompletedAt = new(time.Now())
 
 	// 同步最终状态到数据库（任务结束时一次性写入）
 	if err := running.Task.SyncFinalStatus(); err != nil {
@@ -346,7 +347,7 @@ func (tm *TaskManager) broadcastProgress(task *models.Task, status string) {
 }
 
 // broadcastProgressWithResult 广播任务进度到 SSE（带结果）
-func (tm *TaskManager) broadcastProgressWithResult(task *models.Task, status string, result interface{}) {
+func (tm *TaskManager) broadcastProgressWithResult(task *models.Task, status string, result any) {
 	startTimeMs := int64(0)
 	if task.StartedAt != nil {
 		startTimeMs = task.StartedAt.UnixMilli()
@@ -367,9 +368,8 @@ func (tm *TaskManager) broadcastProgressWithResult(task *models.Task, status str
 }
 
 // BroadcastEvent 广播任务事件（用于完成通知等）
-func (tm *TaskManager) BroadcastEvent(task *models.Task, eventType string, data map[string]interface{}) {
-	sse.GetSSEBroker().BroadcastEvent("task_update", sse.NotificationPayload{
-		Event:   eventType,
+func (tm *TaskManager) BroadcastEvent(task *models.Task, eventType string, data map[string]any) {
+	notifications.Publish(eventType, notifications.Payload{
 		Title:   fmt.Sprintf("%s - %s", task.Name, getTaskStatusTitle(task.Status)),
 		Message: task.Message,
 		Data:    data,
@@ -414,7 +414,65 @@ func InitTaskManager() {
 		}
 	}()
 
+	// 启动僵尸任务检测器
+	go tm.startZombieTaskDetector()
+
 	_ = tm // 确保初始化
+}
+
+// startZombieTaskDetector 启动僵尸任务检测器
+func (tm *TaskManager) startZombieTaskDetector() {
+	ticker := time.NewTicker(1 * time.Minute) // 每分钟检查一次
+	defer ticker.Stop()
+
+	utils.Info("僵尸任务检测器已启动")
+
+	for range ticker.C {
+		tm.detectAndCleanZombieTasks()
+	}
+}
+
+// detectAndCleanZombieTasks 检测并清理僵尸任务
+func (tm *TaskManager) detectAndCleanZombieTasks() {
+	tm.mutex.RLock()
+	now := time.Now()
+	var zombieTasks []struct {
+		ID       string
+		Type     models.TaskType
+		Name     string
+		Duration time.Duration
+	}
+
+	// 所有任务统一的最大运行时长：24 小时
+	maxDuration := 24 * time.Hour
+
+	for taskID, taskInfo := range tm.runningTasks {
+		// 检查任务是否超过 24 小时
+		duration := now.Sub(taskInfo.StartTime)
+		if duration > maxDuration {
+			zombieTasks = append(zombieTasks, struct {
+				ID       string
+				Type     models.TaskType
+				Name     string
+				Duration time.Duration
+			}{
+				ID:       taskID,
+				Type:     taskInfo.Task.Type,
+				Name:     taskInfo.Task.Name,
+				Duration: duration,
+			})
+		}
+	}
+	tm.mutex.RUnlock()
+
+	// 清理僵尸任务
+	for _, zombie := range zombieTasks {
+		utils.Warn("检测到僵尸任务（运行超过24小时）: ID=%s, Type=%s, Name=%s, 运行时长=%v",
+			zombie.ID, zombie.Type, zombie.Name, zombie.Duration)
+		if err := tm.FailTask(zombie.ID, "任务执行超时（超过24小时），自动标记为失败"); err != nil {
+			utils.Error("标记僵尸任务失败时出错: task_id=%s, error=%v", zombie.ID, err)
+		}
+	}
 }
 
 // CancelTask 取消任务的包装函数

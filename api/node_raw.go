@@ -2,14 +2,13 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"strconv"
-	"sublink/database"
 	"sublink/models"
 	"sublink/node/protocol"
 	"sublink/utils"
 
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 )
 
 // GetProtocolUIMeta 获取协议 UI 元数据（包含颜色、图标等）
@@ -39,8 +38,8 @@ func ParseNodeLinkAPI(c *gin.Context) {
 
 // UpdateNodeRawRequest 更新节点原始信息请求
 type UpdateNodeRawRequest struct {
-	NodeID int                    `json:"nodeId"` // 节点 ID
-	Fields map[string]interface{} `json:"fields"` // 要更新的字段
+	NodeID int            `json:"nodeId"` // 节点 ID
+	Fields map[string]any `json:"fields"` // 要更新的字段
 }
 
 // UpdateNodeRawInfo 更新节点原始信息
@@ -79,14 +78,13 @@ func UpdateNodeRawInfo(c *gin.Context) {
 		return
 	}
 
-	// 检查新 Link 是否与其他节点冲突
-	var existingNode models.Node
-	err = database.DB.Where("link = ? AND id != ?", newLink, req.NodeID).First(&existingNode).Error
-	if err == nil {
-		utils.FailWithMsg(c, "已存在相同连接的节点: "+existingNode.Name)
-		return
-	} else if err != gorm.ErrRecordNotFound {
+	conflictNode, conflict, err := models.FindNodeLinkConflict(newLink, req.NodeID)
+	if err != nil {
 		utils.FailWithMsg(c, "检查节点冲突失败")
+		return
+	}
+	if conflict {
+		utils.FailWithMsg(c, "已存在相同连接的节点: "+conflictNode.Name)
 		return
 	}
 
@@ -98,22 +96,25 @@ func UpdateNodeRawInfo(c *gin.Context) {
 	}
 
 	// 获取节点名称（不同协议名称字段不同）
-	newLinkName := getNameFromFields(newInfo.Protocol, newInfo.Fields)
+	newLinkName := protocol.ExtractNodeNameFromFields(newInfo.Protocol, newInfo.Fields)
 
 	// 更新数据库
-	updates := map[string]interface{}{
+	updates := map[string]any{
 		"link": newLink,
 	}
 	if newLinkName != "" {
 		updates["link_name"] = newLinkName
-		// 如果原始名称和显示名称一致，同步更新显示名称
-		if node.LinkName == node.Name {
+		// link 模式或历史“备注=原始名称”的节点继续同步备注；remark 模式下保留用户自定义备注。
+		if node.ShouldSyncNameFromLink() {
 			updates["name"] = newLinkName
 		}
 	}
 
-	err = database.DB.Model(&models.Node{}).Where("id = ?", req.NodeID).Updates(updates).Error
-	if err != nil {
+	if err := models.UpdateNodeFields(req.NodeID, updates); err != nil {
+		if errors.Is(err, models.ErrNodeNameExists) {
+			utils.FailWithMsg(c, "节点备注名称已存在，请换一个备注")
+			return
+		}
 		utils.FailWithMsg(c, "更新数据库失败")
 		return
 	}
@@ -126,33 +127,13 @@ func UpdateNodeRawInfo(c *gin.Context) {
 			node.Name = newLinkName
 		}
 	}
+	node.NameMode = models.NormalizeNodeNameMode(node.NameMode)
 	models.UpdateNodeCache(req.NodeID, node)
 
 	utils.OkWithData(c, gin.H{
 		"link":     newLink,
 		"linkName": newLinkName,
 	})
-}
-
-// getNameFromFields 从字段中提取节点名称
-func getNameFromFields(protocol string, fields map[string]interface{}) string {
-	// 不同协议的名称字段不同
-	switch protocol {
-	case "vmess":
-		if ps, ok := fields["Ps"].(string); ok {
-			return ps
-		}
-	case "ssr":
-		if remarks, ok := fields["Qurey.Remarks"].(string); ok {
-			return remarks
-		}
-	default:
-		// 大多数协议使用 Name 字段
-		if name, ok := fields["Name"].(string); ok {
-			return name
-		}
-	}
-	return ""
 }
 
 // GetNodeRawInfo 获取节点原始信息

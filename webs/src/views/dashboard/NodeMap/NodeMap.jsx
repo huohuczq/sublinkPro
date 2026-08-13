@@ -1,9 +1,13 @@
 import { useEffect, useRef, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import * as echarts from 'echarts';
 // import 'echarts-gl'; // 3D Not needed for flat map
-// import { useTheme } from '@mui/material/styles'; // Unused
+import { alpha, useTheme } from '@mui/material/styles';
 import { Box, Card, Typography, CircularProgress } from '@mui/material';
 import worldJson from 'assets/world.json';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
+import { withAlpha } from 'utils/colorUtils';
+import { isoToFlag } from 'utils/countryDisplay';
 import { COUNTRY_COORDINATES, COUNTRY_NAME_MAP } from './countryData';
 
 // Register standard world map
@@ -11,15 +15,7 @@ echarts.registerMap('world', worldJson);
 
 // Helper: Get Flag Emoji from Country Code
 const getFlagEmoji = (countryCode) => {
-  if (!countryCode) return '';
-  // Special case for Taiwan -> China flag as requested
-  if (countryCode.toUpperCase() === 'TW') return '🇨🇳'; // CN Flag
-
-  const codePoints = countryCode
-    .toUpperCase()
-    .split('')
-    .map((char) => 127397 + char.charCodeAt(0));
-  return String.fromCodePoint(...codePoints);
+  return isoToFlag(countryCode);
 };
 
 // Helper: Attempt to find country code by name (case insensitive)
@@ -40,9 +36,46 @@ const findCountryCode = (name) => {
 };
 
 const NodeMap = ({ data = {}, loading = false }) => {
+  const { t } = useTranslation();
   const chartRef = useRef(null);
-  // const theme = useTheme(); // Unused
+  const theme = useTheme();
+  const { isDark } = useResolvedColorScheme();
+  const palette = theme.vars?.palette || theme.palette;
   const chartInstance = useRef(null);
+  const accentColor = theme.palette.info.main;
+  const accentSoft = theme.palette.info.light;
+  const successColor = theme.palette.success.main;
+  const warningColor = theme.palette.warning.main;
+  const darkText = palette.text?.dark || theme.palette.common.white;
+  const readablePrimaryTextColor = isDark ? withAlpha(darkText, 0.94) : theme.palette.text.primary;
+  const readableSecondaryTextColor = isDark ? withAlpha(darkText, 0.78) : theme.palette.text.secondary;
+  const readableTertiaryTextColor = isDark ? withAlpha(darkText, 0.68) : alpha(theme.palette.text.primary, 0.72);
+  const cardBackground = isDark
+    ? 'radial-gradient(circle at center, rgba(17, 42, 78, 0.98) 0%, rgba(6, 18, 38, 0.99) 72%, rgba(3, 10, 24, 1) 100%)'
+    : `radial-gradient(circle at center, ${alpha(theme.palette.background.paper, 1)} 0%, ${alpha(theme.palette.background.default, 0.94)} 100%)`;
+  const overlaySurface = isDark
+    ? 'linear-gradient(180deg, rgba(10, 30, 58, 0.78) 0%, rgba(5, 18, 38, 0.84) 100%)'
+    : alpha(theme.palette.background.paper, 0.72);
+  const overlayBorderColor = isDark ? alpha('#63f2ff', 0.24) : alpha(accentColor, 0.16);
+  const overlayInsetHighlight = isDark
+    ? `0 0 0 1px ${alpha('#63f2ff', 0.08)}, inset 0 1px 0 ${alpha(theme.palette.common.white, 0.06)}`
+    : 'none';
+  const tooltipSurface = isDark ? 'rgba(8, 24, 46, 0.92)' : alpha(theme.palette.background.paper, 0.96);
+  const tooltipBorderColor = isDark ? alpha('#63f2ff', 0.36) : alpha(accentColor, 0.6);
+  const tooltipShadow = isDark ? `0 0 0 1px ${alpha('#63f2ff', 0.14)}, 0 18px 40px ${alpha('#04101f', 0.72)}` : 'none';
+  const mapAreaColor = isDark ? 'rgba(7, 28, 54, 0.94)' : alpha(theme.palette.background.paper, 0.88);
+  const mapBorderColor = isDark ? alpha('#56d9ff', 0.24) : alpha(theme.palette.divider, 0.9);
+  const mapEmphasisColor = isDark ? alpha('#31d7ff', 0.16) : alpha(theme.palette.primary.main, 0.12);
+  const chinaAreaColor = isDark ? alpha('#ffd166', 0.24) : alpha(theme.palette.warning.main, 0.14);
+  const lineTrailColor = isDark ? '#8df8ff' : theme.palette.common.white;
+  const lineStrokeColor = isDark ? '#33ddff' : accentColor;
+  const lineOpacity = isDark ? 0.62 : 0.4;
+  const titleGlow = isDark ? alpha('#63f2ff', 0.42) : alpha(accentColor, 0.3);
+  const coverageGlow = isDark ? alpha('#3ce6ff', 0.46) : alpha(accentColor, 0.4);
+  const statusDotGlow = isDark ? alpha('#63f2ff', 0.58) : alpha(successColor, 0.65);
+  const targetLabelBackground = isDark ? 'rgba(8, 20, 40, 0.78)' : alpha(theme.palette.background.default, 0.72);
+  const darkNodeColor = '#52f7ff';
+  const darkTargetColor = '#ffd166';
 
   // Reuse processLines logic if needed, but for 2D map we normally rely on the map json borders.
   // However, if we want custom glowing borders on top, we can keep using mapLines but transformed to 2D.
@@ -63,7 +96,7 @@ const NodeMap = ({ data = {}, loading = false }) => {
         name: 'CN',
         value: [...chinaCoords, 0], // Flat coords
         itemStyle: {
-          color: '#fbbf24' // Gold
+          color: warningColor
         },
         rippleEffect: {
           brushType: 'stroke',
@@ -95,7 +128,7 @@ const NodeMap = ({ data = {}, loading = false }) => {
         name: countryCode,
         value: [...coords, count, countryCode], // [lon, lat, count, code]
         itemStyle: {
-          color: '#0cecdb' // Cyan
+          color: isDark ? darkNodeColor : accentColor
         }
       });
 
@@ -104,14 +137,18 @@ const NodeMap = ({ data = {}, loading = false }) => {
         lns.push({
           coords: [coords, chinaCoords],
           lineStyle: {
-            color: '#38bdf8' // Light Blue
+            color: isDark ? darkNodeColor : accentSoft
           }
         });
       }
     });
 
-    return { points: pts, lines: lns, targetPoint: tPoint, unknownCount: unk, maxCount: max };
-  }, [data]);
+    return { points: pts, lines: lns, targetPoint: tPoint, unknownCount: unk };
+  }, [data, accentColor, accentSoft, warningColor, isDark]);
+  const coveredRegionCount = useMemo(
+    () => points.length + (Object.prototype.hasOwnProperty.call(data, 'CN') ? 1 : 0),
+    [data, points.length]
+  );
 
   useEffect(() => {
     if (!chartRef.current || loading) return;
@@ -125,14 +162,15 @@ const NodeMap = ({ data = {}, loading = false }) => {
       tooltip: {
         show: true,
         trigger: 'item',
-        backgroundColor: 'rgba(15, 23, 42, 0.95)',
-        borderColor: '#0cecdb',
+        backgroundColor: tooltipSurface,
+        borderColor: tooltipBorderColor,
         borderWidth: 1,
         textStyle: {
-          color: '#fff',
+          color: readablePrimaryTextColor,
           fontFamily: '"Noto Sans SC", sans-serif'
         },
         padding: [12, 16],
+        extraCssText: `backdrop-filter: blur(${isDark ? 10 : 6}px); box-shadow: ${tooltipShadow}; border-radius: 12px;`,
         formatter: (params) => {
           // const code = params.value && (params.value[3] || params.value[2]); // Unused
           // In 2D scatter: value is [lon, lat, count, code] -> index 3
@@ -144,8 +182,8 @@ const NodeMap = ({ data = {}, loading = false }) => {
           if (params.name === 'CN' || (params.data && params.data.name === 'CN')) {
             return `<div style="display:flex;align-items:center;gap:12px">
                              <span style="font-size:24px;line-height:1">🇨🇳</span>
-                             <span style="font-size:16px;font-weight:bold;color:#fff">CN (本地区域)</span>
-                          </div>`;
+                              <span style="font-size:16px;font-weight:bold;color:${readablePrimaryTextColor}">CN (${t('dashboard.nodeMap.localRegion')})</span>
+                           </div>`;
           }
 
           const valCode = params.value && params.value[3];
@@ -156,12 +194,12 @@ const NodeMap = ({ data = {}, loading = false }) => {
 
           return `<div style="display:flex;align-items:center;gap:12px">
                     <span style="font-size:24px;line-height:1">${flagEmoji}</span>
-                    <span style="font-size:16px;font-weight:bold;color:#fff">${valCode}</span>
+                    <span style="font-size:16px;font-weight:bold;color:${readablePrimaryTextColor}">${valCode}</span>
                  </div>
-                 <div style="margin-top:8px;font-size:12px;opacity:0.9;display:flex;justify-content:space-between;width:120px">
-                    <span>节点数量</span>
-                    <span style="color:${params.color};font-weight:bold;font-family:monospace;font-size:14px">${count}</span>
-                 </div>`;
+                 <div style="margin-top:8px;font-size:12px;color:${readableSecondaryTextColor};display:flex;justify-content:space-between;width:120px">
+                     <span>${t('dashboard.nodeMap.nodeCount')}</span>
+                     <span style="color:${params.color};font-weight:bold;font-family:monospace;font-size:14px">${count}</span>
+                   </div>`;
         }
       },
       geo: {
@@ -175,19 +213,19 @@ const NodeMap = ({ data = {}, loading = false }) => {
         },
         itemStyle: {
           normal: {
-            areaColor: '#1e293b', // slate-800
-            borderColor: '#0f172a', // slate-900
+            areaColor: mapAreaColor,
+            borderColor: mapBorderColor,
             borderWidth: 1.5
           },
           emphasis: {
-            areaColor: '#334155' // slate-700
+            areaColor: mapEmphasisColor
           }
         },
         regions: [
           {
             name: 'China',
             itemStyle: {
-              areaColor: '#334155' // Highlight China slightly base map
+              areaColor: chinaAreaColor
             }
           }
         ]
@@ -201,12 +239,12 @@ const NodeMap = ({ data = {}, loading = false }) => {
             show: true,
             period: 6,
             trailLength: 0.7,
-            color: '#fff',
+            color: lineTrailColor,
             symbolSize: 3
           },
           lineStyle: {
             normal: {
-              color: '#0cecdb',
+              color: lineStrokeColor,
               width: 0,
               curveness: 0.2
             }
@@ -228,9 +266,9 @@ const NodeMap = ({ data = {}, loading = false }) => {
           },
           lineStyle: {
             normal: {
-              color: '#0cecdb',
+              color: lineStrokeColor,
               width: 1,
-              opacity: 0.4,
+              opacity: lineOpacity,
               curveness: 0.2
             }
           },
@@ -243,7 +281,7 @@ const NodeMap = ({ data = {}, loading = false }) => {
           zlevel: 2,
           rippleEffect: {
             brushType: 'stroke',
-            scale: 3
+            scale: isDark ? 4 : 3
           },
           label: {
             show: true,
@@ -253,11 +291,16 @@ const NodeMap = ({ data = {}, loading = false }) => {
               return getFlagEmoji(code);
             },
             fontSize: 14,
-            distance: 5
+            distance: 5,
+            color: isDark ? alpha('#caffff', 0.96) : undefined,
+            textShadowColor: isDark ? alpha('#38e6ff', 0.55) : 'transparent',
+            textShadowBlur: isDark ? 8 : 0
           },
           symbolSize: (val) => Math.max(6, Math.min(20, Math.log2(val[2] + 1) * 5)),
           itemStyle: {
-            color: '#0cecdb'
+            color: isDark ? darkNodeColor : accentColor,
+            shadowBlur: isDark ? 14 : 0,
+            shadowColor: isDark ? alpha(darkNodeColor, 0.55) : 'transparent'
           },
           data: points
         },
@@ -272,21 +315,23 @@ const NodeMap = ({ data = {}, loading = false }) => {
                   brushType: 'stroke',
                   scale: 5,
                   period: 3,
-                  color: '#fbbf24'
+                  color: isDark ? darkTargetColor : warningColor
                 },
                 symbol: 'pin',
                 symbolSize: 20,
                 itemStyle: {
-                  color: '#fbbf24'
+                  color: isDark ? darkTargetColor : warningColor,
+                  shadowBlur: isDark ? 16 : 0,
+                  shadowColor: isDark ? alpha(darkTargetColor, 0.52) : 'transparent'
                 },
                 label: {
                   show: true,
                   formatter: '🇨🇳 CN',
                   position: 'top',
                   fontWeight: 'bold',
-                  color: '#fbbf24',
+                  color: isDark ? alpha('#ffe8a3', 0.98) : warningColor,
                   fontSize: 14,
-                  backgroundColor: 'rgba(0,0,0,0.5)',
+                  backgroundColor: targetLabelBackground,
                   padding: [4, 6],
                   borderRadius: 4
                 },
@@ -310,23 +355,51 @@ const NodeMap = ({ data = {}, loading = false }) => {
       chartInstance.current?.dispose();
       chartInstance.current = null;
     };
-  }, [points, lines, targetPoint, loading]);
+  }, [
+    points,
+    lines,
+    targetPoint,
+    loading,
+    theme,
+    accentColor,
+    accentSoft,
+    warningColor,
+    tooltipSurface,
+    tooltipBorderColor,
+    tooltipShadow,
+    readablePrimaryTextColor,
+    readableSecondaryTextColor,
+    mapAreaColor,
+    mapBorderColor,
+    mapEmphasisColor,
+    chinaAreaColor,
+    lineTrailColor,
+    lineStrokeColor,
+    lineOpacity,
+    isDark,
+    targetLabelBackground,
+    darkNodeColor,
+    darkTargetColor,
+    t
+  ]);
 
   return (
     <Card
-      sx={{
+      sx={(theme) => ({
         height: '100%',
         width: '100%',
-        background: 'radial-gradient(circle at center, #0f172a 0%, #020617 100%)', // Simpler gradient for 2D map
-        color: '#fff',
+        background: cardBackground,
+        color: 'text.primary',
         position: 'relative',
         overflow: 'hidden',
-        boxShadow: 'none',
-        border: 'none',
-        borderRadius: 0
-      }}
+        boxShadow: isDark
+          ? `0 18px 42px ${alpha(theme.palette.common.black, 0.22)}, inset 0 1px 0 ${alpha(theme.palette.common.white, 0.035)}`
+          : `0 14px 34px ${alpha(theme.palette.primary.dark, 0.055)}, 0 3px 10px ${alpha(theme.palette.grey[500], 0.075)}`,
+        border: '1px solid',
+        borderColor: isDark ? alpha(theme.palette.common.white, 0.08) : alpha(theme.palette.primary.main, 0.1),
+        borderRadius: 3
+      })}
     >
-      {/* Holographic Grid Overlay - Kept for aesthetics */}
       <Box
         sx={{
           position: 'absolute',
@@ -334,75 +407,136 @@ const NodeMap = ({ data = {}, loading = false }) => {
           left: 0,
           right: 0,
           bottom: 0,
-          opacity: 0.1,
+          opacity: isDark ? 0.16 : 0.1,
           backgroundImage: `
-                linear-gradient(rgba(14, 165, 233, 0.3) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(14, 165, 233, 0.3) 1px, transparent 1px)
-            `,
+                linear-gradient(${alpha(isDark ? '#3ce6ff' : accentColor, isDark ? 0.12 : 0.24)} 1px, transparent 1px),
+                linear-gradient(90deg, ${alpha(isDark ? '#3ce6ff' : accentColor, isDark ? 0.12 : 0.24)} 1px, transparent 1px)
+             `,
           backgroundSize: '40px 40px',
           pointerEvents: 'none'
         }}
       />
 
       <Box sx={{ p: 4, position: 'absolute', top: 0, left: 0, zIndex: 10 }}>
-        <Typography
-          variant="h3"
+        <Box
           sx={{
-            color: '#fff',
-            fontWeight: 800,
-            textShadow: '0 0 30px rgba(14, 165, 233, 0.8)',
-            letterSpacing: '4px',
-            mb: 1,
-            fontFamily: '"Orbitron", sans-serif'
+            display: 'inline-flex',
+            flexDirection: 'column',
+            gap: 1.25,
+            maxWidth: 320,
+            pointerEvents: 'none'
           }}
         >
-          全球节点分布
-        </Typography>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: '#22c55e', boxShadow: '0 0 10px #22c55e' }} />
-          <Typography variant="subtitle2" sx={{ color: '#0ea5e9', letterSpacing: '2px', fontFamily: '"Noto Sans SC", monospace' }}>
-            以获取到落地IP的数据为参考
-          </Typography>
-        </Box>
-
-        {unknownCount > 0 && (
-          <Box
+          <Typography
+            variant="h3"
             sx={{
-              mt: 3,
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 2,
-              bgcolor: 'rgba(15, 23, 42, 0.6)',
-              py: 1.5,
-              px: 3,
-              borderRadius: 0,
-              borderLeft: '4px solid #0ea5e9',
-              backdropFilter: 'blur(4px)'
+              color: readablePrimaryTextColor,
+              fontWeight: 800,
+              textShadow: `0 0 ${isDark ? 30 : 24}px ${titleGlow}`,
+              letterSpacing: '4px',
+              mb: 0.25,
+              fontFamily: '"Orbitron", sans-serif'
             }}
           >
-            <Typography variant="body2" sx={{ color: '#94a3b8', fontFamily: '"Noto Sans SC", monospace', fontSize: '0.9rem' }}>
-              未知区域 &gt;&gt; <span style={{ color: '#fff', fontWeight: 'bold' }}>{unknownCount}</span>
+            {t('dashboard.nodeMap.globalDistribution')}
+          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+            <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: successColor, boxShadow: `0 0 10px ${statusDotGlow}` }} />
+            <Typography
+              variant="subtitle2"
+              sx={{ color: isDark ? alpha('#98f7ff', 0.9) : accentColor, letterSpacing: '1.6px', fontFamily: '"Noto Sans SC", monospace' }}
+            >
+              {t('dashboard.nodeMap.dataReference')}
             </Typography>
           </Box>
-        )}
+        </Box>
       </Box>
 
-      {/* Stats overlay */}
-      <Box sx={{ p: 6, position: 'absolute', bottom: 0, right: 0, zIndex: 10, textAlign: 'right', pointerEvents: 'none' }}>
-        <Typography
-          variant="overline"
-          sx={{ color: 'rgba(255,255,255,0.7)', letterSpacing: 2, display: 'block', fontFamily: '"Noto Sans SC"' }}
+      <Box sx={{ p: 4, position: 'absolute', right: 0, bottom: 0, zIndex: 10, pointerEvents: 'none' }}>
+        <Box
+          sx={{
+            display: 'inline-flex',
+            flexDirection: 'column',
+            gap: 1.25,
+            px: 2.5,
+            py: 2,
+            minWidth: 210,
+            background: overlaySurface,
+            border: '1px solid',
+            borderColor: overlayBorderColor,
+            boxShadow: overlayInsetHighlight,
+            backdropFilter: `blur(${isDark ? 10 : 4}px)`
+          }}
         >
-          覆盖区域
-        </Typography>
-        <Typography
-          variant="h1"
-          sx={{ color: '#0ea5e9', fontWeight: '900', fontSize: '4rem', lineHeight: 1, textShadow: '0 0 40px rgba(14, 165, 233, 0.6)' }}
-        >
-          {String(points.length + (targetPoint ? 1 : 0)).padStart(2, '0')}
-        </Typography>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.25 }}>
+            <Box>
+              <Typography
+                variant="overline"
+                sx={{ color: readableTertiaryTextColor, letterSpacing: 2, display: 'block', fontFamily: '"Noto Sans SC"' }}
+              >
+                {t('dashboard.nodeMap.coveredRegions')}
+              </Typography>
+              <Typography
+                variant="h2"
+                sx={{
+                  color: isDark ? alpha('#7ff9ff', 0.98) : accentColor,
+                  fontWeight: '900',
+                  lineHeight: 1,
+                  textShadow: `0 0 ${isDark ? 28 : 22}px ${coverageGlow}`,
+                  fontFamily: '"Orbitron", sans-serif'
+                }}
+              >
+                {String(coveredRegionCount).padStart(2, '0')}
+              </Typography>
+            </Box>
 
-        <Box sx={{ mt: 2, height: 2, width: 100, bgcolor: '#0ea5e9', ml: 'auto', opacity: 0.8 }} />
+            <Box
+              sx={{
+                px: 1.5,
+                py: 1.15,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 1.25,
+                background: isDark ? 'transparent' : alpha(theme.palette.background.default, 0.8),
+                border: '1px solid',
+                borderColor: overlayBorderColor,
+                borderTop: `2px solid ${unknownCount > 0 ? alpha(isDark ? '#63f2ff' : accentColor, isDark ? 0.72 : 0.6) : alpha(accentColor, 0.3)}`,
+                boxShadow: overlayInsetHighlight,
+                backdropFilter: `blur(${isDark ? 8 : 4}px)`
+              }}
+            >
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.2, minWidth: 0 }}>
+                <Typography
+                  variant="caption"
+                  sx={{ color: readableSecondaryTextColor, letterSpacing: 1.2, fontFamily: '"Noto Sans SC", monospace' }}
+                >
+                  {t('dashboard.nodeMap.unknownRegions')}
+                </Typography>
+                <Typography
+                  variant="body2"
+                  sx={{ color: readableTertiaryTextColor, lineHeight: 1.2, fontFamily: '"Noto Sans SC", monospace' }}
+                >
+                  {t('dashboard.nodeMap.unmatchedCoordinates')}
+                </Typography>
+              </Box>
+
+              <Typography
+                variant="h6"
+                sx={{
+                  color: unknownCount > 0 ? readablePrimaryTextColor : readableTertiaryTextColor,
+                  fontWeight: 800,
+                  lineHeight: 1,
+                  fontFamily: '"Orbitron", sans-serif'
+                }}
+              >
+                {String(unknownCount).padStart(2, '0')}
+              </Typography>
+            </Box>
+          </Box>
+
+          <Box sx={{ height: 2, width: 88, bgcolor: alpha(isDark ? '#63f2ff' : accentColor, isDark ? 0.9 : 0.8) }} />
+        </Box>
       </Box>
 
       <Box
@@ -428,8 +562,10 @@ const NodeMap = ({ data = {}, loading = false }) => {
             gap: 2
           }}
         >
-          <CircularProgress size={60} sx={{ color: '#0ea5e9' }} />
-          <Typography sx={{ color: '#0ea5e9', letterSpacing: 4, fontFamily: '"Noto Sans SC", monospace' }}>正在初始化地图...</Typography>
+          <CircularProgress size={60} sx={{ color: accentColor }} />
+          <Typography sx={{ color: readableSecondaryTextColor, letterSpacing: 4, fontFamily: '"Noto Sans SC", monospace' }}>
+            {t('dashboard.nodeMap.initializing')}
+          </Typography>
         </Box>
       )}
     </Card>

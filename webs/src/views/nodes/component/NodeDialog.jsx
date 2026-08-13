@@ -1,6 +1,7 @@
 import PropTypes from 'prop-types';
 
 // material-ui
+import { useTheme } from '@mui/material/styles';
 import Autocomplete from '@mui/material/Autocomplete';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -9,14 +10,15 @@ import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
-import FormControlLabel from '@mui/material/FormControlLabel';
-import Radio from '@mui/material/Radio';
-import RadioGroup from '@mui/material/RadioGroup';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
+import Typography from '@mui/material/Typography';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
+import { useTranslation } from 'react-i18next';
 
 // project imports
 import SearchableNodeSelect from 'components/SearchableNodeSelect';
+import { getNodeColorChipSx, getNodeDialogPaperSx, getNodeFieldControlSx, getNodeThemeTokens } from '../nodeTheme';
 
 /**
  * 添加/编辑节点对话框
@@ -34,28 +36,65 @@ export default function NodeDialog({
   onSubmit,
   onFetchProxyNodes
 }) {
+  const theme = useTheme();
+  const { t } = useTranslation();
+  const { isDark } = useResolvedColorScheme();
+  const tokens = getNodeThemeTokens(theme, isDark);
+  const fieldControlSx = getNodeFieldControlSx(tokens);
+
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
-      <DialogTitle>{isEdit ? '编辑节点' : '添加节点'}</DialogTitle>
-      <DialogContent>
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth PaperProps={{ sx: getNodeDialogPaperSx(theme, tokens) }}>
+      <DialogTitle
+        sx={{
+          color: tokens.primaryText,
+          bgcolor: tokens.mutedPanelSurface,
+          borderBottom: '1px solid',
+          borderColor: tokens.panelBorder
+        }}
+      >
+        {isEdit ? t('nodes.dialog.editTitle') : t('nodes.dialog.addTitle')}
+      </DialogTitle>
+      <DialogContent dividers sx={{ bgcolor: 'transparent', borderColor: tokens.panelBorder }}>
         <Stack spacing={2} sx={{ mt: 1 }}>
           <TextField
             fullWidth
             multiline
             rows={4}
-            label="节点链接"
+            label={t('nodes.dialog.fields.link')}
             value={nodeForm.link}
             onChange={(e) => setNodeForm({ ...nodeForm, link: e.target.value })}
-            placeholder="支持输入：各类代理链接（vmess://、vless://、wireguard:// 等）、WireGuard 标准配置文件（包含 [Interface] 和 [Peer]）、Base64 订阅链接。多行使用回车分隔"
+            placeholder={t('nodes.dialog.fields.linkPlaceholder')}
+            sx={fieldControlSx}
           />
-          {!isEdit && (
-            <RadioGroup row value={nodeForm.mergeMode} onChange={(e) => setNodeForm({ ...nodeForm, mergeMode: e.target.value })}>
-              <FormControlLabel value="1" control={<Radio />} label="合并" />
-              <FormControlLabel value="2" control={<Radio />} label="分开" />
-            </RadioGroup>
-          )}
-          {(isEdit || nodeForm.mergeMode === '1') && (
-            <TextField fullWidth label="备注" value={nodeForm.name} onChange={(e) => setNodeForm({ ...nodeForm, name: e.target.value })} />
+          {isEdit && (
+            <Stack spacing={1.5}>
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+                <TextField
+                  fullWidth
+                  label={t('nodes.dialog.fields.remarkName')}
+                  value={nodeForm.name}
+                  onChange={(e) => setNodeForm({ ...nodeForm, name: e.target.value })}
+                  helperText={t('nodes.dialog.fields.remarkNameHelper')}
+                  sx={fieldControlSx}
+                />
+                <TextField
+                  select
+                  fullWidth
+                  label={t('nodes.dialog.fields.nameMode')}
+                  value={nodeForm.nameMode || 'link'}
+                  onChange={(e) => setNodeForm({ ...nodeForm, nameMode: e.target.value })}
+                  SelectProps={{ native: true }}
+                  helperText={t('nodes.dialog.fields.nameModeHelper')}
+                  sx={fieldControlSx}
+                >
+                  <option value="link">{t('nodes.dialog.fields.nameModeLink')}</option>
+                  <option value="remark">{t('nodes.dialog.fields.nameModeRemark')}</option>
+                </TextField>
+              </Stack>
+              <Typography variant="caption" sx={{ color: tokens.secondaryText }}>
+                {t('nodes.dialog.fields.nameModeNotice')}
+              </Typography>
+            </Stack>
           )}
           <SearchableNodeSelect
             nodes={proxyNodeOptions}
@@ -67,12 +106,13 @@ export default function NodeDialog({
             }}
             displayField="Name"
             valueField="Name"
-            label="前置代理节点名称或策略组名称"
-            placeholder="选择或输入节点名称/策略组名称"
-            helperText="仅Clash-Meta内核可用，留空则不使用前置代理"
+            label={t('nodes.dialog.fields.dialerProxy')}
+            placeholder={t('nodes.dialog.fields.dialerProxyPlaceholder')}
+            helperText={t('nodes.dialog.fields.dialerProxyHelper')}
             freeSolo={true}
             limit={50}
             onFocus={onFetchProxyNodes}
+            sx={fieldControlSx}
           />
           <Autocomplete
             freeSolo
@@ -80,7 +120,15 @@ export default function NodeDialog({
             value={nodeForm.group}
             onChange={(e, newValue) => setNodeForm({ ...nodeForm, group: newValue || '' })}
             onInputChange={(e, newValue) => setNodeForm({ ...nodeForm, group: newValue || '' })}
-            renderInput={(params) => <TextField {...params} label="分组" placeholder="请选择或输入分组名称" />}
+            sx={fieldControlSx}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label={t('nodes.dialog.fields.group')}
+                placeholder={t('nodes.dialog.fields.groupPlaceholder')}
+                sx={fieldControlSx}
+              />
+            )}
           />
           {/* 标签选择 */}
           <Autocomplete
@@ -99,7 +147,7 @@ export default function NodeDialog({
                       width: 12,
                       height: 12,
                       borderRadius: '50%',
-                      backgroundColor: option.color || '#1976d2',
+                      backgroundColor: option.color || tokens.palette.primary.main,
                       mr: 1,
                       flexShrink: 0
                     }}
@@ -116,24 +164,28 @@ export default function NodeDialog({
                     key={key}
                     label={option.name || option}
                     size="small"
-                    sx={{
-                      backgroundColor: option.color || '#1976d2',
-                      color: '#fff',
-                      '& .MuiChip-deleteIcon': { color: 'rgba(255,255,255,0.7)' }
-                    }}
+                    sx={getNodeColorChipSx(theme, tokens, option.color || theme.palette.primary.main, { deletable: true })}
                     {...tagProps}
                   />
                 );
               })
             }
-            renderInput={(params) => <TextField {...params} label="标签" placeholder="选择要设置的标签" />}
+            sx={fieldControlSx}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label={t('nodes.dialog.fields.tags')}
+                placeholder={t('nodes.dialog.fields.tagsPlaceholder')}
+                sx={fieldControlSx}
+              />
+            )}
           />
         </Stack>
       </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>关闭</Button>
+      <DialogActions sx={{ bgcolor: tokens.mutedPanelSurface, borderTop: '1px solid', borderColor: tokens.panelBorder }}>
+        <Button onClick={onClose}>{t('common.close')}</Button>
         <Button variant="contained" onClick={onSubmit}>
-          确定
+          {t('common.confirm')}
         </Button>
       </DialogActions>
     </Dialog>
@@ -145,6 +197,7 @@ NodeDialog.propTypes = {
   isEdit: PropTypes.bool.isRequired,
   nodeForm: PropTypes.shape({
     name: PropTypes.string,
+    nameMode: PropTypes.string,
     link: PropTypes.string,
     dialerProxyName: PropTypes.string,
     group: PropTypes.string,

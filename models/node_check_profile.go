@@ -13,9 +13,9 @@ import (
 // 用于管理节点检测配置，支持多策略和定时执行
 type NodeCheckProfile struct {
 	ID       int    `gorm:"primaryKey;autoIncrement" json:"id"`
-	Name     string `gorm:"not null;uniqueIndex" json:"name"` // 策略名称（唯一）
-	Enabled  bool   `gorm:"default:false" json:"enabled"`     // 是否启用定时检测
-	CronExpr string `json:"cronExpr"`                         // Cron 表达式
+	Name     string `gorm:"size:191;not null;uniqueIndex" json:"name"` // 策略名称（唯一）
+	Enabled  bool   `gorm:"default:false" json:"enabled"`              // 是否启用定时检测
+	CronExpr string `json:"cronExpr"`                                  // Cron 表达式
 
 	// 检测模式参数
 	Mode       string `gorm:"default:'tcp'" json:"mode"` // 检测模式：tcp / mihomo
@@ -44,9 +44,16 @@ type NodeCheckProfile struct {
 	TrafficBySource bool `gorm:"default:true" json:"trafficBySource"`
 	TrafficByNode   bool `gorm:"default:false" json:"trafficByNode"`
 
+	// 节点质量检测
+	DetectQuality   bool   `gorm:"default:false" json:"detectQuality"` // 是否检测节点质量
+	QualityCheckURL string `json:"qualityCheckUrl"`                    // 质量检测API URL
+
+	DetectUnlock    bool   `gorm:"default:false" json:"detectUnlock"`
+	UnlockProviders string `gorm:"type:text" json:"unlockProviders"`
+
 	// 执行时间记录
-	LastRunTime *time.Time `gorm:"type:datetime" json:"lastRunTime"` // 上次执行时间
-	NextRunTime *time.Time `gorm:"type:datetime" json:"nextRunTime"` // 下次执行时间
+	LastRunTime *time.Time `json:"lastRunTime"` // 上次执行时间
+	NextRunTime *time.Time `json:"nextRunTime"` // 下次执行时间
 
 	// 时间戳
 	CreatedAt time.Time `gorm:"autoCreateTime" json:"createdAt"`
@@ -102,6 +109,8 @@ func (p *NodeCheckProfile) Update() error {
 		"DetectCountry", "LandingIPURL", "IncludeHandshake",
 		"SpeedRecordMode", "PeakSampleInterval", "PreserveSpeedResult",
 		"TrafficByGroup", "TrafficBySource", "TrafficByNode",
+		"DetectQuality", "QualityCheckURL",
+		"DetectUnlock", "UnlockProviders",
 	).Updates(p).Error
 	if err != nil {
 		return err
@@ -161,7 +170,7 @@ func ListEnabledNodeCheckProfiles() ([]NodeCheckProfile, error) {
 
 // UpdateRunTime 更新运行时间 (Write-Through)
 func (p *NodeCheckProfile) UpdateRunTime(lastRun, nextRun *time.Time) error {
-	err := database.DB.Model(p).Select("LastRunTime", "NextRunTime").Updates(map[string]interface{}{
+	err := database.DB.Model(p).Select("LastRunTime", "NextRunTime").Updates(map[string]any{
 		"LastRunTime": lastRun,
 		"NextRunTime": nextRun,
 	}).Error
@@ -228,4 +237,32 @@ func (p *NodeCheckProfile) SetGroups(groups []string) {
 // SetTags 设置标签列表（转换为逗号分隔字符串）
 func (p *NodeCheckProfile) SetTags(tags []string) {
 	p.Tags = strings.Join(tags, ",")
+}
+
+func (p *NodeCheckProfile) GetUnlockProviders() []string {
+	if strings.TrimSpace(p.UnlockProviders) == "" {
+		return []string{}
+	}
+	parts := strings.Split(p.UnlockProviders, ",")
+	providers := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		providers = append(providers, trimmed)
+	}
+	return providers
+}
+
+func (p *NodeCheckProfile) SetUnlockProviders(providers []string) {
+	cleaned := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		trimmed := strings.TrimSpace(provider)
+		if trimmed == "" {
+			continue
+		}
+		cleaned = append(cleaned, trimmed)
+	}
+	p.UnlockProviders = strings.Join(cleaned, ",")
 }

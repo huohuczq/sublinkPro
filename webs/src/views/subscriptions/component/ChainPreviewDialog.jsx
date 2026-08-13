@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import PropTypes from 'prop-types';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
@@ -20,7 +21,9 @@ import TableCell from '@mui/material/TableCell';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
 import useMediaQuery from '@mui/material/useMediaQuery';
-import { useTheme, alpha, keyframes } from '@mui/material/styles';
+import { useTheme, keyframes } from '@mui/material/styles';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
+import { withAlpha } from '../../../utils/colorUtils';
 
 import CloseIcon from '@mui/icons-material/Close';
 import PersonIcon from '@mui/icons-material/Person';
@@ -36,8 +39,9 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import CancelIcon from '@mui/icons-material/Cancel';
 
 import ChainCanvasView from './ChainCanvasView';
+import { getChainProxyIconButtonSx, getChainProxyThemeTokens } from './chainProxyTheme';
+import { COUNTRY_FALLBACK_EMOJI, isoToFlag } from '../../../utils/countryDisplay';
 
-// 箭头脉冲动画
 const pulseAnimation = keyframes`
   0%, 100% {
     opacity: 0.4;
@@ -49,41 +53,75 @@ const pulseAnimation = keyframes`
   }
 `;
 
-// 国旗转换
 const getCountryFlag = (code) => {
-  if (!code) return '🌐';
-  const codeUpper = code.toUpperCase();
-  const offset = 127397;
-  return [...codeUpper].map((c) => String.fromCodePoint(c.charCodeAt(0) + offset)).join('');
+  return isoToFlag(code, COUNTRY_FALLBACK_EMOJI);
 };
 
-// 类型标签颜色
-const getTypeColor = (type, theme) => {
+const getTypeColor = (type, palette) => {
   const colors = {
-    template_group: theme.palette.primary.main,
-    custom_group: theme.palette.secondary.main,
-    dynamic_node: theme.palette.warning.main,
-    specified_node: theme.palette.success.main
+    template_group: palette.primary.main,
+    custom_group: palette.secondary.main,
+    dynamic_node: palette.warning.main,
+    specified_node: palette.success.main
   };
-  return colors[type] || theme.palette.grey[500];
+  return colors[type] || palette.grey[500];
 };
 
-// 类型标签
-const getTypeLabel = (type) => {
-  const labels = {
-    template_group: '模板组',
-    custom_group: '自定义组',
-    dynamic_node: '动态节点',
-    specified_node: '指定节点'
+const getTypeVisualTokens = (type, tokens) => {
+  const palette = tokens.palette;
+  const visualMap = {
+    template_group: {
+      color: palette.primary.main,
+      surface: tokens.primarySurface,
+      border: tokens.primarySoftBorder,
+      strongBorder: tokens.primaryStrongBorder
+    },
+    custom_group: {
+      color: palette.secondary.main,
+      surface: tokens.secondarySurface,
+      border: tokens.secondarySoftBorder,
+      strongBorder: withAlpha(palette.secondary.main, tokens.isDark ? 0.46 : 0.28)
+    },
+    dynamic_node: {
+      color: palette.warning.main,
+      surface: tokens.warningSurface,
+      border: tokens.warningSoftBorder,
+      strongBorder: withAlpha(palette.warning.main, tokens.isDark ? 0.44 : 0.28)
+    },
+    specified_node: {
+      color: palette.success.main,
+      surface: tokens.successSurface,
+      border: tokens.successSoftBorder,
+      strongBorder: withAlpha(palette.success.main, tokens.isDark ? 0.44 : 0.28)
+    }
   };
-  return labels[type] || type;
+
+  return (
+    visualMap[type] || {
+      color: getTypeColor(type, palette),
+      surface: tokens.elevatedSurface,
+      border: tokens.softBorder,
+      strongBorder: tokens.softBorder
+    }
+  );
 };
 
-// 链路节点卡片（紧凑版）
+const getConnectorChevronColor = (color, isDark) => withAlpha(color, isDark ? 0.58 : 0.42);
+
+const getTypeLabel = (type, t) => {
+  const key = `subscriptions.chain.proxyTypeShort.${type}`;
+  return t(key, type);
+};
+
 function ChainNodeCard({ node, index, isLast, isMobile, theme }) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const hasNodes = node.nodes && node.nodes.length > 0;
-  const typeColor = getTypeColor(node.type, theme);
+  const { isDark } = useResolvedColorScheme();
+  const tokens = getChainProxyThemeTokens(theme, isDark);
+  const typeVisuals = getTypeVisualTokens(node.type, tokens);
+  const typeColor = typeVisuals.color;
+  const { elevatedSurface, nestedPanelSurface, secondaryText, tertiaryText, cardShadow, insetHighlight, primaryText } = tokens;
 
   return (
     <Box sx={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', alignItems: 'center' }}>
@@ -91,13 +129,15 @@ function ChainNodeCard({ node, index, isLast, isMobile, theme }) {
         sx={{
           minWidth: isMobile ? '100%' : 140,
           maxWidth: isMobile ? '100%' : 180,
-          background: alpha(typeColor, 0.08),
-          border: `1px solid ${alpha(typeColor, 0.3)}`,
+          backgroundColor: elevatedSurface,
+          border: `1px solid ${typeVisuals.border}`,
           borderRadius: 2,
           transition: 'all 0.2s ease',
+          boxShadow: cardShadow,
           '&:hover': {
-            borderColor: typeColor,
-            boxShadow: `0 2px 8px ${alpha(typeColor, 0.2)}`
+            backgroundColor: typeVisuals.surface,
+            borderColor: typeVisuals.strongBorder,
+            boxShadow: isDark ? insetHighlight : theme.shadows[2]
           }
         }}
       >
@@ -105,17 +145,18 @@ function ChainNodeCard({ node, index, isLast, isMobile, theme }) {
           <Stack direction="row" alignItems="center" spacing={0.5} mb={0.5}>
             <Chip
               size="small"
-              label={getTypeLabel(node.type)}
+              label={getTypeLabel(node.type, t)}
               sx={{
-                bgcolor: alpha(typeColor, 0.15),
+                bgcolor: typeVisuals.surface,
                 color: typeColor,
                 fontWeight: 600,
                 fontSize: 10,
                 height: 18,
+                border: `1px solid ${typeVisuals.border}`,
                 '& .MuiChip-label': { px: 0.75 }
               }}
             />
-            <Typography variant="caption" color="text.secondary">
+            <Typography variant="caption" sx={{ color: secondaryText }}>
               #{index + 1}
             </Typography>
           </Stack>
@@ -131,7 +172,7 @@ function ChainNodeCard({ node, index, isLast, isMobile, theme }) {
             }}
             title={node.name}
           >
-            {node.name || '未配置'}
+            {node.name || t('subscriptions.chain.unconfigured')}
           </Typography>
 
           {hasNodes && (
@@ -141,12 +182,12 @@ function ChainNodeCard({ node, index, isLast, isMobile, theme }) {
                 display: 'flex',
                 alignItems: 'center',
                 cursor: 'pointer',
-                color: 'primary.main',
+                color: typeColor,
                 '&:hover': { textDecoration: 'underline' }
               }}
             >
               <Typography variant="caption" fontWeight={600}>
-                {node.nodes.length} 节点
+                {t('subscriptions.chain.preview.nodeCount', { count: node.nodes.length })}
               </Typography>
               {expanded ? <ExpandLessIcon sx={{ fontSize: 16 }} /> : <ExpandMoreIcon sx={{ fontSize: 16 }} />}
             </Box>
@@ -157,13 +198,16 @@ function ChainNodeCard({ node, index, isLast, isMobile, theme }) {
                 mt: 0.5,
                 maxHeight: 100,
                 overflow: 'auto',
-                bgcolor: alpha(theme.palette.background.paper, 0.8),
+                bgcolor: nestedPanelSurface,
+                border: '1px solid',
+                borderColor: typeVisuals.border,
                 borderRadius: 1,
-                p: 0.5
+                p: 0.5,
+                boxShadow: insetHighlight
               }}
             >
               {node.nodes?.map((n, i) => (
-                <Typography key={i} variant="caption" display="block" sx={{ py: 0.25 }}>
+                <Typography key={i} variant="caption" display="block" sx={{ py: 0.25, color: n.name ? primaryText : tertiaryText }}>
                   {getCountryFlag(n.linkCountry)} {n.name}
                 </Typography>
               ))}
@@ -190,7 +234,7 @@ function ChainNodeCard({ node, index, isLast, isMobile, theme }) {
                 height: 0,
                 borderTop: '5px solid transparent',
                 borderBottom: '5px solid transparent',
-                borderLeft: `6px solid ${alpha(theme.palette.primary.main, 0.5)}`,
+                borderLeft: `6px solid ${getConnectorChevronColor(tokens.palette.primary.main, isDark)}`,
                 ml: i > 0 ? -0.3 : 0,
                 animation: `${pulseAnimation} 1.5s ease-in-out infinite`,
                 animationDelay: `${i * 0.15}s`
@@ -211,11 +255,14 @@ ChainNodeCard.propTypes = {
   theme: PropTypes.object.isRequired
 };
 
-// 单条规则的链路图
 function RuleChainFlow({ rule, isMobile, theme }) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(!rule.fullyCovered);
+  const { isDark } = useResolvedColorScheme();
+  const tokens = getChainProxyThemeTokens(theme, isDark);
+  const { elevatedSurface, softBorder, secondaryText, tertiaryText, cardShadow, coveredSurface, coveredBorder } = tokens;
+  const expandButtonSx = getChainProxyIconButtonSx(tokens);
 
-  // 规则是否完全被覆盖（无生效节点）
   const isFullyCovered = rule.enabled && rule.fullyCovered;
 
   return (
@@ -226,33 +273,44 @@ function RuleChainFlow({ rule, isMobile, theme }) {
         borderRadius: 2,
         opacity: rule.enabled ? (isFullyCovered ? 0.6 : 1) : 0.4,
         transition: 'all 0.2s ease',
-        borderColor: isFullyCovered ? 'warning.main' : 'divider',
-        bgcolor: isFullyCovered ? alpha(theme.palette.warning.main, 0.03) : 'background.paper'
+        boxShadow: cardShadow,
+        borderColor: isFullyCovered ? coveredBorder : softBorder,
+        bgcolor: isFullyCovered ? coveredSurface : elevatedSurface
       }}
     >
       <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
-        {/* 规则标题 */}
         <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1.5}>
           <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
             <Typography variant="subtitle1" fontWeight={700} sx={{ textDecoration: isFullyCovered ? 'line-through' : 'none' }}>
-              {rule.ruleName || '未命名规则'}
+              {rule.ruleName || t('subscriptions.chain.unnamedRule')}
             </Typography>
-            {!rule.enabled && <Chip label="已禁用" size="small" color="default" />}
-            {rule.enabled && isFullyCovered && <Chip label="已被覆盖" size="small" color="warning" variant="outlined" />}
+            {!rule.enabled && <Chip label={t('common.disabled')} size="small" color="default" />}
+            {rule.enabled && isFullyCovered && (
+              <Chip label={t('subscriptions.chain.preview.covered')} size="small" color="warning" variant="outlined" />
+            )}
             {rule.enabled && !isFullyCovered && rule.effectiveNodes > 0 && (
-              <Chip label={`生效 ${rule.effectiveNodes} 节点`} size="small" color="success" variant="outlined" />
+              <Chip
+                label={t('subscriptions.chain.preview.effectiveNodes', { count: rule.effectiveNodes })}
+                size="small"
+                color="success"
+                variant="outlined"
+              />
             )}
             {rule.enabled && rule.coveredNodes > 0 && !isFullyCovered && (
-              <Chip label={`${rule.coveredNodes} 被覆盖`} size="small" color="warning" variant="outlined" />
+              <Chip
+                label={t('subscriptions.chain.preview.coveredNodes', { count: rule.coveredNodes })}
+                size="small"
+                color="warning"
+                variant="outlined"
+              />
             )}
           </Stack>
-          <IconButton size="small" onClick={() => setExpanded(!expanded)}>
+          <IconButton size="small" onClick={() => setExpanded(!expanded)} sx={expandButtonSx}>
             {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
           </IconButton>
         </Stack>
 
         <Collapse in={expanded}>
-          {/* 链路图 */}
           <Box
             sx={{
               display: 'flex',
@@ -264,22 +322,21 @@ function RuleChainFlow({ rule, isMobile, theme }) {
               overflowX: 'auto'
             }}
           >
-            {/* 用户端点 */}
             <Box sx={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', alignItems: 'center' }}>
               <Box
                 sx={{
                   px: 1.5,
                   py: 0.75,
                   borderRadius: 2,
-                  bgcolor: alpha(theme.palette.info.main, 0.1),
-                  border: `1px dashed ${alpha(theme.palette.info.main, 0.4)}`,
+                  bgcolor: tokens.infoSurface,
+                  border: `1px dashed ${tokens.infoSoftBorder}`,
                   textAlign: 'center',
                   minWidth: 60
                 }}
               >
                 <PersonIcon sx={{ color: theme.palette.info.main, fontSize: 20 }} />
                 <Typography variant="caption" display="block" fontWeight={600}>
-                  用户
+                  {t('subscriptions.chain.preview.user')}
                 </Typography>
               </Box>
               <Box
@@ -299,7 +356,7 @@ function RuleChainFlow({ rule, isMobile, theme }) {
                       height: 0,
                       borderTop: '5px solid transparent',
                       borderBottom: '5px solid transparent',
-                      borderLeft: `6px solid ${alpha(theme.palette.info.main, 0.4)}`,
+                      borderLeft: `6px solid ${getConnectorChevronColor(tokens.palette.info.main, isDark)}`,
                       ml: i > 0 ? -0.3 : 0
                     }}
                   />
@@ -307,7 +364,6 @@ function RuleChainFlow({ rule, isMobile, theme }) {
               </Box>
             </Box>
 
-            {/* 链路节点 */}
             {rule.links?.map((node, index) => (
               <ChainNodeCard
                 key={index}
@@ -319,7 +375,6 @@ function RuleChainFlow({ rule, isMobile, theme }) {
               />
             ))}
 
-            {/* 箭头到目标节点 */}
             {rule.links?.length > 0 && (
               <Box
                 sx={{
@@ -338,7 +393,7 @@ function RuleChainFlow({ rule, isMobile, theme }) {
                       height: 0,
                       borderTop: '5px solid transparent',
                       borderBottom: '5px solid transparent',
-                      borderLeft: `6px solid ${alpha(theme.palette.error.main, 0.4)}`,
+                      borderLeft: `6px solid ${getConnectorChevronColor(tokens.palette.warning.main, isDark)}`,
                       ml: i > 0 ? -0.3 : 0
                     }}
                   />
@@ -346,39 +401,37 @@ function RuleChainFlow({ rule, isMobile, theme }) {
               </Box>
             )}
 
-            {/* 目标节点 */}
             <Box
               sx={{
                 px: 1.5,
                 py: 0.75,
                 borderRadius: 2,
-                bgcolor: alpha(theme.palette.error.main, 0.1),
-                border: `1px solid ${alpha(theme.palette.error.main, 0.3)}`,
+                bgcolor: tokens.warningSurface,
+                border: `1px solid ${tokens.warningSoftBorder}`,
                 textAlign: 'center',
                 minWidth: isMobile ? '100%' : 100
               }}
             >
               {rule.targetType === 'all' ? (
-                <LayersIcon sx={{ color: theme.palette.error.main, fontSize: 20 }} />
+                <LayersIcon sx={{ color: theme.palette.warning.main, fontSize: 20 }} />
               ) : rule.targetType === 'conditions' ? (
-                <AdjustIcon sx={{ color: theme.palette.error.main, fontSize: 20 }} />
+                <AdjustIcon sx={{ color: theme.palette.warning.main, fontSize: 20 }} />
               ) : (
-                <FlagIcon sx={{ color: theme.palette.error.main, fontSize: 20 }} />
+                <FlagIcon sx={{ color: theme.palette.warning.main, fontSize: 20 }} />
               )}
-              <Typography variant="caption" display="block" fontWeight={600} color="error.main">
-                落地节点
+              <Typography variant="caption" display="block" fontWeight={600} color="warning.main">
+                {t('subscriptions.chain.preview.landingNode')}
               </Typography>
-              <Typography variant="caption" display="block" color="text.secondary">
+              <Typography variant="caption" display="block" sx={{ color: tertiaryText }}>
                 {rule.targetInfo}
               </Typography>
               {rule.targetNodes?.length > 0 && (
-                <Typography variant="caption" color="text.secondary">
-                  ({rule.targetNodes.length} 节点)
+                <Typography variant="caption" sx={{ color: secondaryText }}>
+                  {t('subscriptions.chain.preview.nodeCountParen', { count: rule.targetNodes.length })}
                 </Typography>
               )}
             </Box>
 
-            {/* 箭头到互联网 */}
             <Box
               sx={{
                 display: 'flex',
@@ -396,28 +449,27 @@ function RuleChainFlow({ rule, isMobile, theme }) {
                     height: 0,
                     borderTop: '5px solid transparent',
                     borderBottom: '5px solid transparent',
-                    borderLeft: `6px solid ${alpha(theme.palette.success.main, 0.4)}`,
+                    borderLeft: `6px solid ${getConnectorChevronColor(tokens.palette.success.main, isDark)}`,
                     ml: i > 0 ? -0.3 : 0
                   }}
                 />
               ))}
             </Box>
 
-            {/* 互联网 */}
             <Box
               sx={{
                 px: 1.5,
                 py: 0.75,
                 borderRadius: 2,
-                bgcolor: alpha(theme.palette.success.main, 0.1),
-                border: `1px dashed ${alpha(theme.palette.success.main, 0.4)}`,
+                bgcolor: tokens.successSurface,
+                border: `1px dashed ${tokens.successSoftBorder}`,
                 textAlign: 'center',
                 minWidth: 60
               }}
             >
               <PublicIcon sx={{ color: theme.palette.success.main, fontSize: 20 }} />
               <Typography variant="caption" display="block" fontWeight={600}>
-                🌐 互联网
+                {t('subscriptions.chain.preview.internet')}
               </Typography>
             </Box>
           </Box>
@@ -433,30 +485,69 @@ RuleChainFlow.propTypes = {
   theme: PropTypes.object.isRequired
 };
 
-// 节点匹配摘要表格
 function NodeMatchTable({ matchSummary, isMobile }) {
+  const { t } = useTranslation();
+  const theme = useTheme();
+  const { isDark } = useResolvedColorScheme();
+  const tokens = getChainProxyThemeTokens(theme, isDark);
+  const {
+    elevatedSurface,
+    tableHeaderSurface,
+    softBorder,
+    secondaryText,
+    tertiaryText,
+    successSurface,
+    successSoftBorder,
+    errorSurface,
+    errorSoftBorder
+  } = tokens;
   const matchedCount = matchSummary?.filter((n) => !n.unmatched).length || 0;
   const unmatchedCount = matchSummary?.filter((n) => n.unmatched).length || 0;
 
   return (
     <Box>
       <Stack direction="row" spacing={2} mb={2}>
-        <Chip icon={<CheckCircleIcon />} label={`已匹配: ${matchedCount}`} color="success" variant="outlined" size="small" />
-        <Chip icon={<CancelIcon />} label={`未匹配: ${unmatchedCount}`} color="default" variant="outlined" size="small" />
+        <Chip
+          icon={<CheckCircleIcon />}
+          label={t('subscriptions.chain.preview.matchedCount', { count: matchedCount })}
+          size="small"
+          sx={{ bgcolor: successSurface, border: '1px solid', borderColor: successSoftBorder, color: 'success.main' }}
+        />
+        <Chip
+          icon={<CancelIcon />}
+          label={t('subscriptions.chain.preview.unmatchedCount', { count: unmatchedCount })}
+          size="small"
+          sx={{ bgcolor: errorSurface, border: '1px solid', borderColor: errorSoftBorder, color: 'error.main' }}
+        />
       </Stack>
 
-      <Box sx={{ maxHeight: 300, overflow: 'auto' }}>
+      <Box
+        sx={{
+          maxHeight: 300,
+          overflow: 'auto',
+          borderRadius: 2,
+          border: '1px solid',
+          borderColor: softBorder,
+          bgcolor: elevatedSurface
+        }}
+      >
         <Table size="small" stickyHeader>
           <TableHead>
             <TableRow>
-              <TableCell>节点</TableCell>
-              <TableCell>匹配规则</TableCell>
-              <TableCell>入口代理</TableCell>
+              <TableCell sx={{ bgcolor: tableHeaderSurface, color: secondaryText }}>
+                {t('subscriptions.chain.preview.table.node')}
+              </TableCell>
+              <TableCell sx={{ bgcolor: tableHeaderSurface, color: secondaryText }}>
+                {t('subscriptions.chain.preview.table.matchedRule')}
+              </TableCell>
+              <TableCell sx={{ bgcolor: tableHeaderSurface, color: secondaryText }}>
+                {t('subscriptions.chain.preview.table.entryProxy')}
+              </TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {matchSummary?.map((node) => (
-              <TableRow key={node.nodeId} sx={{ opacity: node.unmatched ? 0.5 : 1 }}>
+              <TableRow key={node.nodeId} sx={{ opacity: node.unmatched ? 0.56 : 1 }}>
                 <TableCell>
                   <Stack direction="row" alignItems="center" spacing={0.5}>
                     <Typography variant="caption">{getCountryFlag(node.linkCountry)}</Typography>
@@ -470,8 +561,8 @@ function NodeMatchTable({ matchSummary, isMobile }) {
                 </TableCell>
                 <TableCell>
                   {node.unmatched ? (
-                    <Typography variant="caption" color="text.disabled">
-                      无
+                    <Typography variant="caption" sx={{ color: tertiaryText }}>
+                      {t('common.none', 'None')}
                     </Typography>
                   ) : (
                     <Typography variant="body2">{node.matchedRule}</Typography>
@@ -481,7 +572,7 @@ function NodeMatchTable({ matchSummary, isMobile }) {
                   {node.entryProxy ? (
                     <Typography variant="body2">{node.entryProxy}</Typography>
                   ) : (
-                    <Typography variant="caption" color="text.disabled">
+                    <Typography variant="caption" sx={{ color: tertiaryText }}>
                       -
                     </Typography>
                   )}
@@ -500,13 +591,25 @@ NodeMatchTable.propTypes = {
   isMobile: PropTypes.bool.isRequired
 };
 
-/**
- * 链式代理预览对话框
- * 展示整个订阅的所有规则及节点匹配情况
- */
 export default function ChainPreviewDialog({ open, onClose, loading, data }) {
+  const { t } = useTranslation();
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
+  const { isDark } = useResolvedColorScheme();
+  const tokens = getChainProxyThemeTokens(theme, isDark);
+  const {
+    dialogSurface,
+    dialogSurfaceGradient,
+    mutedPanelSurface,
+    elevatedSurface,
+    panelBorder,
+    softBorder,
+    primaryText,
+    secondaryText,
+    tertiaryText,
+    cardShadow
+  } = tokens;
+  const iconButtonSx = getChainProxyIconButtonSx(tokens);
   const [tab, setTab] = useState(0);
 
   const rules = useMemo(() => data?.rules || [], [data?.rules]);
@@ -519,60 +622,101 @@ export default function ChainPreviewDialog({ open, onClose, loading, data }) {
       maxWidth="lg"
       fullWidth
       fullScreen={isMobile}
-      PaperProps={{
-        sx: {
-          borderRadius: isMobile ? 0 : 3,
-          minHeight: isMobile ? 'auto' : '70vh'
+      slotProps={{
+        paper: {
+          sx: {
+            borderRadius: isMobile ? 0 : 3,
+            minHeight: isMobile ? 'auto' : '70vh',
+            border: '1px solid',
+            borderColor: panelBorder,
+            bgcolor: dialogSurface,
+            backgroundImage: dialogSurfaceGradient
+          }
         }
       }}
     >
-      <DialogTitle sx={{ pb: 1 }}>
+      <DialogTitle sx={{ pb: 1, bgcolor: mutedPanelSurface, borderBottom: '1px solid', borderColor: panelBorder }}>
         <Stack direction="row" alignItems="center" justifyContent="space-between">
           <Stack direction="row" alignItems="center" spacing={1.5}>
             <RouteIcon sx={{ color: 'primary.main' }} />
             <Box>
               <Typography variant={isMobile ? 'subtitle1' : 'h6'} fontWeight={700}>
-                🔗 链路预览
+                {t('subscriptions.chain.preview.title')}
               </Typography>
               {data?.subscriptionName && (
-                <Typography variant="caption" color="text.secondary">
-                  订阅：{data.subscriptionName} | 节点总数：{data.totalNodes}
+                <Typography variant="caption" sx={{ color: secondaryText }}>
+                  {t('subscriptions.chain.preview.subtitle', { name: data.subscriptionName, count: data.totalNodes })}
                 </Typography>
               )}
             </Box>
           </Stack>
-          <IconButton onClick={onClose} size="small">
+          <IconButton onClick={onClose} size="small" sx={iconButtonSx}>
             <CloseIcon />
           </IconButton>
         </Stack>
       </DialogTitle>
 
-      <DialogContent sx={{ pt: 0 }}>
+      <DialogContent sx={{ pt: 0, bgcolor: dialogSurface }}>
         {loading ? (
           <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 200 }}>
             <CircularProgress />
           </Box>
         ) : rules.length === 0 ? (
-          <Box sx={{ textAlign: 'center', py: 6 }}>
-            <AccountTreeIcon sx={{ fontSize: 56, color: 'text.disabled', mb: 2 }} />
-            <Typography variant="h6" color="text.secondary">
-              暂无链式代理规则
+          <Box sx={{ textAlign: 'center', py: 6, px: 2 }}>
+            <AccountTreeIcon sx={{ fontSize: 56, color: secondaryText, mb: 2 }} />
+            <Typography variant="h6" sx={{ color: primaryText }}>
+              {t('subscriptions.chain.emptyRules')}
             </Typography>
-            <Typography variant="body2" color="text.disabled">
-              请先添加规则
+            <Typography variant="body2" sx={{ color: secondaryText }}>
+              {t('subscriptions.chain.preview.addRuleHint')}
             </Typography>
           </Box>
         ) : (
           <>
-            <Tabs value={tab} onChange={(e, v) => setTab(v)} sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
-              <Tab label={`规则链路 (${rules.length})`} />
-              <Tab label={`节点匹配 (${matchSummary.length})`} />
+            <Tabs
+              value={tab}
+              onChange={(_, v) => setTab(v)}
+              sx={{
+                borderBottom: 1,
+                mb: 2,
+                mt: 2,
+                bgcolor: elevatedSurface,
+                borderRadius: 2,
+                border: '1px solid',
+                borderColor: softBorder,
+                boxShadow: cardShadow,
+                '& .MuiTab-root': {
+                  color: secondaryText,
+                  minHeight: 44
+                },
+                '& .Mui-selected': {
+                  color: primaryText
+                }
+              }}
+            >
+              <Tab label={t('subscriptions.chain.preview.ruleChainsTab', { count: rules.length })} />
+              <Tab label={t('subscriptions.chain.preview.nodeMatchesTab', { count: matchSummary.length })} />
             </Tabs>
 
             {tab === 0 && (
               <Box>
-                <Typography variant="caption" color="text.secondary" display="block" mb={2}>
-                  💡 规则按顺序匹配，每个节点只会应用第一个匹配的规则 · 鼠标滚轮缩放，拖拽平移画布
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  display="block"
+                  mb={2}
+                  sx={{
+                    px: 1,
+                    py: 0.75,
+                    borderRadius: 1.5,
+                    bgcolor: elevatedSurface,
+                    border: '1px solid',
+                    borderColor: softBorder,
+                    color: tertiaryText,
+                    boxShadow: cardShadow
+                  }}
+                >
+                  {t('subscriptions.chain.preview.canvasHint')}
                 </Typography>
                 <ChainCanvasView rules={rules} fullscreen={isMobile} />
               </Box>

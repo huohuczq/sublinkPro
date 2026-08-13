@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 
 // material-ui
 import Dialog from '@mui/material/Dialog';
@@ -18,6 +19,7 @@ import Collapse from '@mui/material/Collapse';
 import LinearProgress from '@mui/material/LinearProgress';
 import CircularProgress from '@mui/material/CircularProgress';
 import Divider from '@mui/material/Divider';
+import { useTheme } from '@mui/material/styles';
 
 // icons
 import PublicIcon from '@mui/icons-material/Public';
@@ -32,6 +34,9 @@ import CloseIcon from '@mui/icons-material/Close';
 import { getGeoIPConfig, saveGeoIPConfig, getGeoIPStatus, downloadGeoIP, stopGeoIPDownload } from 'api/geoip';
 import { getNodes } from 'api/nodes';
 import SearchableNodeSelect from 'components/SearchableNodeSelect';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
+import { getReadableTextTokens, getSurfaceTokens } from 'themes/surfaceTokens';
+import { withAlpha } from 'utils/colorUtils';
 
 // 默认下载地址
 const DEFAULT_DOWNLOAD_URL = 'https://git.io/GeoLite2-City.mmdb';
@@ -39,6 +44,11 @@ const DEFAULT_DOWNLOAD_URL = 'https://git.io/GeoLite2-City.mmdb';
 // ==============================|| GeoIP 设置对话框 ||============================== //
 
 export default function GeoIPSettingsDialog({ open, onClose, showMessage }) {
+  const theme = useTheme();
+  const { t } = useTranslation();
+  const { isDark } = useResolvedColorScheme();
+  const { dialogSurface, dialogSurfaceGradient, mutedPanelSurface, nestedPanelSurface, panelBorder } = getSurfaceTokens(theme, isDark);
+  const { primaryText, secondaryText } = getReadableTextTokens(theme, isDark);
   const [config, setConfig] = useState({
     downloadUrl: DEFAULT_DOWNLOAD_URL,
     useProxy: false,
@@ -104,9 +114,9 @@ export default function GeoIPSettingsDialog({ open, onClose, showMessage }) {
             if (!res.data.downloading) {
               // 下载完成或失败
               if (res.data.error) {
-                showMessage?.('下载失败: ' + res.data.error, 'error');
+                showMessage?.(t('components.geoIpSettings.messages.downloadFailedWithReason', { reason: res.data.error }), 'error');
               } else if (res.data.available) {
-                showMessage?.('GeoIP 数据库下载成功', 'success');
+                showMessage?.(t('components.geoIpSettings.messages.downloadSuccess'), 'success');
               }
             }
           }
@@ -116,7 +126,7 @@ export default function GeoIPSettingsDialog({ open, onClose, showMessage }) {
       }, 1000);
     }
     return () => clearInterval(interval);
-  }, [open, status.downloading, showMessage]);
+  }, [open, status.downloading, showMessage, t]);
 
   // 初始化
   useEffect(() => {
@@ -136,7 +146,7 @@ export default function GeoIPSettingsDialog({ open, onClose, showMessage }) {
   const fetchProxyNodes = async () => {
     setLoadingNodes(true);
     try {
-      const res = await getNodes({ minSpeed: 0.01, pageSize: 200 });
+      const res = await getNodes({ pageSize: 200 });
       if (res.data) {
         const items = res.data.items || res.data || [];
         setProxyNodes(items);
@@ -167,12 +177,15 @@ export default function GeoIPSettingsDialog({ open, onClose, showMessage }) {
         proxyLink: config.proxyLink
       });
       if (res.code === 200) {
-        showMessage?.('配置已保存', 'success');
+        showMessage?.(t('components.geoIpSettings.messages.saveSuccess'), 'success');
       } else {
-        showMessage?.(res.msg || '保存失败', 'error');
+        showMessage?.(res.msg || t('components.geoIpSettings.messages.saveFailed'), 'error');
       }
     } catch (error) {
-      showMessage?.('保存失败: ' + (error.response?.data?.msg || error.message), 'error');
+      showMessage?.(
+        t('components.geoIpSettings.messages.saveFailedWithReason', { reason: error.response?.data?.msg || error.message }),
+        'error'
+      );
     } finally {
       setSaving(false);
     }
@@ -185,13 +198,16 @@ export default function GeoIPSettingsDialog({ open, onClose, showMessage }) {
     try {
       const res = await downloadGeoIP();
       if (res.code === 200) {
-        showMessage?.('开始下载 GeoIP 数据库...', 'info');
+        showMessage?.(t('components.geoIpSettings.messages.downloadStarted'), 'info');
         setStatus((prev) => ({ ...prev, downloading: true, progress: 0, error: '' }));
       } else {
-        showMessage?.(res.msg || '启动下载失败', 'error');
+        showMessage?.(res.msg || t('components.geoIpSettings.messages.startDownloadFailed'), 'error');
       }
     } catch (error) {
-      showMessage?.('启动下载失败: ' + (error.response?.data?.msg || error.message), 'error');
+      showMessage?.(
+        t('components.geoIpSettings.messages.startDownloadFailedWithReason', { reason: error.response?.data?.msg || error.message }),
+        'error'
+      );
     }
   };
 
@@ -203,22 +219,51 @@ export default function GeoIPSettingsDialog({ open, onClose, showMessage }) {
     try {
       const res = await stopGeoIPDownload();
       if (res.code === 200) {
-        showMessage?.('已发送停止信号', 'info');
+        showMessage?.(t('components.geoIpSettings.messages.stopSignalSent'), 'info');
       } else {
-        showMessage?.(res.msg || '停止失败', 'error');
+        showMessage?.(res.msg || t('components.geoIpSettings.messages.stopFailed'), 'error');
       }
     } catch (error) {
-      showMessage?.('停止失败: ' + (error.response?.data?.msg || error.message), 'error');
+      showMessage?.(
+        t('components.geoIpSettings.messages.stopFailedWithReason', { reason: error.response?.data?.msg || error.message }),
+        'error'
+      );
     }
   };
 
+  const getStatusPanelSx = (accentColor) => ({
+    p: 2,
+    borderRadius: 2,
+    backgroundColor: isDark ? nestedPanelSurface : withAlpha(accentColor, 0.08),
+    backgroundImage: isDark ? `linear-gradient(180deg, ${withAlpha(accentColor, 0.12)} 0%, ${nestedPanelSurface} 100%)` : 'none',
+    border: '1px solid',
+    borderColor: withAlpha(accentColor, isDark ? 0.3 : 0.18),
+    boxShadow: isDark ? `inset 0 1px 0 ${withAlpha(theme.palette.common.white, 0.04)}` : 'none'
+  });
+
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>
+    <Dialog
+      open={open}
+      onClose={onClose}
+      maxWidth="sm"
+      fullWidth
+      PaperProps={{
+        sx: {
+          border: '1px solid',
+          borderColor: panelBorder,
+          bgcolor: dialogSurface,
+          backgroundImage: dialogSurfaceGradient,
+          boxShadow: isDark ? `inset 0 1px 0 ${withAlpha(theme.palette.common.white, 0.04)}` : undefined
+        }
+      }}
+    >
+      <DialogTitle sx={{ bgcolor: mutedPanelSurface, borderBottom: '1px solid', borderColor: panelBorder }}>
         <Stack direction="row" alignItems="center" justifyContent="space-between">
           <Stack direction="row" alignItems="center" spacing={1}>
             <PublicIcon sx={{ color: 'primary.main' }} />
-            <Typography variant="h4">GeoIP 数据库设置</Typography>
+            <Typography variant="h4" sx={{ color: primaryText }}>
+              {t('components.geoIpSettings.title')}
+            </Typography>
           </Stack>
           <IconButton onClick={onClose} size="small">
             <CloseIcon />
@@ -226,7 +271,7 @@ export default function GeoIPSettingsDialog({ open, onClose, showMessage }) {
         </Stack>
       </DialogTitle>
 
-      <DialogContent dividers>
+      <DialogContent dividers sx={{ bgcolor: dialogSurface, borderColor: panelBorder }}>
         {loading ? (
           <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
             <CircularProgress />
@@ -234,36 +279,28 @@ export default function GeoIPSettingsDialog({ open, onClose, showMessage }) {
         ) : (
           <Stack spacing={2.5}>
             {/* 状态区域 */}
-            <Box
-              sx={{
-                p: 2,
-                borderRadius: 1,
-                backgroundColor: status.available ? 'success.light' : 'warning.light',
-                border: '1px solid',
-                borderColor: status.available ? 'success.main' : 'warning.main'
-              }}
-            >
+            <Box sx={getStatusPanelSx(status.available ? theme.palette.success.main : theme.palette.warning.main)}>
               <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
                 {status.available ? <CheckCircleIcon sx={{ color: 'success.main' }} /> : <ErrorIcon sx={{ color: 'warning.main' }} />}
-                <Typography variant="subtitle1" fontWeight={600}>
-                  {status.available ? '数据库已安装' : '数据库未安装'}
+                <Typography variant="subtitle1" fontWeight={600} sx={{ color: primaryText }}>
+                  {status.available ? t('components.geoIpSettings.status.installed') : t('components.geoIpSettings.status.notInstalled')}
                 </Typography>
               </Stack>
 
               {status.available && (
                 <Stack spacing={0.5}>
-                  <Typography variant="body2" color="textSecondary">
-                    文件大小: {status.sizeFormatted}
+                  <Typography variant="body2" sx={{ color: secondaryText }}>
+                    {t('components.geoIpSettings.status.fileSize', { value: status.sizeFormatted })}
                   </Typography>
-                  <Typography variant="body2" color="textSecondary">
-                    更新时间: {status.modTime || config.lastUpdate || '未知'}
+                  <Typography variant="body2" sx={{ color: secondaryText }}>
+                    {t('components.geoIpSettings.status.updatedAt', { value: status.modTime || config.lastUpdate || t('common.unknown') })}
                   </Typography>
                 </Stack>
               )}
 
               {!status.available && (
-                <Typography variant="body2" color="textSecondary">
-                  GeoIP 数据库用于 IP 地理位置查询和落地检测，请下载安装。
+                <Typography variant="body2" sx={{ color: secondaryText }}>
+                  {t('components.geoIpSettings.status.missingDescription')}
                 </Typography>
               )}
             </Box>
@@ -274,16 +311,23 @@ export default function GeoIPSettingsDialog({ open, onClose, showMessage }) {
                 <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
                   <CircularProgress size={16} />
                   <Typography variant="body2">
-                    {status.source === 'auto' ? '系统自动下载中' : '正在下载'}... {status.progress}%
+                    {t(
+                      status.source === 'auto'
+                        ? 'components.geoIpSettings.download.autoDownloading'
+                        : 'components.geoIpSettings.download.downloading',
+                      {
+                        progress: status.progress
+                      }
+                    )}
                   </Typography>
                   <Button size="small" color="error" onClick={handleStopDownload}>
-                    停止
+                    {t('components.geoIpSettings.actions.stop')}
                   </Button>
                 </Stack>
                 <LinearProgress variant="determinate" value={status.progress} />
                 {status.source === 'auto' && (
-                  <Typography variant="caption" color="textSecondary" sx={{ mt: 0.5, display: 'block' }}>
-                    系统启动时检测到 GeoIP 数据库缺失，正在自动下载。您可以停止后配置代理重新下载。
+                  <Typography variant="caption" sx={{ mt: 0.5, display: 'block', color: secondaryText }}>
+                    {t('components.geoIpSettings.download.autoHint')}
                   </Typography>
                 )}
               </Box>
@@ -301,24 +345,24 @@ export default function GeoIPSettingsDialog({ open, onClose, showMessage }) {
             {/* 下载地址 */}
             <TextField
               fullWidth
-              label="下载地址"
+              label={t('components.geoIpSettings.fields.downloadUrl')}
               value={config.downloadUrl}
               onChange={(e) => setConfig({ ...config, downloadUrl: e.target.value })}
               placeholder={DEFAULT_DOWNLOAD_URL}
               InputProps={{
                 endAdornment: (
-                  <IconButton onClick={handleRestoreDefault} size="small" title="恢复默认">
+                  <IconButton onClick={handleRestoreDefault} size="small" title={t('components.geoIpSettings.actions.restoreDefault')}>
                     <RestoreIcon />
                   </IconButton>
                 )
               }}
-              helperText="MaxMind GeoLite2-City 数据库下载地址"
+              helperText={t('components.geoIpSettings.helpers.downloadUrl')}
             />
 
             {/* 代理设置 */}
             <FormControlLabel
               control={<Switch checked={config.useProxy} onChange={(e) => setConfig({ ...config, useProxy: e.target.checked })} />}
-              label="使用代理下载"
+              label={t('components.geoIpSettings.fields.useProxy')}
             />
 
             <Collapse in={config.useProxy}>
@@ -330,9 +374,9 @@ export default function GeoIPSettingsDialog({ open, onClose, showMessage }) {
                   onChange={handleNodeChange}
                   displayField="Name"
                   valueField="Link"
-                  label="选择代理节点"
-                  placeholder="留空则自动选择最佳节点"
-                  helperText="如果未选择具体代理，系统将自动选择延迟最低且速度最快的节点"
+                  label={t('components.geoIpSettings.fields.proxyNode')}
+                  placeholder={t('components.geoIpSettings.placeholders.proxyNode')}
+                  helperText={t('components.geoIpSettings.helpers.proxyNode')}
                   freeSolo={true}
                   limit={50}
                 />
@@ -343,25 +387,25 @@ export default function GeoIPSettingsDialog({ open, onClose, showMessage }) {
 
             {/* 说明 */}
             <Alert severity="info">
-              <Typography variant="body2" sx={{ mb: 1 }}>
-                <strong>注意事项：</strong>
+              <Typography variant="body2" sx={{ mb: 1, color: primaryText }}>
+                <strong>{t('components.geoIpSettings.notice.title')}</strong>
               </Typography>
-              <Typography variant="body2" component="ul" sx={{ m: 0, pl: 2 }}>
-                <li>数据库必须是 MaxMind 的 mmdb 格式且包含 city 数据 (GeoLite2-City)</li>
-                <li>如果没有 GeoIP 数据库，IP 地理位置查询和落地检测功能将不可用</li>
-                <li>建议定期更新数据库以获得更准确的地理位置信息</li>
+              <Typography variant="body2" component="ul" sx={{ m: 0, pl: 2, color: secondaryText }}>
+                <li>{t('components.geoIpSettings.notice.mmdb')}</li>
+                <li>{t('components.geoIpSettings.notice.required')}</li>
+                <li>{t('components.geoIpSettings.notice.update')}</li>
               </Typography>
             </Alert>
           </Stack>
         )}
       </DialogContent>
 
-      <DialogActions sx={{ px: 3, py: 2 }}>
+      <DialogActions sx={{ px: 3, py: 2, bgcolor: mutedPanelSurface, borderTop: '1px solid', borderColor: panelBorder }}>
         <Button onClick={handleSave} disabled={saving || status.downloading} startIcon={<SaveIcon />}>
-          保存配置
+          {t('components.geoIpSettings.actions.saveConfig')}
         </Button>
         <Button variant="contained" onClick={handleDownload} disabled={status.downloading} startIcon={<DownloadIcon />}>
-          {status.available ? '更新数据库' : '下载数据库'}
+          {status.available ? t('components.geoIpSettings.actions.updateDatabase') : t('components.geoIpSettings.actions.downloadDatabase')}
         </Button>
       </DialogActions>
     </Dialog>

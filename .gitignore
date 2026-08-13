@@ -3,10 +3,22 @@
 db
 logs
 out
-sublink_amd64 
+sublink_amd64
 sublink_arm64
 sublink.exe
 .idea/
 static
 sublinkPro.exe
+/sublink
 
+# AI agent runtime and temporary files (DO NOT COMMIT)
+.claude/projects/
+.claude/sessions/
+.claude/plans/
+.claude/transcripts/
+
+/.sisyphus/
+/.playwright-mcp/
+/.omo/
+/docs/superpowers/
+/.agents/.tmp/

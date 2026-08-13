@@ -1,11 +1,13 @@
 package protocol
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sublink/cache"
@@ -44,7 +46,7 @@ func (fp *FlexPort) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // MarshalYAML 实现 yaml.Marshaler 接口，始终输出为 int
-func (fp FlexPort) MarshalYAML() (interface{}, error) {
+func (fp FlexPort) MarshalYAML() (any, error) {
 	return int(fp), nil
 }
 
@@ -53,55 +55,162 @@ func (fp FlexPort) Int() int {
 	return int(fp)
 }
 
+// IsZero lets YAML omitempty suppress absent ports for protocols that use
+// alternative port fields such as Mieru port-range.
+func (fp FlexPort) IsZero() bool {
+	return fp == 0
+}
+
+// Mbps 是 Clash 兼容的带宽数值类型。
+// 兼容 provider 里把 up/down 之类字段写成 "11 Mbps" 这种字符串的情况，但序列化时仍输出整数。
+type Mbps int
+
+var bandwidthRatePattern = regexp.MustCompile(`^(\d+)\s*([KMGTkmgt]?)([Bb])ps$`)
+
+// UnmarshalYAML 支持把带宽字段解析为整数、裸数字字符串或标准速率字符串。
+// 这里保留对 Hysteria/Hysteria2 兼容格式的支持，但拒绝非标准后缀，避免把非法带宽静默降级。
+func (m *Mbps) UnmarshalYAML(value *yaml.Node) error {
+	var intVal int
+	if err := value.Decode(&intVal); err == nil {
+		*m = Mbps(intVal)
+		return nil
+	}
+
+	var strVal string
+	if err := value.Decode(&strVal); err != nil {
+		return fmt.Errorf("无法解析带宽值")
+	}
+	strVal = strings.TrimSpace(strVal)
+	if strVal == "" {
+		*m = 0
+		return nil
+	}
+	if directVal, err := strconv.Atoi(strVal); err == nil {
+		*m = Mbps(directVal)
+		return nil
+	}
+	matches := bandwidthRatePattern.FindStringSubmatch(strVal)
+	if matches == nil {
+		return fmt.Errorf("无法解析带宽值 %q", strVal)
+	}
+	base, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return fmt.Errorf("无法将带宽值 %q 转换为整数: %w", strVal, err)
+	}
+	switch strings.ToUpper(matches[2]) {
+	case "", "M":
+		*m = Mbps(base)
+		return nil
+	case "G":
+		*m = Mbps(base * 1000)
+		return nil
+	case "T":
+		*m = Mbps(base * 1000 * 1000)
+		return nil
+	case "K":
+		return fmt.Errorf("带宽值 %q 使用了 Kbps 单位，无法无损转换为 Mbps", strVal)
+	default:
+		return fmt.Errorf("无法解析带宽值 %q", strVal)
+	}
+}
+
+// MarshalYAML 始终把带宽写成整数，避免把内部类型泄漏成字符串。
+func (m Mbps) MarshalYAML() (any, error) {
+	return int(m), nil
+}
+
 type Proxy struct {
-	Name                  string                 `yaml:"name,omitempty"`                  // 节点名称
-	Type                  string                 `yaml:"type,omitempty"`                  // 代理类型 (ss, vmess, trojan, etc.)
-	Server                string                 `yaml:"server,omitempty"`                // 服务器地址
-	Port                  FlexPort               `yaml:"port,omitempty"`                  // 服务器端口
-	Ports                 string                 `yaml:"ports,omitempty"`                 // hysteria2端口跳跃
-	Cipher                string                 `yaml:"cipher,omitempty"`                // 加密方式
-	Username              string                 `yaml:"username,omitempty"`              // 用户名 (socks5 等)
-	Password              string                 `yaml:"password,omitempty"`              // 密码
-	Client_fingerprint    string                 `yaml:"client-fingerprint,omitempty"`    // 客户端指纹 (uTLS)
-	Tfo                   bool                   `yaml:"tfo,omitempty"`                   // TCP Fast Open
-	Udp                   bool                   `yaml:"udp,omitempty"`                   // 是否启用 UDP
-	Skip_cert_verify      bool                   `yaml:"skip-cert-verify,omitempty"`      // 跳过证书验证
-	Tls                   bool                   `yaml:"tls,omitempty"`                   // 是否启用 TLS
-	Servername            string                 `yaml:"servername,omitempty"`            // TLS SNI
-	Flow                  string                 `yaml:"flow,omitempty"`                  // 流控 (xtls-rprx-vision 等)
-	AlterId               string                 `yaml:"alterId,omitempty"`               // VMess AlterId
-	Network               string                 `yaml:"network,omitempty"`               // 传输协议 (ws, grpc, etc.)
-	Reality_opts          map[string]interface{} `yaml:"reality-opts,omitempty"`          // Reality 选项
-	Ws_opts               map[string]interface{} `yaml:"ws-opts,omitempty"`               // WebSocket 选项
-	Grpc_opts             map[string]interface{} `yaml:"grpc-opts,omitempty"`             // gRPC 选项
-	Auth_str              string                 `yaml:"auth-str,omitempty"`              // Hysteria 认证字符串
-	Auth                  string                 `yaml:"auth,omitempty"`                  // 认证信息
-	Up                    int                    `yaml:"up,omitempty"`                    // 上行带宽限制
-	Down                  int                    `yaml:"down,omitempty"`                  // 下行带宽限制
-	Alpn                  []string               `yaml:"alpn,omitempty"`                  // ALPN
-	Sni                   string                 `yaml:"sni,omitempty"`                   // SNI
-	Obfs                  string                 `yaml:"obfs,omitempty"`                  // 混淆模式 (SSR/Hysteria2)
-	Obfs_password         string                 `yaml:"obfs-password,omitempty"`         // 混淆密码
-	Protocol              string                 `yaml:"protocol,omitempty"`              // SSR 协议
-	Uuid                  string                 `yaml:"uuid,omitempty"`                  // UUID (VMess/VLESS)
-	Peer                  string                 `yaml:"peer,omitempty"`                  // Peer (Hysteria)
-	Congestion_controller string                 `yaml:"congestion-controller,omitempty"` // 拥塞控制 (Tuic)
-	Udp_relay_mode        string                 `yaml:"udp-relay-mode,omitempty"`        // UDP 转发模式 (Tuic)
-	Disable_sni           bool                   `yaml:"disable-sni,omitempty"`           // 禁用 SNI (Tuic)
-	Dialer_proxy          string                 `yaml:"dialer-proxy,omitempty"`          // 前置代理
+	Name                  string         `yaml:"name,omitempty"`                        // 节点名称
+	Type                  string         `yaml:"type,omitempty"`                        // 代理类型 (ss, vmess, trojan, etc.)
+	Server                string         `yaml:"server,omitempty"`                      // 服务器地址
+	Port                  FlexPort       `yaml:"port,omitempty"`                        // 服务器端口
+	PortRange             string         `yaml:"port-range,omitempty"`                  // 端口范围 (Mieru)
+	Ports                 string         `yaml:"ports,omitempty"`                       // hysteria2端口跳跃
+	Transport             string         `yaml:"transport,omitempty"`                   // 传输协议 (Mieru TCP/UDP)
+	Cipher                string         `yaml:"cipher,omitempty"`                      // 加密方式
+	Username              string         `yaml:"username,omitempty"`                    // 用户名 (socks5 等)
+	Password              string         `yaml:"password,omitempty"`                    // 密码
+	Multiplexing          string         `yaml:"multiplexing,omitempty"`                // Mieru 多路复用级别
+	TrafficPattern        string         `yaml:"traffic-pattern,omitempty"`             // Mieru 流量模式
+	Client_fingerprint    string         `yaml:"client-fingerprint,omitempty"`          // 客户端指纹 (uTLS)
+	Fingerprint           string         `yaml:"fingerprint,omitempty"`                 // 服务端证书 SHA-256 指纹
+	Tfo                   bool           `yaml:"tfo,omitempty"`                         // TCP Fast Open
+	Udp                   bool           `yaml:"udp,omitempty"`                         // 是否启用 UDP
+	Skip_cert_verify      bool           `yaml:"skip-cert-verify,omitempty"`            // 跳过证书验证
+	Tls                   bool           `yaml:"tls,omitempty"`                         // 是否启用 TLS
+	Servername            string         `yaml:"servername,omitempty"`                  // TLS SNI
+	Flow                  string         `yaml:"flow,omitempty"`                        // 流控 (xtls-rprx-vision 等)
+	AlterId               string         `yaml:"alterId,omitempty"`                     // VMess AlterId
+	Network               string         `yaml:"network,omitempty"`                     // 传输协议 (ws, grpc, etc.)
+	Reality_opts          map[string]any `yaml:"reality-opts,omitempty"`                // Reality 选项
+	Ws_opts               map[string]any `yaml:"ws-opts,omitempty"`                     // WebSocket 选项
+	Grpc_opts             map[string]any `yaml:"grpc-opts,omitempty"`                   // gRPC 选项
+	Auth_str              string         `yaml:"auth-str,omitempty"`                    // Hysteria 认证字符串
+	Auth                  string         `yaml:"auth,omitempty"`                        // 认证信息
+	Up                    Mbps           `yaml:"up,omitempty"`                          // 上行带宽限制
+	Down                  Mbps           `yaml:"down,omitempty"`                        // 下行带宽限制
+	AnyTLSIdleCheck       int            `yaml:"idle-session-check-interval,omitempty"` // AnyTLS 空闲会话检查间隔
+	AnyTLSIdleTimeout     int            `yaml:"idle-session-timeout,omitempty"`        // AnyTLS 空闲会话超时时间
+	AnyTLSMinIdle         int            `yaml:"min-idle-session,omitempty"`            // AnyTLS 最小空闲会话数
+	Up_Speed              Mbps           `yaml:"up-speed,omitempty"`                    // 上行带宽限制兼容stash
+	Down_Speed            Mbps           `yaml:"down-speed,omitempty"`                  // 下行带宽限制兼容stash
+	Alpn                  []string       `yaml:"alpn,omitempty"`                        // ALPN
+	Sni                   string         `yaml:"sni,omitempty"`                         // SNI
+	Obfs                  string         `yaml:"obfs,omitempty"`                        // 混淆模式 (SSR/Hysteria2)
+	Obfs_password         string         `yaml:"obfs-password,omitempty"`               // 混淆密码
+	Psk                   string         `yaml:"psk,omitempty"`                         // Snell 预共享密钥
+	Obfs_opts             map[string]any `yaml:"obfs-opts,omitempty"`                   // Snell 混淆选项 (mode/host)
+	Protocol              string         `yaml:"protocol,omitempty"`                    // SSR 协议
+	ProtocolParam         string         `yaml:"protocol-param,omitempty"`              // SSR 协议参数
+	ObfsParam             string         `yaml:"obfs-param,omitempty"`                  // SSR 混淆参数
+	Uuid                  string         `yaml:"uuid,omitempty"`                        // UUID (VMess/VLESS)
+	Peer                  string         `yaml:"peer,omitempty"`                        // Peer (Hysteria)
+	Congestion_controller string         `yaml:"congestion-controller,omitempty"`       // 拥塞控制 (Tuic)
+	Udp_relay_mode        string         `yaml:"udp-relay-mode,omitempty"`              // UDP 转发模式 (Tuic)
+	Disable_sni           bool           `yaml:"disable-sni,omitempty"`                 // 禁用 SNI (Tuic)
+	Dialer_proxy          string         `yaml:"dialer-proxy,omitempty"`                // 前置代理
+	// 通用 BasicOption 字段（mihomo 所有出站共用的连接层选项）
+	Mptcp          bool   `yaml:"mptcp,omitempty"`          // 是否启用 MPTCP
+	Interface_name string `yaml:"interface-name,omitempty"` // 绑定的本地网卡名称
+	Routing_mark   int    `yaml:"routing-mark,omitempty"`   // Linux fwmark 路由标记
+	Ip_version     string `yaml:"ip-version,omitempty"`     // IP 版本偏好 (dual/ipv4/ipv6/ipv4-prefer/ipv6-prefer)
 	// SS 插件字段
-	Plugin      string                 `yaml:"plugin,omitempty"`      // SS 插件名称
-	Plugin_opts map[string]interface{} `yaml:"plugin-opts,omitempty"` // SS 插件选项
+	Plugin      string         `yaml:"plugin,omitempty"`      // SS 插件名称
+	Plugin_opts map[string]any `yaml:"plugin-opts,omitempty"` // SS 插件选项
 	// WireGuard 特有字段
-	Private_key string   `yaml:"private-key,omitempty"` // WireGuard 私钥
-	Public_key  string   `yaml:"public-key,omitempty"`  // WireGuard 公钥
-	Ip          string   `yaml:"ip,omitempty"`          // WireGuard 客户端 IPv4
-	Ipv6        string   `yaml:"ipv6,omitempty"`        // WireGuard 客户端 IPv6
-	Mtu         int      `yaml:"mtu,omitempty"`         // MTU 值
-	Reserved    []int    `yaml:"reserved,omitempty"`    // 保留字段
-	Allowed_ips []string `yaml:"allowed-ips,omitempty"` // 允许的 IP 段
-	Version     int      `yaml:"version,omitempty"`     // 版本
-	Token       string   `yaml:"token,omitempty"`       // Tuic 令牌v4
+	Private_key    string   `yaml:"private-key,omitempty"`    // WireGuard 私钥
+	Public_key     string   `yaml:"public-key,omitempty"`     // WireGuard 公钥
+	Pre_shared_key string   `yaml:"pre-shared-key,omitempty"` // WireGuard 预共享密钥（可选）
+	Ip             string   `yaml:"ip,omitempty"`             // WireGuard 客户端 IPv4
+	Ipv6           string   `yaml:"ipv6,omitempty"`           // WireGuard 客户端 IPv6
+	Mtu            int      `yaml:"mtu,omitempty"`            // MTU 值
+	Reserved       []int    `yaml:"reserved,omitempty"`       // 保留字段
+	Allowed_ips    []string `yaml:"allowed-ips,omitempty"`    // 允许的 IP 段
+	Version        int      `yaml:"version,omitempty"`        // 版本
+	Token          string   `yaml:"token,omitempty"`          // Tuic 令牌v4
+	// VLESS 特有字段
+	Encryption      string         `yaml:"encryption,omitempty"`
+	Packet_encoding string         `yaml:"packet-encoding,omitempty"` // VLESS packet-encoding (xudp/packetaddr)
+	H2_opts         map[string]any `yaml:"h2-opts,omitempty"`         // HTTP/2 传输层选项
+	Http_opts       map[string]any `yaml:"http-opts,omitempty"`       // HTTP 传输层选项
+	XHTTP_opts      map[string]any `yaml:"xhttp-opts,omitempty"`
+	ECH_opts        map[string]any `yaml:"ech-opts,omitempty"`
+}
+
+func sanitizeCertificateFingerprint(fingerprint string) string {
+	fingerprint = strings.ReplaceAll(fingerprint, ":", "")
+	fingerprint = strings.ReplaceAll(fingerprint, "-", "")
+	if len(fingerprint) != 64 {
+		return ""
+	}
+	for _, c := range fingerprint {
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+			continue
+		}
+		return ""
+	}
+	fingerprint = strings.ToLower(fingerprint)
+	return fingerprint
 }
 
 type ProxyGroup struct {
@@ -119,14 +228,14 @@ type Urls struct {
 }
 
 // 删除opts中的空值
-func DeleteOpts(opts map[string]interface{}) {
+func DeleteOpts(opts map[string]any) {
 	for k, v := range opts {
 		switch v := v.(type) {
 		case string:
 			if v == "" {
 				delete(opts, k)
 			}
-		case map[string]interface{}:
+		case map[string]any:
 			DeleteOpts(v)
 			if len(v) == 0 {
 				delete(opts, k)
@@ -134,7 +243,7 @@ func DeleteOpts(opts map[string]interface{}) {
 		}
 	}
 }
-func convertToInt(value interface{}) (int, error) {
+func convertToInt(value any) (int, error) {
 	switch v := value.(type) {
 	case int:
 		return v, nil
@@ -147,88 +256,74 @@ func convertToInt(value interface{}) (int, error) {
 	}
 }
 
+func isTruthyConfigValue(value any) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case int:
+		return v != 0
+	case int64:
+		return v != 0
+	case float64:
+		return v != 0
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			return true
+		}
+	}
+
+	return false
+}
+
+// shouldPreserveProxyGroup 判断代理组是否应保留模板原始语义，而不是在服务端展开成固定节点列表。
+func shouldPreserveProxyGroup(proxyGroup map[string]any) bool {
+	for _, field := range []string{"include-all", "include-all-proxies", "include-all-providers"} {
+		if isTruthyConfigValue(proxyGroup[field]) {
+			return true
+		}
+	}
+
+	// Provider 组和自动匹配组由客户端在运行时解析，不能在服务端展开为固定节点列表。
+	for _, field := range []string{"use", "filter", "exclude-filter", "exclude-type", "expected-status"} {
+		if _, exists := proxyGroup[field]; exists {
+			return true
+		}
+	}
+
+	return false
+}
+
 // convertSSPluginOpts 将 SsPlugin 转换为 Clash 格式的 plugin-opts
 // 根据不同插件类型生成对应的配置
-func convertSSPluginOpts(plugin *SsPlugin) map[string]interface{} {
-	if plugin == nil || len(plugin.Opts) == 0 {
+func convertSSPluginOpts(plugin SsPlugin) map[string]any {
+	if plugin.Name == "" {
 		return nil
 	}
 
-	opts := make(map[string]interface{})
+	opts := make(map[string]any)
 
-	// 根据插件类型处理选项
-	switch plugin.Name {
-	case "obfs", "obfs-local", "simple-obfs":
-		// obfs 插件：mode, host
-		if mode, ok := plugin.Opts["obfs"]; ok {
-			opts["mode"] = mode
-		} else if mode, ok := plugin.Opts["mode"]; ok {
-			opts["mode"] = mode
-		}
-		if host, ok := plugin.Opts["obfs-host"]; ok {
-			opts["host"] = host
-		} else if host, ok := plugin.Opts["host"]; ok {
-			opts["host"] = host
-		}
-
-	case "v2ray-plugin":
-		// v2ray-plugin：mode, tls, host, path, mux, headers
-		if mode, ok := plugin.Opts["mode"]; ok {
-			opts["mode"] = mode
-		}
-		if tls, ok := plugin.Opts["tls"]; ok {
-			opts["tls"] = tls == "true" || tls == "1"
-		}
-		if host, ok := plugin.Opts["host"]; ok {
-			opts["host"] = host
-		}
-		if path, ok := plugin.Opts["path"]; ok {
-			opts["path"] = path
-		}
-		if mux, ok := plugin.Opts["mux"]; ok {
-			opts["mux"] = mux == "true" || mux == "1"
-		}
-
-	case "shadow-tls":
-		// shadow-tls：host, password, version
-		if host, ok := plugin.Opts["host"]; ok {
-			opts["host"] = host
-		}
-		if password, ok := plugin.Opts["password"]; ok {
-			opts["password"] = password
-		}
-		if version, ok := plugin.Opts["version"]; ok {
-			if v, err := strconv.Atoi(version); err == nil {
-				opts["version"] = v
-			}
-		}
-
-	case "restls":
-		// restls：host, password, version-hint, restls-script
-		if host, ok := plugin.Opts["host"]; ok {
-			opts["host"] = host
-		}
-		if password, ok := plugin.Opts["password"]; ok {
-			opts["password"] = password
-		}
-		if versionHint, ok := plugin.Opts["version-hint"]; ok {
-			opts["version-hint"] = versionHint
-		}
-		if script, ok := plugin.Opts["restls-script"]; ok {
-			opts["restls-script"] = script
-		}
-
-	case "kcptun":
-		// kcptun：key, crypt, mode 等
-		for key, val := range plugin.Opts {
-			opts[key] = val
-		}
-
-	default:
-		// 默认直接复制所有选项
-		for key, val := range plugin.Opts {
-			opts[key] = val
-		}
+	// 从结构体字段读取值
+	if plugin.Mode != "" {
+		opts["mode"] = plugin.Mode
+	}
+	if plugin.Host != "" {
+		opts["host"] = plugin.Host
+	}
+	if plugin.Path != "" {
+		opts["path"] = plugin.Path
+	}
+	if plugin.Tls {
+		opts["tls"] = true
+	}
+	if plugin.Mux {
+		opts["mux"] = true
+	}
+	if plugin.Password != "" {
+		opts["password"] = plugin.Password
+	}
+	if plugin.Version > 0 {
+		opts["version"] = plugin.Version
 	}
 
 	if len(opts) == 0 {
@@ -238,325 +333,17 @@ func convertSSPluginOpts(plugin *SsPlugin) map[string]interface{} {
 }
 
 // LinkToProxy 将单个节点链接转换为 Proxy 结构体
-// 支持 ss, ssr, trojan, vmess, vless, hysteria, hysteria2, tuic, anytls, socks5 等协议
+// 支持 ss, ssr, trojan, vmess, vless, hysteria, hysteria2, tuic, anytls, socks5, http, https 等协议
 func LinkToProxy(link Urls, config OutputConfig) (Proxy, error) {
-	Scheme := strings.ToLower(strings.Split(link.Url, "://")[0])
-	switch {
-	case Scheme == "ss":
-		ss, err := DecodeSSURL(link.Url)
-		if err != nil {
-			return Proxy{}, err
-		}
-		// 如果没有名字，就用服务器地址作为名字
-		if ss.Name == "" {
-			ss.Name = fmt.Sprintf("%s:%s", ss.Server, utils.GetPortString(ss.Port))
-		}
-		proxy := Proxy{
-			Name:             ss.Name,
-			Type:             "ss",
-			Server:           ss.Server,
-			Port:             FlexPort(utils.GetPortInt(ss.Port)),
-			Cipher:           ss.Param.Cipher,
-			Password:         ss.Param.Password,
-			Udp:              config.Udp,
-			Skip_cert_verify: config.Cert,
-			Dialer_proxy:     link.DialerProxyName,
-		}
-		// 处理 SS 插件
-		if ss.Plugin != nil && ss.Plugin.Name != "" {
-			proxy.Plugin = ss.Plugin.Name
-			proxy.Plugin_opts = convertSSPluginOpts(ss.Plugin)
-		}
-		return proxy, nil
-
-	case Scheme == "ssr":
-		ssr, err := DecodeSSRURL(link.Url)
-		if err != nil {
-			return Proxy{}, err
-		}
-		// 如果没有名字，就用服务器地址作为名字
-		if ssr.Qurey.Remarks == "" {
-			ssr.Qurey.Remarks = fmt.Sprintf("%s:%s", ssr.Server, utils.GetPortString(ssr.Port))
-		}
-		return Proxy{
-			Name:             ssr.Qurey.Remarks,
-			Type:             "ssr",
-			Server:           ssr.Server,
-			Port:             FlexPort(utils.GetPortInt(ssr.Port)),
-			Cipher:           ssr.Method,
-			Password:         ssr.Password,
-			Obfs:             ssr.Obfs,
-			Obfs_password:    ssr.Qurey.Obfsparam,
-			Protocol:         ssr.Protocol,
-			Udp:              config.Udp,
-			Skip_cert_verify: config.Cert,
-			Dialer_proxy:     link.DialerProxyName,
-		}, nil
-	case Scheme == "trojan":
-		trojan, err := DecodeTrojanURL(link.Url)
-		if err != nil {
-			return Proxy{}, err
-		}
-		// 如果没有名字，就用服务器地址作为名字
-		if trojan.Name == "" {
-			trojan.Name = fmt.Sprintf("%s:%s", trojan.Hostname, utils.GetPortString(trojan.Port))
-		}
-		ws_opts := map[string]interface{}{
-			"path": trojan.Query.Path,
-			"headers": map[string]interface{}{
-				"Host": trojan.Query.Host,
-			},
-		}
-		DeleteOpts(ws_opts)
-		return Proxy{
-			Name:               trojan.Name,
-			Type:               "trojan",
-			Server:             trojan.Hostname,
-			Port:               FlexPort(utils.GetPortInt(trojan.Port)),
-			Password:           trojan.Password,
-			Client_fingerprint: trojan.Query.Fp,
-			Sni:                trojan.Query.Sni,
-			Network:            trojan.Query.Type,
-			Flow:               trojan.Query.Flow,
-			Alpn:               trojan.Query.Alpn,
-			Ws_opts:            ws_opts,
-			Udp:                config.Udp,
-			Skip_cert_verify:   config.Cert,
-			Dialer_proxy:       link.DialerProxyName,
-		}, nil
-	case Scheme == "vmess":
-		vmess, err := DecodeVMESSURL(link.Url)
-		if err != nil {
-			return Proxy{}, err
-		}
-		// 如果没有名字，就用服务器地址作为名字
-		if vmess.Ps == "" {
-			vmess.Ps = fmt.Sprintf("%s:%s", vmess.Add, utils.GetPortString(vmess.Port))
-		}
-		ws_opts := map[string]interface{}{
-			"path": vmess.Path,
-			"headers": map[string]interface{}{
-				"Host": vmess.Host,
-			},
-		}
-		DeleteOpts(ws_opts)
-		tls := false
-		if vmess.Tls != "none" && vmess.Tls != "" {
-			tls = true
-		}
-		port, _ := convertToInt(vmess.Port)
-		aid, _ := convertToInt(vmess.Aid)
-		return Proxy{
-			Name:             vmess.Ps,
-			Type:             "vmess",
-			Server:           vmess.Add,
-			Port:             FlexPort(port),
-			Cipher:           vmess.Scy,
-			Uuid:             vmess.Id,
-			AlterId:          strconv.Itoa(aid),
-			Network:          vmess.Net,
-			Tls:              tls,
-			Ws_opts:          ws_opts,
-			Udp:              config.Udp,
-			Skip_cert_verify: config.Cert,
-			Dialer_proxy:     link.DialerProxyName,
-		}, nil
-	case Scheme == "vless":
-		vless, err := DecodeVLESSURL(link.Url)
-		if err != nil {
-			return Proxy{}, err
-		}
-		// 如果没有名字，就用服务器地址作为名字
-		if vless.Name == "" {
-			vless.Name = fmt.Sprintf("%s:%s", vless.Server, utils.GetPortString(vless.Port))
-		}
-		ws_opts := map[string]interface{}{
-			"path": vless.Query.Path,
-			"headers": map[string]interface{}{
-				"Host": vless.Query.Host,
-			},
-		}
-		reality_opts := map[string]interface{}{
-			"public-key": vless.Query.Pbk,
-			"short-id":   vless.Query.Sid,
-		}
-		grpc_opts := map[string]interface{}{
-			"grpc-mode":         "gun",
-			"grpc-service-name": vless.Query.ServiceName,
-		}
-		if vless.Query.Mode == "multi" {
-			grpc_opts["grpc-mode"] = "multi"
-		}
-		DeleteOpts(ws_opts)
-		DeleteOpts(reality_opts)
-		DeleteOpts(grpc_opts)
-		tls := false
-		if vless.Query.Security != "" {
-			tls = true
-		}
-		if vless.Query.Security == "none" {
-			tls = false
-		}
-		return Proxy{
-			Name:               vless.Name,
-			Type:               "vless",
-			Server:             vless.Server,
-			Port:               FlexPort(utils.GetPortInt(vless.Port)),
-			Servername:         vless.Query.Sni,
-			Uuid:               vless.Uuid,
-			Client_fingerprint: vless.Query.Fp,
-			Network:            vless.Query.Type,
-			Flow:               vless.Query.Flow,
-			Alpn:               vless.Query.Alpn,
-			Ws_opts:            ws_opts,
-			Reality_opts:       reality_opts,
-			Grpc_opts:          grpc_opts,
-			Udp:                config.Udp,
-			Skip_cert_verify:   config.Cert,
-			Tls:                tls,
-			Dialer_proxy:       link.DialerProxyName,
-		}, nil
-	case Scheme == "hy" || Scheme == "hysteria":
-		hy, err := DecodeHYURL(link.Url)
-		if err != nil {
-			return Proxy{}, err
-		}
-		// 如果没有名字，就用服务器地址作为名字
-		if hy.Name == "" {
-			hy.Name = fmt.Sprintf("%s:%s", hy.Host, utils.GetPortString(hy.Port))
-		}
-		return Proxy{
-			Name:             hy.Name,
-			Type:             "hysteria",
-			Server:           hy.Host,
-			Port:             FlexPort(utils.GetPortInt(hy.Port)),
-			Auth_str:         hy.Auth,
-			Up:               hy.UpMbps,
-			Down:             hy.DownMbps,
-			Alpn:             hy.ALPN,
-			Peer:             hy.Peer,
-			Udp:              config.Udp,
-			Skip_cert_verify: config.Cert,
-			Dialer_proxy:     link.DialerProxyName,
-		}, nil
-	case Scheme == "hy2" || Scheme == "hysteria2":
-		hy2, err := DecodeHY2URL(link.Url)
-		if err != nil {
-			return Proxy{}, err
-		}
-		// 如果没有名字，就用服务器地址作为名字
-		if hy2.Name == "" {
-			hy2.Name = fmt.Sprintf("%s:%s", hy2.Host, utils.GetPortString(hy2.Port))
-		}
-		return Proxy{
-			Name:             hy2.Name,
-			Type:             "hysteria2",
-			Server:           hy2.Host,
-			Port:             FlexPort(utils.GetPortInt(hy2.Port)),
-			Ports:            hy2.MPort,
-			Auth_str:         hy2.Auth,
-			Sni:              hy2.Sni,
-			Alpn:             hy2.ALPN,
-			Obfs:             hy2.Obfs,
-			Password:         hy2.Password,
-			Obfs_password:    hy2.ObfsPassword,
-			Up:               hy2.UpMbps,
-			Down:             hy2.DownMbps,
-			Udp:              config.Udp,
-			Skip_cert_verify: config.Cert,
-			Dialer_proxy:     link.DialerProxyName,
-		}, nil
-	case Scheme == "tuic":
-		tuic, err := DecodeTuicURL(link.Url)
-		if err != nil {
-			return Proxy{}, err
-		}
-		// 如果没有名字，就用服务器地址作为名字
-		if tuic.Name == "" {
-			tuic.Name = fmt.Sprintf("%s:%s", tuic.Host, utils.GetPortString(tuic.Port))
-		}
-		disable_sni := false
-		if tuic.Disable_sni == 1 {
-			disable_sni = true
-		}
-		return Proxy{
-			Name:                  tuic.Name,
-			Type:                  "tuic",
-			Server:                tuic.Host,
-			Port:                  FlexPort(utils.GetPortInt(tuic.Port)),
-			Password:              tuic.Password,
-			Uuid:                  tuic.Uuid,
-			Congestion_controller: tuic.Congestion_control,
-			Alpn:                  tuic.Alpn,
-			Udp_relay_mode:        tuic.Udp_relay_mode,
-			Disable_sni:           disable_sni,
-			Sni:                   tuic.Sni,
-			Tls:                   tuic.Tls,
-			Client_fingerprint:    tuic.ClientFingerprint,
-			Udp:                   config.Udp,
-			Skip_cert_verify:      config.Cert,
-			Dialer_proxy:          link.DialerProxyName,
-			Version:               tuic.Version,
-			Token:                 tuic.Token,
-		}, nil
-
-	case Scheme == "anytls":
-		anyTLS, err := DecodeAnyTLSURL(link.Url)
-		if err != nil {
-			return Proxy{}, err
-		}
-		return Proxy{
-			Name:               anyTLS.Name,
-			Type:               "anytls",
-			Server:             anyTLS.Server,
-			Port:               FlexPort(utils.GetPortInt(anyTLS.Port)),
-			Password:           anyTLS.Password,
-			Skip_cert_verify:   anyTLS.SkipCertVerify,
-			Sni:                anyTLS.SNI,
-			Client_fingerprint: anyTLS.ClientFingerprint,
-			Dialer_proxy:       link.DialerProxyName,
-		}, nil
-	case Scheme == "socks5":
-		socks5, err := DecodeSocks5URL(link.Url)
-		if err != nil {
-			return Proxy{}, err
-		}
-		return Proxy{
-			Name:         socks5.Name,
-			Type:         "socks5",
-			Server:       socks5.Server,
-			Port:         FlexPort(utils.GetPortInt(socks5.Port)),
-			Username:     socks5.Username,
-			Password:     socks5.Password,
-			Dialer_proxy: link.DialerProxyName,
-		}, nil
-	case Scheme == "wg" || Scheme == "wireguard":
-		wg, err := DecodeWireGuardURL(link.Url)
-		if err != nil {
-			return Proxy{}, err
-		}
-		// 如果没有名字，就用服务器地址作为名字
-		if wg.Name == "" {
-			wg.Name = fmt.Sprintf("%s:%s", wg.Server, utils.GetPortString(wg.Port))
-		}
-		return Proxy{
-			Name:         wg.Name,
-			Type:         "wireguard",
-			Server:       wg.Server,
-			Port:         FlexPort(utils.GetPortInt(wg.Port)),
-			Private_key:  wg.PrivateKey,
-			Public_key:   wg.PublicKey,
-			Ip:           wg.IP,
-			Ipv6:         wg.IPv6,
-			Mtu:          wg.MTU,
-			Reserved:     wg.Reserved,
-			Allowed_ips:  []string{"0.0.0.0/0"},
-			Udp:          true, // WireGuard 默认启用 UDP
-			Dialer_proxy: link.DialerProxyName,
-		}, nil
-	default:
-		return Proxy{}, fmt.Errorf("unsupported scheme: %s", Scheme)
+	protocol := detectProtocol(link.Url)
+	if protocol == nil {
+		return Proxy{}, fmt.Errorf("unsupported scheme: %s", strings.ToLower(strings.Split(link.Url, "://")[0]))
 	}
+	proxyCapable, ok := protocol.(ProxyCapable)
+	if !ok {
+		return Proxy{}, fmt.Errorf("protocol %s does not support proxy export", protocol.Name())
+	}
+	return proxyCapable.ToProxy(link, config)
 }
 
 // EncodeClash 用于生成 Clash 配置文件
@@ -598,12 +385,17 @@ func DecodeClash(proxys []Proxy, yamlfile string, customGroups ...[]CustomProxyG
 	var data []byte
 	var err error
 	if strings.Contains(yamlfile, "://") {
-		resp, err := http.Get(yamlfile)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, yamlfile, nil)
 		if err != nil {
 			utils.Error("http.Get error: %v", err)
 			return nil, err
 		}
-		defer resp.Body.Close()
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			utils.Error("http.Get error: %v", err)
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
 		data, err = io.ReadAll(resp.Body)
 		if err != nil {
 			utils.Error("error: %v", err)
@@ -625,7 +417,7 @@ func DecodeClash(proxys []Proxy, yamlfile string, customGroups ...[]CustomProxyG
 		}
 	}
 	// 解析 YAML 文件
-	config := make(map[interface{}]interface{})
+	config := make(map[string]any)
 	err = yaml.Unmarshal(data, &config)
 	if err != nil {
 		utils.Error("error: %v", err)
@@ -633,10 +425,10 @@ func DecodeClash(proxys []Proxy, yamlfile string, customGroups ...[]CustomProxyG
 	}
 
 	// 检查 "proxies" 键是否存在于 config 中
-	proxies, ok := config["proxies"].([]interface{})
+	proxies, ok := config["proxies"].([]any)
 	if !ok {
 		// 如果 "proxies" 键不存在，创建一个新的切片
-		proxies = []interface{}{}
+		proxies = []any{}
 	}
 	// 定义一个代理列表名字
 	ProxiesNameList := []string{}
@@ -648,14 +440,17 @@ func DecodeClash(proxys []Proxy, yamlfile string, customGroups ...[]CustomProxyG
 	// proxies = append(proxies, newProxy)
 	config["proxies"] = proxies
 	// 往ProxyGroup中插入代理列表
-	proxyGroups := config["proxy-groups"].([]interface{})
+	proxyGroups, ok := config["proxy-groups"].([]any)
+	if !ok {
+		proxyGroups = []any{}
+	}
 
 	// 插入自定义代理组（在模板组之后）
 	// 使用 _custom_group 标记来标识自定义代理组，后续循环时跳过节点追加
 	if len(customGroups) > 0 && len(customGroups[0]) > 0 {
 		for _, cg := range customGroups[0] {
 			// 构建代理组 map
-			groupMap := map[string]interface{}{
+			groupMap := map[string]any{
 				"name":          cg.Name,
 				"type":          cg.Type,
 				"proxies":       cg.Proxies,
@@ -706,20 +501,13 @@ func DecodeClash(proxys []Proxy, yamlfile string, customGroups ...[]CustomProxyG
 	}
 
 	for i, pg := range proxyGroups {
-		proxyGroup, ok := pg.(map[string]interface{})
+		proxyGroup, ok := pg.(map[string]any)
 		if !ok {
 			continue
 		}
 
 		// 链式代理不处理
 		if proxyGroup["type"] == "relay" {
-			continue
-		}
-
-		// 如果已有 include-all: true，说明使用自动节点匹配模式，跳过节点插入
-		// filter、exclude-filter、exclude-type、expected-status 等过滤参数都需要 include-all 为前提
-		// 这样可以减小配置文件大小，让客户端自动包含/过滤节点
-		if includeAll, ok := proxyGroup["include-all"].(bool); ok && includeAll {
 			continue
 		}
 
@@ -731,18 +519,54 @@ func DecodeClash(proxys []Proxy, yamlfile string, customGroups ...[]CustomProxyG
 			continue
 		}
 
-		// 获取现有的 proxies 列表
-		var existingProxies []interface{}
-		if proxyGroup["proxies"] != nil {
-			existingProxies, _ = proxyGroup["proxies"].([]interface{})
+		// include-all、use/filter 等自动匹配组应保持模板原意，不能强行展开为固定节点列表。
+		if shouldPreserveProxyGroup(proxyGroup) {
+			continue
 		}
 
-		// 关键逻辑：只有当 proxies 列表为空时才追加所有节点
+		// 获取现有的 proxies 列表
+		var existingProxies []any
+		if proxyGroup["proxies"] != nil {
+			existingProxies, _ = proxyGroup["proxies"].([]any)
+		}
+
+		// 检查是否包含 __ALL_PROXIES__ 占位符（与 subconverter 行为一致）
+		// 如果有占位符，将其替换为所有节点
+		hasPlaceholder := false
+		placeholderIndex := -1
+		for idx, proxy := range existingProxies {
+			if proxyStr, ok := proxy.(string); ok && proxyStr == "__ALL_PROXIES__" {
+				hasPlaceholder = true
+				placeholderIndex = idx
+				break
+			}
+		}
+
+		if hasPlaceholder {
+			// 构建新的 proxies 列表：占位符之前的元素 + 所有节点
+			var newProxies []any
+			// 添加占位符之前的元素（组引用如 🔯 故障转移、♻️ 自动选择、DIRECT 等）
+			for j := 0; j < placeholderIndex; j++ {
+				newProxies = append(newProxies, existingProxies[j])
+			}
+			// 添加所有节点
+			for _, newProxy := range ProxiesNameList {
+				newProxies = append(newProxies, newProxy)
+			}
+			// 添加占位符之后的元素（如果有的话）
+			for j := placeholderIndex + 1; j < len(existingProxies); j++ {
+				newProxies = append(newProxies, existingProxies[j])
+			}
+			proxyGroup["proxies"] = newProxies
+			proxyGroups[i] = proxyGroup
+			continue
+		}
+
+		// 原有逻辑：只有当 proxies 列表为空时才追加所有节点
 		// 如果已有 proxies（组引用如 🚀 节点选择、DIRECT 等），保持不变
-		// 这符合 ACL4SSR 的设计：只有使用 .* 的组才需要包含所有节点
 		if len(existingProxies) == 0 {
 			// 没有任何 proxies，追加所有节点
-			var validProxies []interface{}
+			var validProxies []any
 			for _, newProxy := range ProxiesNameList {
 				validProxies = append(validProxies, newProxy)
 			}

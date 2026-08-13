@@ -77,27 +77,22 @@ func CreateProxyHTTPClient(useProxy bool, proxyLink string, timeout time.Duratio
 				return nil, fmt.Errorf("split host port error: %v", splitErr)
 			}
 
-			portInt, atoiErr := strconv.Atoi(portStr)
-			if atoiErr != nil {
-				return nil, fmt.Errorf("invalid port: %v", atoiErr)
-			}
-
-			// 验证端口范围
-			if portInt < 0 || portInt > 65535 {
-				return nil, fmt.Errorf("port out of range: %d", portInt)
+			portUint, parseErr := strconv.ParseUint(portStr, 10, 16)
+			if parseErr != nil {
+				return nil, fmt.Errorf("invalid port: %v", parseErr)
 			}
 
 			// 创建 mihomo metadata
 			metadata := &constant.Metadata{
 				Host:    host,
-				DstPort: uint16(portInt),
+				DstPort: uint16(portUint),
 				Type:    constant.HTTP,
 			}
 
 			// 使用 mihomo adapter 建立连接
 			return proxyAdapter.DialContext(ctx, metadata)
 		},
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- 代理连接需要兼容上游节点的证书配置
 	}
 
 	return client, proxyNodeLink, nil
@@ -117,7 +112,7 @@ func FetchWithProxy(url string, useProxy bool, proxyLink string, timeout time.Du
 	}
 
 	// 创建请求
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request error: %v", err)
 	}
@@ -133,7 +128,7 @@ func FetchWithProxy(url string, useProxy bool, proxyLink string, timeout time.Du
 	if err != nil {
 		return nil, fmt.Errorf("request error: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)

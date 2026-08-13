@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -184,8 +185,10 @@ func DownloadGeoIP(c *gin.Context) {
 			return
 		}
 
-		// 更新最后更新时间
-		models.SetSetting("geoip_last_update", time.Now().Format("2006-01-02 15:04:05"))
+		// 更新最后更新时间；失败不影响已下载数据库，但需要记录便于排查状态展示异常。
+		if err := models.SetSetting("geoip_last_update", time.Now().Format("2006-01-02 15:04:05")); err != nil {
+			utils.Error("更新 GeoIP 最后更新时间失败: %v", err)
+		}
 
 		// 重新加载数据库
 		if err := geoip.Reload(); err != nil {
@@ -241,7 +244,7 @@ func downloadGeoIPFile(url string, useProxy bool, proxyLink string) error {
 
 	// 发起请求
 	utils.Info("开始下载 GeoIP 数据库: %s", url)
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %v", err)
 	}
@@ -251,7 +254,7 @@ func downloadGeoIPFile(url string, useProxy bool, proxyLink string) error {
 	if err != nil {
 		return fmt.Errorf("下载请求失败: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
@@ -264,8 +267,8 @@ func downloadGeoIPFile(url string, useProxy bool, proxyLink string) error {
 		return fmt.Errorf("创建临时文件失败: %v", err)
 	}
 	defer func() {
-		file.Close()
-		os.Remove(tmpPath) // 清理临时文件
+		_ = file.Close()
+		_ = os.Remove(tmpPath) // 清理临时文件
 	}()
 
 	// 下载并跟踪进度
@@ -300,7 +303,9 @@ func downloadGeoIPFile(url string, useProxy bool, proxyLink string) error {
 		}
 	}
 
-	file.Close()
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("关闭临时文件失败: %v", err)
+	}
 
 	// 验证文件大小
 	fileInfo, err := os.Stat(tmpPath)
@@ -326,13 +331,13 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer source.Close()
+	defer func() { _ = source.Close() }()
 
 	destination, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer destination.Close()
+	defer func() { _ = destination.Close() }()
 
 	_, err = io.Copy(destination, source)
 	return err
@@ -407,8 +412,10 @@ func AutoDownloadGeoIP() {
 			return
 		}
 
-		// 更新最后更新时间
-		models.SetSetting("geoip_last_update", time.Now().Format("2006-01-02 15:04:05"))
+		// 更新最后更新时间；失败不影响已下载数据库，但需要记录便于排查状态展示异常。
+		if err := models.SetSetting("geoip_last_update", time.Now().Format("2006-01-02 15:04:05")); err != nil {
+			utils.Error("[GeoIP] 更新最后更新时间失败: %v", err)
+		}
 
 		// 重新加载数据库
 		if err := geoip.Reload(); err != nil {
@@ -447,7 +454,23 @@ func downloadGeoIPFileWithProgress(url string, useProxy bool, proxyLink string, 
 	if showConsoleProgress {
 		utils.Debug("[GeoIP] 下载地址: %s", url)
 	}
-	req, err := http.NewRequest("GET", url, nil)
+	downloadCtx, cancelDownload := context.WithCancel(context.Background())
+	defer cancelDownload()
+
+	downloadMu.Lock()
+	initialStop := stopDownload
+	downloadMu.Unlock()
+	if initialStop != nil {
+		go func() {
+			select {
+			case <-initialStop:
+				cancelDownload()
+			case <-downloadCtx.Done():
+			}
+		}()
+	}
+
+	req, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %v", err)
 	}
@@ -455,9 +478,12 @@ func downloadGeoIPFileWithProgress(url string, useProxy bool, proxyLink string, 
 
 	resp, err := client.Do(req)
 	if err != nil {
+		if downloadCtx.Err() != nil {
+			return fmt.Errorf("下载已被用户停止")
+		}
 		return fmt.Errorf("下载请求失败: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
@@ -470,8 +496,8 @@ func downloadGeoIPFileWithProgress(url string, useProxy bool, proxyLink string, 
 		return fmt.Errorf("创建临时文件失败: %v", err)
 	}
 	defer func() {
-		file.Close()
-		os.Remove(tmpPath) // 清理临时文件
+		_ = file.Close()
+		_ = os.Remove(tmpPath) // 清理临时文件
 	}()
 
 	// 下载并跟踪进度
@@ -523,11 +549,16 @@ func downloadGeoIPFileWithProgress(url string, useProxy bool, proxyLink string, 
 			break
 		}
 		if readErr != nil {
+			if downloadCtx.Err() != nil {
+				return fmt.Errorf("下载已被用户停止")
+			}
 			return fmt.Errorf("读取响应失败: %v", readErr)
 		}
 	}
 
-	file.Close()
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("关闭临时文件失败: %v", err)
+	}
 
 	// 验证文件大小
 	fileInfo, err := os.Stat(tmpPath)

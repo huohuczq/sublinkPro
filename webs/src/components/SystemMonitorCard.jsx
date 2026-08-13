@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 
 // material-ui
 import { useTheme, alpha, keyframes } from '@mui/material/styles';
@@ -13,6 +14,7 @@ import CircularProgress from '@mui/material/CircularProgress';
 import LinearProgress from '@mui/material/LinearProgress';
 import Chip from '@mui/material/Chip';
 import Skeleton from '@mui/material/Skeleton';
+import { formatDateTime } from 'i18n/locales'; // Update later if path is different
 
 // icons
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -23,9 +25,14 @@ import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import AutorenewIcon from '@mui/icons-material/Autorenew';
 import ComputerIcon from '@mui/icons-material/Computer';
 import StorageIcon from '@mui/icons-material/Storage';
+import SettingsSuggestIcon from '@mui/icons-material/SettingsSuggest';
+import KeyIcon from '@mui/icons-material/Key';
 
 // project imports
 import { getSystemStats } from 'api/monitor';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
+import { getReadableTextTokens, getSurfaceTokens } from 'themes/surfaceTokens';
+import { withAlpha } from 'utils/colorUtils';
 
 // ==============================|| 动画定义 ||============================== //
 
@@ -34,6 +41,7 @@ const rotate = keyframes`
   to { transform: rotate(360deg); }
 `;
 
+const AUTO_REFRESH_INTERVAL_MS = 1000;
 // ==============================|| 工具函数 ||============================== //
 
 // 格式化字节数
@@ -47,32 +55,73 @@ const formatBytes = (bytes, decimals = 2) => {
 };
 
 // 格式化运行时间
-const formatUptime = (seconds) => {
-  if (!seconds) return '0秒';
+const formatUptime = (seconds, t) => {
+  if (!seconds) return t('components.systemMonitor.uptime.seconds', { seconds: 0 });
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   const secs = seconds % 60;
 
-  if (days > 0) return `${days}天${hours}时${minutes}分`;
-  if (hours > 0) return `${hours}时${minutes}分${secs}秒`;
-  if (minutes > 0) return `${minutes}分${secs}秒`;
-  return `${secs}秒`;
+  if (days > 0) return t('components.systemMonitor.uptime.days', { days, hours, minutes });
+  if (hours > 0) return t('components.systemMonitor.uptime.hours', { hours, minutes, seconds: secs });
+  if (minutes > 0) return t('components.systemMonitor.uptime.minutes', { minutes, seconds: secs });
+  return t('components.systemMonitor.uptime.seconds', { seconds: secs });
+};
+
+const useMonitorThemeTokens = () => {
+  const theme = useTheme();
+  const { isDark } = useResolvedColorScheme();
+  const palette = theme.vars?.palette || theme.palette;
+  const surfaceTokens = getSurfaceTokens(theme, isDark);
+  const textTokens = getReadableTextTokens(theme, isDark);
+
+  const cardSurface = isDark ? surfaceTokens.dialogSurface : withAlpha(surfaceTokens.dialogSurface, 0.98);
+  const elevatedSurface = isDark ? withAlpha(palette.background.paper, 0.82) : withAlpha(surfaceTokens.dialogSurface, 0.96);
+  const mutedPanelSurface = isDark ? surfaceTokens.mutedPanelSurface : withAlpha(surfaceTokens.mutedPanelSurface, 0.72);
+  const nestedPanelSurface = isDark ? withAlpha(palette.background.paper, 0.46) : withAlpha(surfaceTokens.nestedPanelSurface, 0.92);
+  const panelBorder = isDark ? withAlpha(palette.divider, 0.78) : surfaceTokens.panelBorder;
+  const softBorder = isDark ? withAlpha(palette.divider, 0.62) : withAlpha(palette.divider, 0.82);
+  const primaryText = isDark ? withAlpha(textTokens.primaryText, 0.98) : textTokens.primaryText;
+  const secondaryText = isDark ? withAlpha(textTokens.secondaryText, 0.96) : textTokens.secondaryText;
+  const tertiaryText = isDark ? withAlpha(textTokens.secondaryText, 0.86) : withAlpha(textTokens.primaryText, 0.62);
+
+  return {
+    theme,
+    isDark,
+    palette,
+    cardSurface,
+    elevatedSurface,
+    mutedPanelSurface,
+    nestedPanelSurface,
+    panelBorder,
+    softBorder,
+    primaryText,
+    secondaryText,
+    tertiaryText,
+    topCardBackground: isDark ? `linear-gradient(180deg, ${elevatedSurface} 0%, ${cardSurface} 100%)` : surfaceTokens.dialogSurfaceGradient,
+    insetPanelBackground: `linear-gradient(180deg, ${nestedPanelSurface} 0%, ${mutedPanelSurface} 100%)`,
+    subtleSurface: isDark ? withAlpha(palette.background.paper, 0.38) : withAlpha(palette.background.paper, 0.88),
+    iconButtonSurface: isDark ? withAlpha(palette.background.paper, 0.5) : withAlpha(palette.background.default, 0.88),
+    iconButtonHover: isDark ? withAlpha(palette.background.paper, 0.72) : withAlpha(palette.background.paper, 0.98),
+    skeletonBase: isDark ? withAlpha(palette.background.paper, 0.52) : withAlpha(palette.background.default, 0.88),
+    skeletonHighlight: isDark ? withAlpha(palette.background.paper, 0.74) : withAlpha(palette.background.paper, 0.98)
+  };
 };
 
 // ==============================|| 指标卡片组件 ||============================== //
 
 const MetricCard = ({ title, value, subValue, icon: Icon, color, progress, children }) => {
-  const theme = useTheme();
-  const isDark = theme.palette.mode === 'dark';
+  const { theme, isDark, palette, nestedPanelSurface, mutedPanelSurface, secondaryText } = useMonitorThemeTokens();
 
   return (
     <Box
       sx={{
         p: 2,
         borderRadius: 3,
-        background: isDark ? alpha(color, 0.08) : alpha(color, 0.04),
-        border: `1px solid ${alpha(color, 0.15)}`,
+        backgroundColor: mutedPanelSurface,
+        backgroundImage: `linear-gradient(180deg, ${alpha(color, isDark ? 0.12 : 0.05)} 0%, ${nestedPanelSurface} 100%)`,
+        border: `1px solid ${alpha(color, isDark ? 0.24 : 0.14)}`,
+        boxShadow: isDark ? `inset 0 1px 0 ${alpha(theme.palette.common.white, 0.035)}` : 'none',
         height: '100%',
         display: 'flex',
         flexDirection: 'column'
@@ -88,16 +137,17 @@ const MetricCard = ({ title, value, subValue, icon: Icon, color, progress, child
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            background: `linear-gradient(135deg, ${color} 0%, ${alpha(color, 0.7)} 100%)`
+            background: `linear-gradient(135deg, ${color} 0%, ${alpha(color, 0.7)} 100%)`,
+            color: palette.common?.white || theme.palette.common.white
           }}
         >
-          <Icon sx={{ fontSize: 18, color: '#fff' }} />
+          <Icon sx={{ fontSize: 18, color: 'inherit' }} />
         </Box>
         <Typography
           variant="body2"
           sx={{
             fontWeight: 600,
-            color: isDark ? alpha('#fff', 0.7) : theme.palette.text.secondary,
+            color: secondaryText,
             fontSize: '0.75rem',
             textTransform: 'uppercase',
             letterSpacing: 0.5
@@ -114,7 +164,8 @@ const MetricCard = ({ title, value, subValue, icon: Icon, color, progress, child
           fontWeight: 700,
           color: color,
           mb: 0.5,
-          fontSize: '1.5rem'
+          fontSize: '1.5rem',
+          lineHeight: 1.2
         }}
       >
         {value}
@@ -125,7 +176,7 @@ const MetricCard = ({ title, value, subValue, icon: Icon, color, progress, child
         <Typography
           variant="caption"
           sx={{
-            color: isDark ? alpha('#fff', 0.5) : theme.palette.text.secondary,
+            color: secondaryText,
             fontSize: '0.7rem',
             mb: 1
           }}
@@ -143,7 +194,9 @@ const MetricCard = ({ title, value, subValue, icon: Icon, color, progress, child
             sx={{
               height: 6,
               borderRadius: 3,
-              bgcolor: alpha(color, 0.15),
+              bgcolor: isDark
+                ? withAlpha(theme.vars?.palette?.background?.default || theme.palette.background.default, 0.92)
+                : alpha(color, 0.1),
               '& .MuiLinearProgress-bar': {
                 borderRadius: 3,
                 background: `linear-gradient(90deg, ${color} 0%, ${alpha(color, 0.7)} 100%)`
@@ -153,7 +206,7 @@ const MetricCard = ({ title, value, subValue, icon: Icon, color, progress, child
           <Typography
             variant="caption"
             sx={{
-              color: isDark ? alpha('#fff', 0.5) : theme.palette.text.secondary,
+              color: secondaryText,
               fontSize: '0.65rem',
               mt: 0.5,
               display: 'block',
@@ -174,14 +227,13 @@ const MetricCard = ({ title, value, subValue, icon: Icon, color, progress, child
 // ==============================|| 圆形进度指示器 ||============================== //
 
 const CircularMetric = ({ value, maxValue, label, color, size = 80 }) => {
-  const theme = useTheme();
-  const isDark = theme.palette.mode === 'dark';
+  const { isDark, secondaryText } = useMonitorThemeTokens();
   const percentage = maxValue > 0 ? (value / maxValue) * 100 : 0;
 
   return (
     <Box sx={{ position: 'relative', display: 'inline-flex', flexDirection: 'column', alignItems: 'center' }}>
       <Box sx={{ position: 'relative' }}>
-        <CircularProgress variant="determinate" value={100} size={size} thickness={4} sx={{ color: alpha(color, 0.15) }} />
+        <CircularProgress variant="determinate" value={100} size={size} thickness={4} sx={{ color: alpha(color, isDark ? 0.18 : 0.12) }} />
         <CircularProgress
           variant="determinate"
           value={Math.min(percentage, 100)}
@@ -224,7 +276,7 @@ const CircularMetric = ({ value, maxValue, label, color, size = 80 }) => {
         variant="caption"
         sx={{
           mt: 1,
-          color: isDark ? alpha('#fff', 0.6) : theme.palette.text.secondary,
+          color: secondaryText,
           fontSize: '0.65rem',
           textAlign: 'center'
         }}
@@ -235,11 +287,120 @@ const CircularMetric = ({ value, maxValue, label, color, size = 80 }) => {
   );
 };
 
+const ConfigItemCard = ({ item, masked = false }) => {
+  const { t } = useTranslation();
+  const { theme, isDark, nestedPanelSurface, mutedPanelSurface, panelBorder, primaryText, secondaryText } = useMonitorThemeTokens();
+  const maskedTextColor = isDark ? theme.palette.warning.light : theme.palette.warning.dark;
+  const displayValue = item.value_key ? t(item.value_key, { ...(item.value_params || {}), defaultValue: item.value }) : item.value;
+
+  return (
+    <Box
+      sx={{
+        p: 1.5,
+        borderRadius: 2.5,
+        height: '100%',
+        backgroundColor: mutedPanelSurface,
+        backgroundImage: `linear-gradient(180deg, ${nestedPanelSurface} 0%, ${mutedPanelSurface} 100%)`,
+        border: `1px solid ${panelBorder}`,
+        boxShadow: isDark ? `inset 0 1px 0 ${alpha(theme.palette.common.white, 0.025)}` : 'none'
+      }}
+    >
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, mb: 1 }}>
+        <Typography variant="body2" sx={{ fontWeight: 600, minWidth: 0, color: primaryText }}>
+          {t(`components.systemMonitor.config.keys.${item.key}`, { defaultValue: item.label })}
+        </Typography>
+        {masked && (
+          <Chip
+            size="small"
+            label={item.hiddenLabel}
+            sx={{
+              height: 20,
+              fontSize: '0.65rem',
+              bgcolor: isDark ? withAlpha(theme.palette.warning.main, 0.16) : withAlpha(theme.palette.warning.main, 0.1),
+              color: maskedTextColor,
+              border: `1px solid ${withAlpha(maskedTextColor, isDark ? 0.32 : 0.2)}`,
+              fontWeight: 700
+            }}
+          />
+        )}
+      </Box>
+
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap', mb: 1 }}>
+        <Chip
+          size="small"
+          icon={<KeyIcon sx={{ fontSize: 14 }} />}
+          label={item.key}
+          sx={{
+            height: 22,
+            fontSize: '0.68rem',
+            bgcolor: withAlpha(theme.palette.primary.main, isDark ? 0.16 : 0.08),
+            color: theme.palette.primary.main,
+            border: `1px solid ${withAlpha(theme.palette.primary.main, isDark ? 0.28 : 0.16)}`,
+            '& .MuiChip-icon': {
+              color: 'inherit',
+              ml: 0.6
+            }
+          }}
+        />
+      </Box>
+
+      <Tooltip title={displayValue} arrow placement="top-start">
+        <Typography
+          variant="body2"
+          sx={{
+            fontWeight: 600,
+            color: masked ? maskedTextColor : primaryText,
+            lineHeight: 1.6,
+            wordBreak: 'break-all'
+          }}
+        >
+          {displayValue}
+        </Typography>
+      </Tooltip>
+
+      {item.env && (
+        <Typography
+          variant="caption"
+          sx={{
+            mt: 1,
+            display: 'block',
+            color: secondaryText,
+            fontSize: '0.68rem',
+            lineHeight: 1.45,
+            wordBreak: 'break-all'
+          }}
+        >
+          {item.envLabel}
+        </Typography>
+      )}
+    </Box>
+  );
+};
+
 // ==============================|| 系统监控卡片主组件 ||============================== //
 
 const SystemMonitorCard = () => {
-  const theme = useTheme();
-  const isDark = theme.palette.mode === 'dark';
+  const { i18n, t } = useTranslation();
+  const systemMonitorTitle = t('components.systemMonitor.title');
+  const {
+    theme,
+    isDark,
+    palette,
+    topCardBackground,
+    insetPanelBackground,
+    cardSurface,
+    elevatedSurface,
+    panelBorder,
+    softBorder,
+    primaryText,
+    secondaryText,
+    tertiaryText,
+    subtleSurface,
+    iconButtonSurface,
+    iconButtonHover,
+    skeletonBase,
+    skeletonHighlight
+  } = useMonitorThemeTokens();
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -279,7 +440,7 @@ const SystemMonitorCard = () => {
     if (autoRefresh) {
       intervalRef.current = setInterval(() => {
         fetchStats();
-      }, 1000);
+      }, AUTO_REFRESH_INTERVAL_MS);
     }
 
     return () => {
@@ -298,16 +459,35 @@ const SystemMonitorCard = () => {
     gc: '#ec4899'
   };
 
+  const configItems = stats?.runtime_config
+    ? [
+        ...(stats.runtime_config.safe_to_show || []).map((item) => ({
+          ...item,
+          masked: false,
+          hiddenLabel: t('components.systemMonitor.hidden'),
+          envLabel: item.env ? t('components.systemMonitor.env', { env: item.env }) : ''
+        })),
+        ...(stats.runtime_config.masked_summary || []).map((item) => ({
+          ...item,
+          masked: true,
+          hiddenLabel: t('components.systemMonitor.hidden'),
+          envLabel: item.env ? t('components.systemMonitor.env', { env: item.env }) : ''
+        }))
+      ]
+    : [];
+
   return (
     <Card
       sx={{
         mb: 3,
         borderRadius: 4,
-        background: isDark
-          ? `linear-gradient(145deg, ${alpha('#1e1e2e', 0.95)} 0%, ${alpha('#2d2d3f', 0.9)} 100%)`
-          : `linear-gradient(145deg, ${alpha('#fff', 0.98)} 0%, ${alpha('#f8fafc', 0.95)} 100%)`,
-        backdropFilter: 'blur(20px)',
-        border: `1px solid ${isDark ? alpha('#fff', 0.08) : alpha('#000', 0.06)}`,
+        backgroundColor: cardSurface,
+        backgroundImage: topCardBackground,
+        backdropFilter: isDark ? 'blur(16px)' : 'none',
+        border: `1px solid ${panelBorder}`,
+        boxShadow: isDark
+          ? `0 16px 36px ${alpha(theme.palette.common.black, 0.2)}, inset 0 1px 0 ${alpha(theme.palette.common.white, 0.035)}`
+          : `0 8px 24px ${alpha(theme.palette.common.black, 0.06)}`,
         overflow: 'hidden',
         position: 'relative'
       }}
@@ -332,14 +512,15 @@ const SystemMonitorCard = () => {
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                background: `linear-gradient(135deg, ${colors.memory} 0%, ${colors.cpu} 100%)`
+                background: `linear-gradient(135deg, ${colors.memory} 0%, ${colors.cpu} 100%)`,
+                color: palette.common?.white || theme.palette.common.white
               }}
             >
-              <ComputerIcon sx={{ color: '#fff', fontSize: 22 }} />
+              <ComputerIcon sx={{ color: 'inherit', fontSize: 22 }} />
             </Box>
             <Box>
-              <Typography variant="h5" sx={{ fontWeight: 600 }}>
-                系统监控
+              <Typography variant="h5" sx={{ fontWeight: 600, color: primaryText }}>
+                {systemMonitorTitle}
               </Typography>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 {stats && (
@@ -349,9 +530,9 @@ const SystemMonitorCard = () => {
                     sx={{
                       height: 20,
                       fontSize: '0.65rem',
-                      bgcolor: alpha(colors.cpu, 0.1),
+                      bgcolor: alpha(colors.cpu, isDark ? 0.18 : 0.1),
                       color: colors.cpu,
-                      border: `1px solid ${alpha(colors.cpu, 0.2)}`
+                      border: `1px solid ${alpha(colors.cpu, isDark ? 0.3 : 0.2)}`
                     }}
                   />
                 )}
@@ -362,9 +543,9 @@ const SystemMonitorCard = () => {
                     sx={{
                       height: 20,
                       fontSize: '0.65rem',
-                      bgcolor: alpha(colors.memory, 0.1),
+                      bgcolor: alpha(colors.memory, isDark ? 0.18 : 0.1),
                       color: colors.memory,
-                      border: `1px solid ${alpha(colors.memory, 0.2)}`
+                      border: `1px solid ${alpha(colors.memory, isDark ? 0.3 : 0.2)}`
                     }}
                   />
                 )}
@@ -375,15 +556,29 @@ const SystemMonitorCard = () => {
           {/* 控制按钮 */}
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
             {/* 自动刷新指示器 */}
-            <Tooltip title={autoRefresh ? '关闭自动刷新' : '开启自动刷新 (5秒)'} arrow>
+            <Tooltip
+              title={
+                autoRefresh
+                  ? t('components.systemMonitor.actions.disableAutoRefresh')
+                  : t('components.systemMonitor.actions.enableAutoRefresh', { seconds: AUTO_REFRESH_INTERVAL_MS / 1000 })
+              }
+              arrow
+            >
               <IconButton
                 onClick={toggleAutoRefresh}
                 size="small"
                 sx={{
-                  bgcolor: autoRefresh ? alpha(colors.cpu, 0.1) : 'transparent',
-                  color: autoRefresh ? colors.cpu : theme.palette.text.secondary,
+                  bgcolor: autoRefresh ? withAlpha(colors.cpu, isDark ? 0.18 : 0.1) : iconButtonSurface,
+                  color: autoRefresh ? colors.cpu : secondaryText,
+                  border: '1px solid',
+                  borderColor: autoRefresh ? withAlpha(colors.cpu, isDark ? 0.32 : 0.18) : softBorder,
+                  transition: 'background-color 0.2s ease, border-color 0.2s ease, transform 0.2s ease, color 0.2s ease',
                   '&:hover': {
-                    bgcolor: alpha(colors.cpu, 0.15)
+                    bgcolor: autoRefresh ? withAlpha(colors.cpu, isDark ? 0.24 : 0.14) : iconButtonHover,
+                    borderColor: autoRefresh ? withAlpha(colors.cpu, isDark ? 0.4 : 0.24) : panelBorder
+                  },
+                  '&:active': {
+                    transform: 'scale(0.96)'
                   }
                 }}
               >
@@ -397,21 +592,37 @@ const SystemMonitorCard = () => {
             </Tooltip>
 
             {/* 手动刷新 */}
-            <Tooltip title="刷新" arrow>
+            <Tooltip title={t('common.refresh')} arrow>
               <IconButton
                 onClick={handleRefresh}
                 disabled={refreshing}
                 size="small"
                 sx={{
-                  bgcolor: alpha(theme.palette.primary.main, 0.1),
+                  bgcolor: refreshing ? subtleSurface : withAlpha(theme.palette.primary.main, isDark ? 0.16 : 0.1),
+                  color: refreshing ? tertiaryText : theme.palette.primary.main,
+                  border: '1px solid',
+                  borderColor: refreshing ? softBorder : withAlpha(theme.palette.primary.main, isDark ? 0.28 : 0.16),
+                  transition: 'all 0.3s ease',
                   '&:hover': {
-                    bgcolor: alpha(theme.palette.primary.main, 0.15),
+                    bgcolor: withAlpha(theme.palette.primary.main, isDark ? 0.22 : 0.14),
+                    borderColor: withAlpha(theme.palette.primary.main, isDark ? 0.36 : 0.22),
                     transform: 'rotate(180deg)'
                   },
-                  transition: 'all 0.3s ease'
+                  '&:active': {
+                    transform: 'scale(0.96)'
+                  },
+                  '&.Mui-disabled': {
+                    bgcolor: subtleSurface,
+                    color: tertiaryText,
+                    borderColor: softBorder
+                  }
                 }}
               >
-                {refreshing ? <CircularProgress size={20} /> : <RefreshIcon sx={{ fontSize: 20 }} />}
+                {refreshing ? (
+                  <CircularProgress size={20} sx={{ color: theme.palette.primary.main }} />
+                ) : (
+                  <RefreshIcon sx={{ fontSize: 20 }} />
+                )}
               </IconButton>
             </Tooltip>
           </Box>
@@ -422,7 +633,17 @@ const SystemMonitorCard = () => {
           <Grid container spacing={2}>
             {[1, 2, 3, 4].map((i) => (
               <Grid key={i} size={{ xs: 6, sm: 3 }}>
-                <Skeleton variant="rounded" height={140} sx={{ borderRadius: 3 }} />
+                <Skeleton
+                  variant="rounded"
+                  height={140}
+                  sx={{
+                    borderRadius: 3,
+                    bgcolor: skeletonBase,
+                    '&::after': {
+                      background: `linear-gradient(90deg, transparent, ${skeletonHighlight}, transparent)`
+                    }
+                  }}
+                />
               </Grid>
             ))}
           </Grid>
@@ -433,9 +654,9 @@ const SystemMonitorCard = () => {
               {/* 内存使用 */}
               <Grid size={{ xs: 6, sm: 6, md: 3 }}>
                 <MetricCard
-                  title="堆内存"
+                  title={t('components.systemMonitor.metrics.heapMemory')}
                   value={formatBytes(stats.heap_inuse)}
-                  subValue={`共申请 ${formatBytes(stats.heap_sys)}`}
+                  subValue={t('components.systemMonitor.metrics.heapAllocated', { value: formatBytes(stats.heap_sys) })}
                   icon={MemoryIcon}
                   color={colors.memory}
                   progress={stats.memory_usage}
@@ -445,9 +666,9 @@ const SystemMonitorCard = () => {
               {/* CPU信息 */}
               <Grid size={{ xs: 6, sm: 6, md: 3 }}>
                 <MetricCard
-                  title="CPU"
-                  value={`${stats.num_cpu} 核`}
-                  subValue={`GOMAXPROCS: ${stats.gomaxprocs}`}
+                  title={t('components.systemMonitor.metrics.cpu')}
+                  value={t('components.systemMonitor.metrics.cpuCores', { count: stats.num_cpu })}
+                  subValue={t('components.systemMonitor.metrics.gomaxprocs', { count: stats.gomaxprocs })}
                   icon={DeveloperBoardIcon}
                   color={colors.cpu}
                   progress={stats.cpu_usage}
@@ -457,9 +678,9 @@ const SystemMonitorCard = () => {
               {/* Goroutine数量 */}
               <Grid size={{ xs: 6, sm: 6, md: 3 }}>
                 <MetricCard
-                  title="Goroutines"
+                  title={t('components.systemMonitor.metrics.goroutines')}
                   value={stats.num_goroutine}
-                  subValue={`CGO调用: ${stats.num_cgo_call}`}
+                  subValue={t('components.systemMonitor.metrics.cgoCalls', { count: stats.num_cgo_call })}
                   icon={AccountTreeIcon}
                   color={colors.goroutine}
                 />
@@ -468,9 +689,11 @@ const SystemMonitorCard = () => {
               {/* 运行时间 */}
               <Grid size={{ xs: 6, sm: 6, md: 3 }}>
                 <MetricCard
-                  title="运行时间"
-                  value={formatUptime(stats.uptime)}
-                  subValue={`启动: ${new Date(stats.start_time * 1000).toLocaleString()}`}
+                  title={t('components.systemMonitor.metrics.uptime')}
+                  value={formatUptime(stats.uptime, t)}
+                  subValue={t('components.systemMonitor.metrics.startedAt', {
+                    value: formatDateTime(new Date(stats.start_time * 1000), i18n.resolvedLanguage || i18n.language)
+                  })}
                   icon={AccessTimeIcon}
                   color={colors.uptime}
                 />
@@ -482,14 +705,16 @@ const SystemMonitorCard = () => {
               sx={{
                 p: 2,
                 borderRadius: 3,
-                background: isDark ? alpha('#fff', 0.03) : alpha('#000', 0.02),
-                border: `1px solid ${isDark ? alpha('#fff', 0.06) : alpha('#000', 0.04)}`
+                backgroundColor: elevatedSurface,
+                backgroundImage: insetPanelBackground,
+                border: `1px solid ${panelBorder}`,
+                boxShadow: isDark ? `inset 0 1px 0 ${alpha(theme.palette.common.white, 0.025)}` : 'none'
               }}
             >
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
                 <StorageIcon sx={{ fontSize: 18, color: colors.gc }} />
-                <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.8rem' }}>
-                  运行时详情
+                <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.8rem', color: primaryText }}>
+                  {t('components.systemMonitor.runtime.title')}
                 </Typography>
               </Box>
 
@@ -497,8 +722,20 @@ const SystemMonitorCard = () => {
                 {/* 内存详情 */}
                 <Grid size={{ xs: 12, sm: 6, md: 4 }}>
                   <Box sx={{ display: 'flex', justifyContent: 'center', gap: 3, flexWrap: 'wrap' }}>
-                    <CircularMetric value={stats.heap_inuse} maxValue={stats.sys} label="堆内存使用" color={colors.memory} size={70} />
-                    <CircularMetric value={stats.stack_inuse} maxValue={stats.sys} label="栈内存使用" color={colors.cpu} size={70} />
+                    <CircularMetric
+                      value={stats.heap_inuse}
+                      maxValue={stats.sys}
+                      label={t('components.systemMonitor.runtime.heapInUse')}
+                      color={colors.memory}
+                      size={70}
+                    />
+                    <CircularMetric
+                      value={stats.stack_inuse}
+                      maxValue={stats.sys}
+                      label={t('components.systemMonitor.runtime.stackInUse')}
+                      color={colors.cpu}
+                      size={70}
+                    />
                   </Box>
                 </Grid>
 
@@ -506,24 +743,24 @@ const SystemMonitorCard = () => {
                 <Grid size={{ xs: 12, sm: 6, md: 4 }}>
                   <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Typography variant="caption" sx={{ color: theme.palette.text.secondary }}>
-                        GC 次数
+                      <Typography variant="caption" sx={{ color: secondaryText }}>
+                        {t('components.systemMonitor.runtime.gcCount')}
                       </Typography>
                       <Typography variant="body2" sx={{ fontWeight: 600, color: colors.gc }}>
                         {stats.num_gc}
                       </Typography>
                     </Box>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Typography variant="caption" sx={{ color: theme.palette.text.secondary }}>
-                        GC 暂停时间
+                      <Typography variant="caption" sx={{ color: secondaryText }}>
+                        {t('components.systemMonitor.runtime.gcPause')}
                       </Typography>
                       <Typography variant="body2" sx={{ fontWeight: 600, color: colors.gc }}>
                         {(stats.pause_total_ns / 1e6).toFixed(2)} ms
                       </Typography>
                     </Box>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Typography variant="caption" sx={{ color: theme.palette.text.secondary }}>
-                        GC CPU 占用
+                      <Typography variant="caption" sx={{ color: secondaryText }}>
+                        {t('components.systemMonitor.runtime.gcCpu')}
                       </Typography>
                       <Typography variant="body2" sx={{ fontWeight: 600, color: colors.gc }}>
                         {(stats.gc_cpu_frac * 100).toFixed(3)}%
@@ -536,24 +773,24 @@ const SystemMonitorCard = () => {
                 <Grid size={{ xs: 12, sm: 12, md: 4 }}>
                   <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Typography variant="caption" sx={{ color: theme.palette.text.secondary }}>
-                        系统内存获取
+                      <Typography variant="caption" sx={{ color: secondaryText }}>
+                        {t('components.systemMonitor.runtime.systemMemory')}
                       </Typography>
                       <Typography variant="body2" sx={{ fontWeight: 600, color: colors.memory }}>
                         {formatBytes(stats.sys)}
                       </Typography>
                     </Box>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Typography variant="caption" sx={{ color: theme.palette.text.secondary }}>
-                        累计分配内存
+                      <Typography variant="caption" sx={{ color: secondaryText }}>
+                        {t('components.systemMonitor.runtime.totalAllocated')}
                       </Typography>
                       <Typography variant="body2" sx={{ fontWeight: 600, color: colors.memory }}>
                         {formatBytes(stats.total_alloc)}
                       </Typography>
                     </Box>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Typography variant="caption" sx={{ color: theme.palette.text.secondary }}>
-                        栈内存使用
+                      <Typography variant="caption" sx={{ color: secondaryText }}>
+                        {t('components.systemMonitor.runtime.stackInUse')}
                       </Typography>
                       <Typography variant="body2" sx={{ fontWeight: 600, color: colors.cpu }}>
                         {formatBytes(stats.stack_inuse)}
@@ -563,10 +800,38 @@ const SystemMonitorCard = () => {
                 </Grid>
               </Grid>
             </Box>
+
+            {configItems.length > 0 && (
+              <Box
+                sx={{
+                  mt: 2,
+                  p: 2,
+                  borderRadius: 3,
+                  backgroundColor: elevatedSurface,
+                  backgroundImage: insetPanelBackground,
+                  border: `1px solid ${panelBorder}`,
+                  boxShadow: isDark ? `inset 0 1px 0 ${alpha(theme.palette.common.white, 0.025)}` : 'none'
+                }}
+              >
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+                  <SettingsSuggestIcon sx={{ fontSize: 18, color: colors.uptime }} />
+                  <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.8rem', color: primaryText }}>
+                    {t('components.systemMonitor.config.title')}
+                  </Typography>
+                </Box>
+                <Grid container spacing={1.5}>
+                  {configItems.map((item) => (
+                    <Grid key={`${item.key}-${item.env || 'default'}`} size={{ xs: 12, sm: 6, md: 4 }}>
+                      <ConfigItemCard item={item} masked={item.masked} />
+                    </Grid>
+                  ))}
+                </Grid>
+              </Box>
+            )}
           </>
         ) : (
           <Box sx={{ textAlign: 'center', py: 4 }}>
-            <Typography color="textSecondary">无法获取系统状态</Typography>
+            <Typography sx={{ color: secondaryText }}>{t('components.systemMonitor.unavailable')}</Typography>
           </Box>
         )}
       </CardContent>

@@ -1,138 +1,11 @@
 package api
 
 import (
-	"encoding/json"
 	"sublink/models"
-	"sublink/services/sse"
 	"sublink/utils"
 
 	"github.com/gin-gonic/gin"
 )
-
-// GetWebhookConfig 获取Webhook配置
-func GetWebhookConfig(c *gin.Context) {
-	webhookUrl, _ := models.GetSetting("webhook_url")
-	webhookMethod, _ := models.GetSetting("webhook_method")
-	if webhookMethod == "" {
-		webhookMethod = "POST"
-	}
-	webhookContentType, _ := models.GetSetting("webhook_content_type")
-	if webhookContentType == "" {
-		webhookContentType = "application/json"
-	}
-	webhookHeaders, _ := models.GetSetting("webhook_headers")
-	webhookBody, _ := models.GetSetting("webhook_body")
-	webhookEnabledStr, _ := models.GetSetting("webhook_enabled")
-	webhookEnabled := webhookEnabledStr == "true"
-
-	utils.OkDetailed(c, "获取成功", gin.H{
-		"webhookUrl":         webhookUrl,
-		"webhookMethod":      webhookMethod,
-		"webhookContentType": webhookContentType,
-		"webhookHeaders":     webhookHeaders,
-		"webhookBody":        webhookBody,
-		"webhookEnabled":     webhookEnabled,
-	})
-}
-
-// UpdateWebhookConfig 更新Webhook配置
-func UpdateWebhookConfig(c *gin.Context) {
-	var req struct {
-		WebhookUrl         string `json:"webhookUrl"`
-		WebhookMethod      string `json:"webhookMethod"`
-		WebhookContentType string `json:"webhookContentType"`
-		WebhookHeaders     string `json:"webhookHeaders"`
-		WebhookBody        string `json:"webhookBody"`
-		WebhookEnabled     bool   `json:"webhookEnabled"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.FailWithMsg(c, "参数错误")
-		return
-	}
-
-	// 验证 Headers 是否为有效的 JSON
-	if req.WebhookHeaders != "" {
-		var js map[string]interface{}
-		if json.Unmarshal([]byte(req.WebhookHeaders), &js) != nil {
-			utils.FailWithMsg(c, "Headers 必须是有效的 JSON 格式")
-			return
-		}
-	}
-
-	if err := models.SetSetting("webhook_url", req.WebhookUrl); err != nil {
-		utils.FailWithMsg(c, "保存 URL 失败")
-		return
-	}
-	if err := models.SetSetting("webhook_method", req.WebhookMethod); err != nil {
-		utils.FailWithMsg(c, "保存 Method 失败")
-		return
-	}
-	if err := models.SetSetting("webhook_content_type", req.WebhookContentType); err != nil {
-		utils.FailWithMsg(c, "保存 Content-Type 失败")
-		return
-	}
-	if err := models.SetSetting("webhook_headers", req.WebhookHeaders); err != nil {
-		utils.FailWithMsg(c, "保存 Headers 失败")
-		return
-	}
-	if err := models.SetSetting("webhook_body", req.WebhookBody); err != nil {
-		utils.FailWithMsg(c, "保存 Body 失败")
-		return
-	}
-	enabledStr := "false"
-	if req.WebhookEnabled {
-		enabledStr = "true"
-	}
-	if err := models.SetSetting("webhook_enabled", enabledStr); err != nil {
-		utils.FailWithMsg(c, "保存启用状态失败")
-		return
-	}
-
-	utils.OkWithMsg(c, "保存成功")
-}
-
-// TestWebhookConfig 测试Webhook配置
-func TestWebhookConfig(c *gin.Context) {
-	var req struct {
-		WebhookUrl         string `json:"webhookUrl"`
-		WebhookMethod      string `json:"webhookMethod"`
-		WebhookContentType string `json:"webhookContentType"`
-		WebhookHeaders     string `json:"webhookHeaders"`
-		WebhookBody        string `json:"webhookBody"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.FailWithMsg(c, "参数错误")
-		return
-	}
-
-	// 构造配置对象
-	config := map[string]string{
-		"url":         req.WebhookUrl,
-		"method":      req.WebhookMethod,
-		"contentType": req.WebhookContentType,
-		"headers":     req.WebhookHeaders,
-		"body":        req.WebhookBody,
-	}
-
-	// 构造测试 Payload
-	payload := sse.NotificationPayload{
-		Event:   "test_webhook",
-		Title:   "Sublink Pro Webhook 测试",
-		Message: "这是一条Sublink Pro测试消息，用于验证 Webhook 配置是否正确。",
-		Data: map[string]interface{}{
-			"test": true,
-		},
-	}
-
-	if err := sse.SendWebhook(config, "test_webhook", payload); err != nil {
-		utils.FailWithMsg(c, "测试失败: "+err.Error())
-		return
-	}
-
-	utils.OkWithMsg(c, "测试发送成功")
-}
 
 // GetBaseTemplates 获取基础模板配置
 func GetBaseTemplates(c *gin.Context) {
@@ -189,5 +62,94 @@ func UpdateSystemDomain(c *gin.Context) {
 		utils.FailWithMsg(c, "保存失败: "+err.Error())
 		return
 	}
+	utils.OkWithMsg(c, "保存成功")
+}
+
+// GetNodeDedupConfig 获取节点去重配置
+func GetNodeDedupConfig(c *gin.Context) {
+	crossAirportDedup, _ := models.GetSetting("cross_airport_dedup_enabled")
+	utils.OkDetailed(c, "获取成功", gin.H{
+		"crossAirportDedupEnabled": crossAirportDedup != "false",
+	})
+}
+
+// UpdateNodeDedupConfig 更新节点去重配置
+func UpdateNodeDedupConfig(c *gin.Context) {
+	var req struct {
+		CrossAirportDedupEnabled *bool `json:"crossAirportDedupEnabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.FailWithMsg(c, "参数错误")
+		return
+	}
+	if req.CrossAirportDedupEnabled == nil {
+		utils.FailWithMsg(c, "缺少必填字段 crossAirportDedupEnabled")
+		return
+	}
+	value := "true"
+	if !*req.CrossAirportDedupEnabled {
+		value = "false"
+	}
+	if err := models.SetSetting("cross_airport_dedup_enabled", value); err != nil {
+		utils.FailWithMsg(c, "保存失败: "+err.Error())
+		return
+	}
+	utils.OkWithMsg(c, "保存成功")
+}
+
+// GetGlobalNodeProcessingConfig 获取全局节点处理配置
+func GetGlobalNodeProcessingConfig(c *gin.Context) {
+	whitelist, _ := models.GetSetting("global_node_name_whitelist")
+	blacklist, _ := models.GetSetting("global_node_name_blacklist")
+	protocolWhitelist, _ := models.GetSetting("global_protocol_whitelist")
+	protocolBlacklist, _ := models.GetSetting("global_protocol_blacklist")
+	preprocess, _ := models.GetSetting("global_node_name_preprocess")
+
+	utils.OkDetailed(c, "获取成功", gin.H{
+		"nodeNameWhitelist":  whitelist,
+		"nodeNameBlacklist":  blacklist,
+		"protocolWhitelist":  protocolWhitelist,
+		"protocolBlacklist":  protocolBlacklist,
+		"nodeNamePreprocess": preprocess,
+	})
+}
+
+// UpdateGlobalNodeProcessingConfig 更新全局节点处理配置
+func UpdateGlobalNodeProcessingConfig(c *gin.Context) {
+	var req struct {
+		NodeNameWhitelist  string `json:"nodeNameWhitelist"`
+		NodeNameBlacklist  string `json:"nodeNameBlacklist"`
+		ProtocolWhitelist  string `json:"protocolWhitelist"`
+		ProtocolBlacklist  string `json:"protocolBlacklist"`
+		NodeNamePreprocess string `json:"nodeNamePreprocess"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.FailWithMsg(c, "参数错误")
+		return
+	}
+
+	// 保存配置
+	if err := models.SetSetting("global_node_name_whitelist", req.NodeNameWhitelist); err != nil {
+		utils.FailWithMsg(c, "保存全局节点名称白名单失败: "+err.Error())
+		return
+	}
+	if err := models.SetSetting("global_node_name_blacklist", req.NodeNameBlacklist); err != nil {
+		utils.FailWithMsg(c, "保存全局节点名称黑名单失败: "+err.Error())
+		return
+	}
+	if err := models.SetSetting("global_protocol_whitelist", req.ProtocolWhitelist); err != nil {
+		utils.FailWithMsg(c, "保存全局协议白名单失败: "+err.Error())
+		return
+	}
+	if err := models.SetSetting("global_protocol_blacklist", req.ProtocolBlacklist); err != nil {
+		utils.FailWithMsg(c, "保存全局协议黑名单失败: "+err.Error())
+		return
+	}
+	if err := models.SetSetting("global_node_name_preprocess", req.NodeNamePreprocess); err != nil {
+		utils.FailWithMsg(c, "保存全局节点名称预处理规则失败: "+err.Error())
+		return
+	}
+
 	utils.OkWithMsg(c, "保存成功")
 }

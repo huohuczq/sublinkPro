@@ -14,14 +14,14 @@ type SubScheduler struct {
 	URL               string
 	CronExpr          string
 	Enabled           bool
-	SuccessCount      int        `gorm:"default:0"`
-	LastRunTime       *time.Time `gorm:"type:datetime"`
-	NextRunTime       *time.Time `gorm:"type:datetime"`
-	CreatedAt         time.Time  `gorm:"autoCreateTime"`
-	UpdatedAt         time.Time  `gorm:"autoUpdateTime"`
+	SuccessCount      int `gorm:"default:0"`
+	LastRunTime       *time.Time
+	NextRunTime       *time.Time
+	CreatedAt         time.Time `gorm:"autoCreateTime"`
+	UpdatedAt         time.Time `gorm:"autoUpdateTime"`
 	Group             string
 	DownloadWithProxy bool   `gorm:"default:false"`
-	ProxyLink         string `gorm:"default:''"`
+	ProxyLink         string `gorm:"type:text"`
 	UserAgent         string
 	NodeCount         int `gorm:"-"`
 }
@@ -136,7 +136,7 @@ func (ss *SubScheduler) Del() error {
 
 // UpdateRunTime 更新运行时间 (Write-Through)
 func (ss *SubScheduler) UpdateRunTime(lastRun, nextRun *time.Time) error {
-	err := database.DB.Model(ss).Select("LastRunTime", "NextRunTime").Updates(map[string]interface{}{
+	err := database.DB.Model(ss).Select("LastRunTime", "NextRunTime").Updates(map[string]any{
 		"LastRunTime": lastRun,
 		"NextRunTime": nextRun,
 	}).Error

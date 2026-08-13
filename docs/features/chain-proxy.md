@@ -1,57 +1,88 @@
-# 链式代理 (Chain Proxy)
+English | [简体中文](chain-proxy.zh-CN.md)
 
-这是 SublinkPro 的**特色功能**之一。通过链式代理（Proxy Chaining），您可以轻松构建「前置代理 -> 落地代理」的流量转发链路。
+# Chain Proxy
 
----
-
-## 🔌 什么是链式代理？
-
-简单来说，就是让您的流量先经过一个「入口节点A」，再转发到「落地节点B」，最后访问目标网站。
-
-**流量路径**：`Client -> 入口节点A -> 落地节点B -> 目标网站`
+This is one of SublinkPro's **featured capabilities**. With proxy chaining, you can build traffic forwarding paths from an “entry proxy” to a “landing proxy”.
 
 ---
 
-## 🛠️ 核心优势与场景
+## 🔌 What Is Chain Proxy?
 
-| 场景 | 解决方案 | 优势 |
+In simple terms, your traffic first goes through “entry node A”, then forwards to “landing node B”, and finally reaches the target website.
+
+**Traffic path**: `Client -> entry node A -> landing node B -> target website`
+
+---
+
+## 🛠️ Core Benefits and Scenarios
+
+| Scenario | Solution | Benefit |
 |:---|:---|:---|
-| **拯救被墙节点** | 您的落地 VPS IP 被墙，无法直连 | 使用机场节点作为入口中转，恢复 VPS 的连接能力 |
-| **净化 IP 地址** | 机场节点速度快但 IP 脏（Google 验证码多） | 机场节点做入口 -> 纯净 IP 的冷门 VPS 做落地，兼得速度与纯净度 |
-| **网络提速** | 落地节点直连线路差（如非 CN2 线路） | 使用 CN2/专线节点作为入口进行加速，大幅降低延迟与丢包 |
+| **Rescue blocked nodes** | Your landing VPS IP is blocked and cannot connect directly | Use an airport node as the entry relay to restore VPS connectivity |
+| **Clean up IP reputation** | Airport nodes are fast but have dirty IPs, such as frequent Google CAPTCHA | Use an airport node as entry -> niche VPS with clean IP as landing, keeping both speed and cleaner reputation |
+| **Improve network path** | Direct route to landing node is poor, such as non CN2 routes | Use CN2 or dedicated route nodes as entry to reduce latency and packet loss |
 
 ---
 
-## ⚙️ 强大的配置能力
+## ⚙️ Powerful Configuration
 
-SublinkPro 为链式代理提供了极致的配置灵活性：
+SublinkPro provides highly flexible chain proxy configuration.
 
-### 1. Clash Dialer-Proxy 原生支持
+### 1. Native Clash Dialer-Proxy support
 
-自动生成 Clash 配置文件中的 `dialer-proxy` 字段，利用客户端内核进行流量转发，**性能零损耗**，无需服务端额外部署中转程序。
+The generated Clash config automatically includes the `dialer-proxy` field, using the client core for traffic forwarding with **no performance loss** and no extra server side relay program.
 
-### 2. 可视化配置流
+### 2. Visual configuration flow
 
-采用 Flowchart 以及直观的 UI 设计，您可以清晰地看到每一条链路的构成。
+Flowchart based and intuitive UI design lets you clearly see each chain.
 
-### 3. 灵活的入口选择
+### 3. Flexible entry selection
 
-*   **指定节点**：精确指定某个特定节点作为入口（如 "香港专线 01"）。
-*   **动态策略组**：选择一个策略组（如 "自动选择" 或 "负载均衡"）作为入口，实现入口的动态高可用。
+- **Specific node**: choose one exact node as the entry, such as "Hong Kong Dedicated 01".
+- **Dynamic policy group**: choose a policy group, such as "Auto Select" or "Load Balance", as the entry for dynamic high availability.
 
----
+### 4. Conditional node selection
 
-## 💡 使用提示
+Both **intermediate nodes** and **target nodes** support dynamic condition based filtering. This is useful when entry quality and landing quality need separate control.
+
+| Condition type | Supported fields |
+|:---|:---|
+| Basic fields | Node name, country, protocol, tags, latency, speed |
+| IP quality fields | Fraud score, IP type, residential attribute |
+| Unlock fields | Unlock Provider, unlock status, unlock keyword, unlock summary |
 
 > [!TIP]
-> **提示**：链式代理主要用于**订阅转换**场景。您可以设置规则，让某个订阅中的所有节点，自动通过另一个「前置代理」进行连接，瞬间将普通订阅升级为「中转订阅」。
+> `IP type` values are “native IP / broadcast IP / untested”. `Residential attribute` values are “residential IP / data center IP / untested”.
+>
+> Unlock status is read from backend provided status metadata. After adding an unlock checker, Provider options in chain proxy conditions update automatically.
 
 ---
 
-## 配置流程
+## 💡 Usage Tip
 
-1. 进入订阅配置页面
-2. 找到「链式代理」配置区域
-3. 设置入口节点（支持指定节点或策略组）
-4. 设置落地节点规则（可按标签、国家等条件匹配）
-5. 保存配置后，订阅链接会自动包含链式代理配置
+> [!TIP]
+> **Tip**: Chain proxy is mainly for **subscription conversion**. You can configure rules so all nodes in a subscription connect through another “front proxy”, instantly turning a normal subscription into a relayed subscription.
+
+---
+
+## Configuration Flow
+
+1. Open the subscription configuration page.
+2. Find the “Chain Proxy” configuration area.
+3. Set the entry node, supporting specific node or policy group.
+4. Set landing node rules, such as matching by tag or country.
+5. Save. The subscription link will include chain proxy config automatically.
+
+> [!NOTE]
+> Chain proxy rules are **saved per subscription and applied during subscription generation**. They are not global runtime proxy rules. Template proxy groups come from the Clash template associated with the subscription. Final generated nodes implement the chain through Clash `dialer-proxy`.
+
+### Common examples
+
+| Goal | Intermediate node condition | Target node condition |
+|:---|:---|:---|
+| Improve entry availability | Latency `< 200ms`, speed `> 5MB/s` | No limit |
+| Prefer clean landing IPs | No limit | Fraud score `<= 30`, IP type `= Native IP` |
+| Residential landing scenario | No limit | Residential attribute `= Residential IP` |
+| Exclude nodes that need retest | IP type `!= Untested` | IP type `!= Untested` |
+| Prefer OpenAI landing | No limit | Unlock Provider `= openai`, unlock status `= Available` |
+| Prefer unlocked landing | No limit | Unlock status `= Available` or `= Reachable` |

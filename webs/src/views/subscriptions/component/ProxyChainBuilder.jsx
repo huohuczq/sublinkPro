@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useTheme } from '@mui/material/styles';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import Paper from '@mui/material/Paper';
@@ -22,28 +24,30 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 
 import ConditionBuilder from './ConditionBuilder';
+import { getChainProxyFieldControlSx, getChainProxyIconButtonSx, getChainProxyThemeTokens } from './chainProxyTheme';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
 
-/**
- * 代理链可视化构建器
- * 用于配置入口代理的类型和参数
- */
 export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fields = [], operators = [], groupTypes = [] }) {
+  const theme = useTheme();
+  const { t } = useTranslation();
+  const { isDark } = useResolvedColorScheme();
+  const tokens = getChainProxyThemeTokens(theme, isDark);
+  const fieldControlSx = getChainProxyFieldControlSx(tokens);
+  const iconButtonSx = getChainProxyIconButtonSx(tokens);
+  const errorIconButtonSx = getChainProxyIconButtonSx(tokens, theme.palette.error.main);
   const [chainItems, setChainItems] = useState(value || []);
   const [expandedIndex, setExpandedIndex] = useState(0);
 
-  // 当外部 value 变化时更新内部状态
   useEffect(() => {
     if (value && Array.isArray(value)) {
       setChainItems(value);
     }
   }, [value]);
 
-  // 通知父组件数据变化
   const notifyChange = (newItems) => {
     onChange?.(newItems);
   };
 
-  // 添加代理项
   const handleAddItem = () => {
     const newItems = [
       ...chainItems,
@@ -57,14 +61,12 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
     notifyChange(newItems);
   };
 
-  // 删除代理项
   const handleRemoveItem = (index) => {
     const newItems = chainItems.filter((_, i) => i !== index);
     setChainItems(newItems);
     notifyChange(newItems);
   };
 
-  // 更新代理项
   const handleItemChange = (index, updates) => {
     const newItems = chainItems.map((item, i) => {
       if (i === index) {
@@ -76,23 +78,15 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
     notifyChange(newItems);
   };
 
-  // 切换展开状态
   const toggleExpand = (index) => {
     setExpandedIndex(expandedIndex === index ? -1 : index);
   };
 
-  // 获取代理类型标签
   const getTypeLabel = (type) => {
-    const labels = {
-      template_group: '模板代理组',
-      custom_group: '自定义代理组',
-      dynamic_node: '动态条件节点',
-      specified_node: '指定节点'
-    };
+    const labels = t('subscriptions.chain.proxyTypes', { returnObjects: true });
     return labels[type] || type;
   };
 
-  // 获取代理类型颜色
   const getTypeColor = (type) => {
     const colors = {
       template_group: 'primary',
@@ -103,7 +97,6 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
     return colors[type] || 'default';
   };
 
-  // 渲染单个代理项配置
   const renderItemConfig = (item, index) => {
     const isExpanded = expandedIndex === index;
 
@@ -114,41 +107,49 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
         sx={{
           p: 2,
           position: 'relative',
-          borderColor: isExpanded ? 'primary.main' : 'divider'
+          borderColor: isExpanded ? tokens.primaryStrongBorder : tokens.panelBorder,
+          backgroundColor: isExpanded ? tokens.containerSurface : tokens.nestedPanelSurface,
+          backgroundImage: isExpanded ? tokens.dialogSurfaceGradient : 'none',
+          boxShadow: tokens.cardShadow,
+          borderRadius: 2
         }}
       >
-        {/* 代理项头部 */}
         <Stack direction="row" alignItems="center" spacing={1}>
-          <Chip label={getTypeLabel(item.type)} color={getTypeColor(item.type)} size="small" />
-          <Typography variant="body2" sx={{ flex: 1 }}>
+          <Chip
+            label={getTypeLabel(item.type)}
+            color={getTypeColor(item.type)}
+            size="small"
+            sx={{ borderRadius: 1.5, fontWeight: 600, boxShadow: tokens.insetHighlight }}
+          />
+          <Typography variant="body2" sx={{ flex: 1, color: item.groupName || item.nodeId ? tokens.primaryText : tokens.tertiaryText }}>
             {item.groupName || item.nodeId ? (
               item.type === 'specified_node' ? (
-                nodes.find((n) => n.id === item.nodeId)?.name || `节点 #${item.nodeId}`
+                nodes.find((n) => n.id === item.nodeId)?.name || t('subscriptions.chain.nodeNumber', { id: item.nodeId })
               ) : (
                 item.groupName
               )
             ) : (
-              <em style={{ color: 'gray' }}>未配置</em>
+              <Box component="em" sx={{ color: tokens.tertiaryText, fontStyle: 'italic' }}>
+                {t('subscriptions.chain.unconfigured')}
+              </Box>
             )}
           </Typography>
-          <IconButton size="small" onClick={() => toggleExpand(index)}>
+          <IconButton size="small" onClick={() => toggleExpand(index)} sx={iconButtonSx}>
             {isExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
           </IconButton>
-          <IconButton size="small" color="error" onClick={() => handleRemoveItem(index)}>
+          <IconButton size="small" onClick={() => handleRemoveItem(index)} sx={{ ...errorIconButtonSx, color: theme.palette.error.main }}>
             <DeleteIcon fontSize="small" />
           </IconButton>
         </Stack>
 
-        {/* 展开的配置区域 */}
         <Collapse in={isExpanded}>
-          <Box sx={{ mt: 2 }}>
+          <Box sx={{ mt: 2, pt: 2, borderTop: `1px solid ${tokens.softBorder}` }}>
             <Stack spacing={2}>
-              {/* 代理类型选择 */}
-              <FormControl size="small" fullWidth>
-                <InputLabel>代理类型</InputLabel>
+              <FormControl size="small" fullWidth sx={fieldControlSx}>
+                <InputLabel>{t('subscriptions.chain.proxyType')}</InputLabel>
                 <Select
                   value={item.type}
-                  label="代理类型"
+                  label={t('subscriptions.chain.proxyType')}
                   onChange={(e) =>
                     handleItemChange(index, {
                       type: e.target.value,
@@ -158,42 +159,42 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
                     })
                   }
                 >
-                  <MenuItem value="template_group">模板代理组</MenuItem>
-                  <MenuItem value="custom_group">自定义代理组</MenuItem>
-                  <MenuItem value="dynamic_node">动态条件节点</MenuItem>
-                  <MenuItem value="specified_node">指定节点</MenuItem>
+                  <MenuItem value="template_group">{t('subscriptions.chain.proxyTypes.template_group')}</MenuItem>
+                  <MenuItem value="custom_group">{t('subscriptions.chain.proxyTypes.custom_group')}</MenuItem>
+                  <MenuItem value="dynamic_node">{t('subscriptions.chain.proxyTypes.dynamic_node')}</MenuItem>
+                  <MenuItem value="specified_node">{t('subscriptions.chain.proxyTypes.specified_node')}</MenuItem>
                 </Select>
               </FormControl>
 
-              {/* 模板代理组配置 */}
               {item.type === 'template_group' && (
                 <TextField
                   size="small"
                   fullWidth
-                  label="代理组名称"
-                  placeholder="输入模板中的代理组名称"
+                  label={t('subscriptions.chain.groupName')}
+                  placeholder={t('subscriptions.chain.templateGroupPlaceholder')}
                   value={item.groupName || ''}
                   onChange={(e) => handleItemChange(index, { groupName: e.target.value })}
-                  helperText="输入 Clash 模板中已存在的代理组名称"
+                  helperText={t('subscriptions.chain.templateGroupHelper')}
+                  sx={fieldControlSx}
                 />
               )}
 
-              {/* 自定义代理组配置 */}
               {item.type === 'custom_group' && (
                 <>
                   <TextField
                     size="small"
                     fullWidth
-                    label="代理组名称"
-                    placeholder="自定义代理组名称"
+                    label={t('subscriptions.chain.groupName')}
+                    placeholder={t('subscriptions.chain.customGroupPlaceholder')}
                     value={item.groupName || ''}
                     onChange={(e) => handleItemChange(index, { groupName: e.target.value })}
+                    sx={fieldControlSx}
                   />
-                  <FormControl size="small" fullWidth>
-                    <InputLabel>组类型</InputLabel>
+                  <FormControl size="small" fullWidth sx={fieldControlSx}>
+                    <InputLabel>{t('subscriptions.chain.groupType')}</InputLabel>
                     <Select
                       value={item.groupType || 'select'}
-                      label="组类型"
+                      label={t('subscriptions.chain.groupType')}
                       onChange={(e) => handleItemChange(index, { groupType: e.target.value })}
                     >
                       {groupTypes.map((gt) => (
@@ -203,13 +204,12 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
                       ))}
                     </Select>
                   </FormControl>
-                  {/* url-test 和 fallback 类型配置 */}
                   {(item.groupType === 'url-test' || item.groupType === 'fallback') && (
                     <Stack spacing={1.5}>
                       <TextField
                         size="small"
                         fullWidth
-                        label="测速 URL"
+                        label={t('subscriptions.chain.testUrl')}
                         value={item.urlTestConfig?.url || ''}
                         onChange={(e) =>
                           handleItemChange(index, {
@@ -220,12 +220,13 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
                           })
                         }
                         placeholder="http://www.gstatic.com/generate_204"
-                        helperText="用于检测节点可用性的 URL，留空使用默认值"
+                        helperText={t('subscriptions.chain.testUrlHelper')}
+                        sx={fieldControlSx}
                       />
                       <Stack direction="row" spacing={1}>
                         <TextField
                           size="small"
-                          label="间隔(秒)"
+                          label={t('subscriptions.chain.intervalSeconds')}
                           type="number"
                           value={item.urlTestConfig?.interval ?? 300}
                           onChange={(e) =>
@@ -236,12 +237,12 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
                               }
                             })
                           }
-                          sx={{ flex: 1 }}
-                          helperText="健康检查间隔"
+                          sx={{ ...fieldControlSx, flex: 1 }}
+                          helperText={t('subscriptions.chain.healthCheckInterval')}
                         />
                         <TextField
                           size="small"
-                          label="容差(ms)"
+                          label={t('subscriptions.chain.toleranceMs')}
                           type="number"
                           value={item.urlTestConfig?.tolerance ?? 50}
                           onChange={(e) =>
@@ -252,19 +253,22 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
                               }
                             })
                           }
-                          sx={{ flex: 1 }}
-                          helperText={item.groupType === 'url-test' ? '延迟差在此范围内视为相同' : '故障转移阈值'}
+                          sx={{ ...fieldControlSx, flex: 1 }}
+                          helperText={
+                            item.groupType === 'url-test'
+                              ? t('subscriptions.chain.toleranceHelper')
+                              : t('subscriptions.chain.fallbackThreshold')
+                          }
                         />
                       </Stack>
                     </Stack>
                   )}
-                  {/* load-balance 类型配置 */}
                   {item.groupType === 'load-balance' && (
                     <Stack spacing={1.5}>
                       <TextField
                         size="small"
                         fullWidth
-                        label="测速 URL"
+                        label={t('subscriptions.chain.testUrl')}
                         value={item.urlTestConfig?.url || ''}
                         onChange={(e) =>
                           handleItemChange(index, {
@@ -275,12 +279,13 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
                           })
                         }
                         placeholder="http://www.gstatic.com/generate_204"
-                        helperText="用于检测节点可用性的 URL，留空使用默认值"
+                        helperText={t('subscriptions.chain.testUrlHelper')}
+                        sx={fieldControlSx}
                       />
                       <Stack direction="row" spacing={1}>
                         <TextField
                           size="small"
-                          label="间隔(秒)"
+                          label={t('subscriptions.chain.intervalSeconds')}
                           type="number"
                           value={item.urlTestConfig?.interval ?? 300}
                           onChange={(e) =>
@@ -291,14 +296,14 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
                               }
                             })
                           }
-                          sx={{ flex: 1 }}
-                          helperText="健康检查间隔"
+                          sx={{ ...fieldControlSx, flex: 1 }}
+                          helperText={t('subscriptions.chain.healthCheckInterval')}
                         />
-                        <FormControl size="small" sx={{ flex: 1 }}>
-                          <InputLabel>负载均衡策略</InputLabel>
+                        <FormControl size="small" sx={{ ...fieldControlSx, flex: 1 }}>
+                          <InputLabel>{t('subscriptions.chain.loadBalanceStrategy')}</InputLabel>
                           <Select
                             value={item.urlTestConfig?.strategy || 'consistent-hashing'}
-                            label="负载均衡策略"
+                            label={t('subscriptions.chain.loadBalanceStrategy')}
                             onChange={(e) =>
                               handleItemChange(index, {
                                 urlTestConfig: {
@@ -308,16 +313,16 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
                               })
                             }
                           >
-                            <MenuItem value="consistent-hashing">一致性哈希</MenuItem>
-                            <MenuItem value="round-robin">轮询</MenuItem>
-                            <MenuItem value="sticky-sessions">会话保持</MenuItem>
+                            <MenuItem value="consistent-hashing">{t('subscriptions.chain.strategies.consistentHashing')}</MenuItem>
+                            <MenuItem value="round-robin">{t('subscriptions.chain.strategies.roundRobin')}</MenuItem>
+                            <MenuItem value="sticky-sessions">{t('subscriptions.chain.strategies.stickySessions')}</MenuItem>
                           </Select>
                         </FormControl>
                       </Stack>
                     </Stack>
                   )}
                   <ConditionBuilder
-                    title="节点筛选条件"
+                    title={t('subscriptions.chain.nodeFilterConditions')}
                     value={item.nodeConditions}
                     onChange={(conds) => handleItemChange(index, { nodeConditions: conds })}
                     fields={fields}
@@ -326,23 +331,22 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
                 </>
               )}
 
-              {/* 动态条件节点配置 */}
               {item.type === 'dynamic_node' && (
                 <>
-                  <FormControl size="small" fullWidth>
-                    <InputLabel>选择模式</InputLabel>
+                  <FormControl size="small" fullWidth sx={fieldControlSx}>
+                    <InputLabel>{t('subscriptions.chain.selectMode')}</InputLabel>
                     <Select
                       value={item.selectMode || 'first'}
-                      label="选择模式"
+                      label={t('subscriptions.chain.selectMode')}
                       onChange={(e) => handleItemChange(index, { selectMode: e.target.value })}
                     >
-                      <MenuItem value="first">第一个匹配</MenuItem>
-                      <MenuItem value="random">随机</MenuItem>
-                      <MenuItem value="fastest">最快节点</MenuItem>
+                      <MenuItem value="first">{t('subscriptions.chain.selectModes.first')}</MenuItem>
+                      <MenuItem value="random">{t('subscriptions.chain.selectModes.random')}</MenuItem>
+                      <MenuItem value="fastest">{t('subscriptions.chain.selectModes.fastest')}</MenuItem>
                     </Select>
                   </FormControl>
                   <ConditionBuilder
-                    title="节点匹配条件"
+                    title={t('subscriptions.chain.nodeMatchConditions')}
                     value={item.nodeConditions}
                     onChange={(conds) => handleItemChange(index, { nodeConditions: conds })}
                     fields={fields}
@@ -351,20 +355,20 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
                 </>
               )}
 
-              {/* 指定节点配置 */}
               {item.type === 'specified_node' && (
                 <Autocomplete
                   size="small"
                   options={nodes}
-                  getOptionLabel={(option) => `${option.name || option.linkName} (${option.linkCountry || '未知'})`}
+                  sx={fieldControlSx}
+                  getOptionLabel={(option) => `${option.name || option.linkName} (${option.linkCountry || t('common.unknown')})`}
                   value={nodes.find((n) => n.id === item.nodeId) || null}
-                  onChange={(e, newValue) => handleItemChange(index, { nodeId: newValue?.id })}
-                  renderInput={(params) => <TextField {...params} label="选择节点" />}
+                  onChange={(_event, newValue) => handleItemChange(index, { nodeId: newValue?.id })}
+                  renderInput={(params) => <TextField {...params} label={t('subscriptions.chain.selectNode')} />}
                   renderOption={(props, option) => (
                     <li {...props} key={option.id}>
                       <Stack direction="row" spacing={1} alignItems="center">
                         <Typography variant="body2">{option.name || option.linkName}</Typography>
-                        <Chip label={option.linkCountry || '未知'} size="small" variant="outlined" />
+                        <Chip label={option.linkCountry || t('common.unknown')} size="small" variant="outlined" />
                         <Chip label={option.protocol || 'unknown'} size="small" color="info" variant="outlined" />
                       </Stack>
                     </li>
@@ -381,46 +385,69 @@ export default function ProxyChainBuilder({ value = [], onChange, nodes = [], fi
   return (
     <Box>
       <Stack spacing={2}>
-        {/* 代理链可视化 */}
         {chainItems.length > 0 && (
-          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          <Stack
+            direction="row"
+            spacing={1}
+            alignItems="center"
+            flexWrap="wrap"
+            useFlexGap
+            sx={{ p: 1.5, borderRadius: 2, backgroundColor: tokens.mutedPanelSurface, border: `1px solid ${tokens.softBorder}` }}
+          >
             {chainItems.map((item, index) => (
               <Stack key={index} direction="row" alignItems="center" spacing={1}>
                 <Chip
                   label={
                     item.type === 'specified_node'
-                      ? nodes.find((n) => n.id === item.nodeId)?.name || `节点 #${item.nodeId}`
+                      ? nodes.find((n) => n.id === item.nodeId)?.name || t('subscriptions.chain.nodeNumber', { id: item.nodeId })
                       : item.groupName || getTypeLabel(item.type)
                   }
                   color={getTypeColor(item.type)}
                   onClick={() => toggleExpand(index)}
+                  sx={{ boxShadow: tokens.insetHighlight, cursor: 'pointer' }}
                 />
                 {index < chainItems.length - 1 && <ArrowForwardIcon color="action" fontSize="small" />}
               </Stack>
             ))}
             <ArrowForwardIcon color="action" fontSize="small" />
-            <Chip label="目标节点" variant="outlined" />
+            <Chip
+              label={t('subscriptions.chain.targetNode')}
+              variant="outlined"
+              sx={{ borderColor: tokens.softBorder, color: tokens.secondaryText }}
+            />
           </Stack>
         )}
 
-        <Divider />
+        <Divider sx={{ borderColor: tokens.softBorder }} />
 
-        {/* 代理项配置列表 */}
-        <Typography variant="subtitle2" color="text.secondary">
-          入口代理配置
+        <Typography variant="subtitle2" sx={{ color: tokens.secondaryText }}>
+          {t('subscriptions.chain.entryProxyConfig')}
         </Typography>
 
         {chainItems.map((item, index) => renderItemConfig(item, index))}
 
-        {/* 添加代理按钮 */}
-        <Button variant="outlined" startIcon={<AddIcon />} onClick={handleAddItem} sx={{ alignSelf: 'flex-start' }}>
-          添加入口代理
+        <Button
+          variant="outlined"
+          startIcon={<AddIcon />}
+          onClick={handleAddItem}
+          sx={{
+            alignSelf: 'flex-start',
+            borderColor: tokens.primarySoftBorder,
+            backgroundColor: tokens.fieldSurface,
+            boxShadow: tokens.insetHighlight,
+            color: tokens.primaryText,
+            '&:hover': {
+              borderColor: tokens.primaryStrongBorder,
+              backgroundColor: tokens.hoverSurface
+            }
+          }}
+        >
+          {t('subscriptions.chain.addEntryProxy')}
         </Button>
 
-        {/* 空状态提示 */}
         {chainItems.length === 0 && (
-          <Typography variant="body2" color="text.secondary" sx={{ fontStyle: 'italic' }}>
-            点击上方按钮添加入口代理配置
+          <Typography variant="body2" sx={{ fontStyle: 'italic', color: tokens.secondaryText }}>
+            {t('subscriptions.chain.emptyEntryProxy')}
           </Typography>
         )}
       </Stack>

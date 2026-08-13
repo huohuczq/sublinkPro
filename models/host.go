@@ -11,6 +11,7 @@ import (
 	"sublink/utils"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm/clause"
 )
@@ -24,8 +25,8 @@ type Host struct {
 	Source    string     `json:"source" gorm:"size:255;default:'手动添加'"`         // 来源: 手动添加/DNS服务器地址
 	ExpireAt  *time.Time `json:"expireAt" gorm:"index"`                         // 过期时间，nil 表示永不过期
 	Pinned    bool       `json:"pinned" gorm:"default:false"`                   // 是否固定，固定后不会被过期删除
-	CreatedAt time.Time  `json:"createdAt"`
-	UpdatedAt time.Time  `json:"updatedAt"`
+	CreatedAt time.Time  `json:"createdAt" gorm:"autoCreateTime"`
+	UpdatedAt time.Time  `json:"updatedAt" gorm:"autoUpdateTime"`
 }
 
 // hostCache 使用泛型缓存
@@ -81,6 +82,8 @@ func InitHostCache() error {
 
 // Add 添加 Host (Write-Through)
 func (h *Host) Add() error {
+	*h = sanitizeHostForStorage(*h)
+
 	// 检查 hostname 是否已存在
 	if hosts := hostCache.GetByIndex("hostname", h.Hostname); len(hosts) > 0 {
 		return fmt.Errorf("hostname '%s' 已存在", h.Hostname)
@@ -97,6 +100,8 @@ func (h *Host) Add() error {
 
 // Update 更新 Host (Write-Through)
 func (h *Host) Update() error {
+	*h = sanitizeHostForStorage(*h)
+
 	// 检查 hostname 是否与其他记录冲突
 	if hosts := hostCache.GetByIndex("hostname", h.Hostname); len(hosts) > 0 {
 		for _, existing := range hosts {
@@ -106,7 +111,7 @@ func (h *Host) Update() error {
 		}
 	}
 
-	err := database.DB.Model(h).Updates(map[string]interface{}{
+	err := database.DB.Model(h).Updates(map[string]any{
 		"hostname":   h.Hostname,
 		"ip":         h.IP,
 		"remark":     h.Remark,
@@ -150,6 +155,7 @@ func GetHostByID(id int) (*Host, error) {
 
 // GetByHostname 根据 hostname 获取 Host
 func GetHostByHostname(hostname string) (*Host, error) {
+	hostname = normalizeHostHostname(hostname)
 	if hosts := hostCache.GetByIndex("hostname", hostname); len(hosts) > 0 {
 		return &hosts[0], nil
 	}
@@ -239,7 +245,7 @@ func SyncHostsFromText(text string) (added, updated, deleted int, err error) {
 				existing.IP = newHost.IP
 				existing.Remark = newHost.Remark
 				existing.UpdatedAt = time.Now()
-				if err := tx.Model(&existing).Updates(map[string]interface{}{
+				if err := tx.Model(&existing).Updates(map[string]any{
 					"ip":         existing.IP,
 					"remark":     existing.Remark,
 					"updated_at": existing.UpdatedAt,
@@ -319,6 +325,7 @@ func parseHostText(text string) []Host {
 			host.Remark = strings.TrimSpace(matches[3])
 		}
 		host.Source = "手动导入"
+		host = sanitizeHostForStorage(host)
 
 		// 简单验证
 		if host.Hostname != "" && host.IP != "" {
@@ -397,9 +404,13 @@ func BatchUpsertHosts(mappings []HostMappingInfo) (int, error) {
 	}
 
 	// 分块处理，避免SQLite变量限制
+	hosts = NormalizeHostsForStorage(hosts)
 	chunks := chunkHosts(hosts, database.BatchSize)
 
 	for _, chunk := range chunks {
+		for i := range chunk {
+			chunk[i] = sanitizeHostForStorage(chunk[i])
+		}
 		// 使用 ON CONFLICT 实现 upsert：已存在则更新 ip/remark/expire_at/updated_at
 		result := database.DB.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "hostname"}},
@@ -438,10 +449,10 @@ func BatchUpsertHosts(mappings []HostMappingInfo) (int, error) {
 
 // upsertSingleHost 单条upsert（降级用）
 func upsertSingleHost(h Host) error {
+	h = sanitizeHostForStorage(h)
 	existingHosts := hostCache.GetByIndex("hostname", h.Hostname)
 	if len(existingHosts) > 0 {
-		existing := existingHosts[0]
-		return database.DB.Model(&existing).Updates(map[string]interface{}{
+		return database.DB.Model(new(existingHosts[0])).Updates(map[string]any{
 			"ip":         h.IP,
 			"remark":     h.Remark,
 			"source":     h.Source,
@@ -450,6 +461,40 @@ func upsertSingleHost(h Host) error {
 		}).Error
 	}
 	return database.DB.Create(&h).Error
+}
+
+func sanitizeHostForStorage(h Host) Host {
+	h.Hostname = normalizeHostHostname(h.Hostname)
+	h.IP = strings.TrimSpace(strings.ToValidUTF8(h.IP, "�"))
+	h.Remark = strings.TrimSpace(strings.ToValidUTF8(h.Remark, "�"))
+	h.Source = strings.TrimSpace(strings.ToValidUTF8(h.Source, "�"))
+	return h
+}
+
+func normalizeHostHostname(hostname string) string {
+	return strings.ToLower(strings.TrimSpace(strings.ToValidUTF8(hostname, "�")))
+}
+
+// NormalizeHostsForStorage sanitizes Host records and keeps the first row per normalized hostname.
+func NormalizeHostsForStorage(hosts []Host) []Host {
+	if len(hosts) == 0 {
+		return nil
+	}
+
+	normalized := make([]Host, 0, len(hosts))
+	seen := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		host = sanitizeHostForStorage(host)
+		if host.Hostname == "" {
+			continue
+		}
+		if _, exists := seen[host.Hostname]; exists {
+			continue
+		}
+		seen[host.Hostname] = struct{}{}
+		normalized = append(normalized, host)
+	}
+	return normalized
 }
 
 // reloadHostCache 重新加载Host缓存
@@ -482,11 +527,14 @@ func chunkHosts(hosts []Host, size int) [][]Host {
 // 格式: [自动] 节点名称 | 分组:xxx | 来源:xxx
 func formatHostRemark(nodeName, group, source string) string {
 	parts := []string{"[自动]"}
+	nodeName = strings.TrimSpace(strings.ToValidUTF8(nodeName, "�"))
+	group = strings.TrimSpace(strings.ToValidUTF8(group, "�"))
+	source = strings.TrimSpace(strings.ToValidUTF8(source, "�"))
 
 	if nodeName != "" {
-		// 节点名称可能很长，截取前30个字符
-		if len(nodeName) > 30 {
-			nodeName = nodeName[:30] + "..."
+		if utf8.RuneCountInString(nodeName) > 30 {
+			runes := []rune(nodeName)
+			nodeName = string(runes[:30]) + "..."
 		}
 		parts = append(parts, nodeName)
 	}
@@ -568,7 +616,7 @@ func GetHostExpireHours() int {
 		return 0
 	}
 	hours := 0
-	fmt.Sscanf(hoursStr, "%d", &hours)
+	_, _ = fmt.Sscanf(hoursStr, "%d", &hours)
 	if hours < 0 {
 		return 0
 	}
@@ -582,8 +630,7 @@ func CalculateExpireTime() *time.Time {
 	if hours <= 0 {
 		return nil
 	}
-	expireAt := time.Now().Add(time.Duration(hours) * time.Hour)
-	return &expireAt
+	return new(time.Now().Add(time.Duration(hours) * time.Hour))
 }
 
 // MigrateHostExpireFields 执行 Host 有效期字段迁移

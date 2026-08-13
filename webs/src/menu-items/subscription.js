@@ -9,19 +9,23 @@ import {
   IconTags,
   IconListCheck,
   IconWorld,
-  IconPlane
+  IconPlane,
+  IconFlag,
+  IconRefreshDot
 } from '@tabler/icons-react';
 
 // ==============================|| SUBSCRIPTION MENU ITEMS ||============================== //
 
 const subscription = {
   id: 'subscription',
-  title: '订阅管理',
+  title: 'Subscription Management',
+  titleKey: 'navigation.groups.subscription',
   type: 'group',
   children: [
     {
       id: 'airports',
-      title: '机场管理',
+      title: 'Airport Management',
+      titleKey: 'navigation.items.airports',
       type: 'item',
       url: '/subscription/airports',
       icon: IconPlane,
@@ -29,7 +33,8 @@ const subscription = {
     },
     {
       id: 'nodes',
-      title: '节点管理',
+      title: 'Node Management',
+      titleKey: 'navigation.items.nodes',
       type: 'item',
       url: '/subscription/nodes',
       icon: IconNetwork,
@@ -37,7 +42,8 @@ const subscription = {
     },
     {
       id: 'node-check',
-      title: '节点检测',
+      title: 'Node Check',
+      titleKey: 'navigation.items.nodeCheck',
       type: 'item',
       url: '/subscription/node-check',
       icon: IconDeviceDesktopAnalytics,
@@ -45,7 +51,8 @@ const subscription = {
     },
     {
       id: 'subs',
-      title: '订阅列表',
+      title: 'Subscriptions',
+      titleKey: 'navigation.items.subscriptions',
       type: 'item',
       url: '/subscription/subs',
       icon: IconList,
@@ -53,7 +60,8 @@ const subscription = {
     },
     {
       id: 'templates',
-      title: '模板管理',
+      title: 'Templates',
+      titleKey: 'navigation.items.templates',
       type: 'item',
       url: '/subscription/templates',
       icon: IconTemplate,
@@ -61,7 +69,8 @@ const subscription = {
     },
     {
       id: 'tags',
-      title: '标签管理',
+      title: 'Tags',
+      titleKey: 'navigation.items.tags',
       type: 'item',
       url: '/subscription/tags',
       icon: IconTags,
@@ -74,12 +83,14 @@ const subscription = {
 
 const script = {
   id: 'script-group',
-  title: '脚本管理',
+  title: 'Script Management',
+  titleKey: 'navigation.groups.script',
   type: 'group',
   children: [
     {
       id: 'script',
-      title: '脚本列表',
+      title: 'Scripts',
+      titleKey: 'navigation.items.scripts',
       type: 'item',
       url: '/script',
       icon: IconScript,
@@ -92,12 +103,14 @@ const script = {
 
 const accesskey = {
   id: 'accesskey-group',
-  title: 'API 密钥',
+  title: 'API Keys',
+  titleKey: 'navigation.groups.accessKey',
   type: 'group',
   children: [
     {
       id: 'accesskey',
-      title: 'API 密钥',
+      title: 'API Keys',
+      titleKey: 'navigation.items.accessKeys',
       type: 'item',
       url: '/accesskey',
       icon: IconKey,
@@ -110,12 +123,14 @@ const accesskey = {
 
 const system = {
   id: 'system',
-  title: '系统设置',
+  title: 'System Settings',
+  titleKey: 'navigation.groups.system',
   type: 'group',
   children: [
     {
       id: 'tasks',
-      title: '任务管理',
+      title: 'Tasks',
+      titleKey: 'navigation.items.tasks',
       type: 'item',
       url: '/system/tasks',
       icon: IconListCheck,
@@ -123,29 +138,68 @@ const system = {
     },
     {
       id: 'hosts',
-      title: 'Host管理',
+      title: 'Host Management',
+      titleKey: 'navigation.items.hosts',
       type: 'item',
       url: '/system/hosts',
       icon: IconWorld,
       breadcrumbs: true
     },
     {
+      id: 'country-rules',
+      title: 'Country Rules',
+      titleKey: 'navigation.items.countryRules',
+      type: 'item',
+      url: '/system/country-rules',
+      icon: IconFlag,
+      breadcrumbs: true
+    },
+    {
+      id: 'webhooks',
+      title: 'Webhooks',
+      titleKey: 'navigation.items.webhooks',
+      type: 'item',
+      url: '/system/webhooks',
+      icon: IconList,
+      breadcrumbs: true
+    },
+    {
       id: 'monitor',
-      title: '系统监控',
+      title: 'System Monitor',
+      titleKey: 'navigation.items.monitor',
       type: 'item',
       url: '/system/monitor',
       icon: IconDeviceDesktopAnalytics,
       breadcrumbs: true
     },
     {
-      id: 'user',
-      title: '个人中心',
+      id: 'app-settings',
+      title: 'Application Settings',
+      titleKey: 'navigation.items.appSettings',
       type: 'item',
-      url: '/settings',
+      url: '/system/settings',
       icon: IconSettings,
       breadcrumbs: true
     }
   ]
 };
 
-export { subscription, script, accesskey, system };
+const changelog = {
+  id: 'changelog-group',
+  title: 'Changelog',
+  titleKey: 'navigation.groups.changelog',
+  type: 'group',
+  children: [
+    {
+      id: 'changelog',
+      title: 'Changelog',
+      titleKey: 'navigation.items.changelog',
+      type: 'item',
+      url: '/system/updates',
+      icon: IconRefreshDot,
+      breadcrumbs: true
+    }
+  ]
+};
+
+export { subscription, script, accesskey, system, changelog };

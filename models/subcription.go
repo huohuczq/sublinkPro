@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // subcriptionCache 使用新的泛型缓存
@@ -30,35 +31,61 @@ type Subcription struct {
 	Nodes                 []Node    `gorm:"-" json:"-"`
 	SubLogs               []SubLogs `gorm:"foreignKey:SubcriptionID;"` // 一对多关系 约束父表被删除子表记录跟着删除
 	CreateDate            string
-	NodesWithSort         []NodeWithSort   `gorm:"-" json:"Nodes"`
-	Groups                []string         `gorm:"-" json:"-"`      // 内部使用，不返回给前端
-	GroupsWithSort        []GroupWithSort  `gorm:"-" json:"Groups"` // 订阅关联的分组列表（带Sort）
-	Scripts               []Script         `gorm:"-" json:"-"`      // 内部使用
-	ScriptsWithSort       []ScriptWithSort `gorm:"-" json:"Scripts"`
-	IPWhitelist           string           `json:"IPWhitelist"`                               //IP白名单
-	IPBlacklist           string           `json:"IPBlacklist"`                               //IP黑名单
-	DelayTime             int              `json:"DelayTime"`                                 // 最大延迟(ms)
-	MinSpeed              float64          `json:"MinSpeed"`                                  // 最小速度(MB/s)
-	CountryWhitelist      string           `json:"CountryWhitelist"`                          // 国家白名单（逗号分隔）
-	CountryBlacklist      string           `json:"CountryBlacklist"`                          // 国家黑名单（逗号分隔）
-	NodeNameRule          string           `json:"NodeNameRule"`                              // 节点命名规则模板
-	NodeNamePreprocess    string           `json:"NodeNamePreprocess"`                        // 原名预处理规则 (JSON数组)
-	NodeNameWhitelist     string           `json:"NodeNameWhitelist"`                         // 节点名称白名单 (JSON数组)
-	NodeNameBlacklist     string           `json:"NodeNameBlacklist"`                         // 节点名称黑名单 (JSON数组)
-	TagWhitelist          string           `json:"TagWhitelist"`                              // 标签白名单（逗号分隔）
-	TagBlacklist          string           `json:"TagBlacklist"`                              // 标签黑名单（逗号分隔）
-	ProtocolWhitelist     string           `json:"ProtocolWhitelist"`                         // 协议白名单（逗号分隔）
-	ProtocolBlacklist     string           `json:"ProtocolBlacklist"`                         // 协议黑名单（逗号分隔）
-	DeduplicationRule     string           `json:"DeduplicationRule"`                         // 去重规则配置(JSON)
-	RefreshUsageOnRequest bool             `gorm:"default:true" json:"RefreshUsageOnRequest"` // 获取订阅时是否实时刷新用量信息
-	CreatedAt             time.Time        `json:"CreatedAt"`
-	UpdatedAt             time.Time        `json:"UpdatedAt"`
-	DeletedAt             gorm.DeletedAt   `gorm:"index" json:"DeletedAt"`
+	NodesWithSort         []NodeWithSort    `gorm:"-" json:"Nodes"`
+	Groups                []string          `gorm:"-" json:"-"`      // 内部使用，不返回给前端
+	GroupsWithSort        []GroupWithSort   `gorm:"-" json:"Groups"` // 订阅关联的分组列表（带Sort）
+	AirportsWithSort      []AirportWithSort `gorm:"-" json:"Airports"`
+	Scripts               []Script          `gorm:"-" json:"-"` // 内部使用
+	ScriptsWithSort       []ScriptWithSort  `gorm:"-" json:"Scripts"`
+	IPWhitelist           string            `json:"IPWhitelist"`                               //IP白名单
+	IPBlacklist           string            `json:"IPBlacklist"`                               //IP黑名单
+	DelayTime             int               `json:"DelayTime"`                                 // 最大延迟(ms)
+	MinSpeed              float64           `json:"MinSpeed"`                                  // 最小速度(MB/s)
+	CountryWhitelist      string            `json:"CountryWhitelist"`                          // 国家白名单（逗号分隔）
+	CountryBlacklist      string            `json:"CountryBlacklist"`                          // 国家黑名单（逗号分隔）
+	NodeNameRule          string            `json:"NodeNameRule"`                              // 节点命名规则模板
+	NodeNamePreprocess    string            `json:"NodeNamePreprocess"`                        // 原名预处理规则 (JSON数组)
+	NodeNameWhitelist     string            `json:"NodeNameWhitelist"`                         // 节点名称白名单 (JSON数组)
+	NodeNameBlacklist     string            `json:"NodeNameBlacklist"`                         // 节点名称黑名单 (JSON数组)
+	TagWhitelist          string            `json:"TagWhitelist"`                              // 标签白名单（逗号分隔）
+	TagBlacklist          string            `json:"TagBlacklist"`                              // 标签黑名单（逗号分隔）
+	ProtocolWhitelist     string            `json:"ProtocolWhitelist"`                         // 协议白名单（逗号分隔）
+	ProtocolBlacklist     string            `json:"ProtocolBlacklist"`                         // 协议黑名单（逗号分隔）
+	DeduplicationRule     string            `json:"DeduplicationRule"`                         // 去重规则配置(JSON)
+	RefreshUsageOnRequest bool              `gorm:"default:true" json:"RefreshUsageOnRequest"` // 获取订阅时是否实时刷新用量信息
+	UpdateInterval        int               `gorm:"default:0" json:"UpdateInterval"`           // 订阅客户端更新间隔（小时，0=使用默认值）
+	MaxFraudScore         int               `gorm:"default:0" json:"MaxFraudScore"`            // 最大欺诈评分（0=不限制）
+	OnlyResidential       bool              `gorm:"default:false" json:"OnlyResidential"`      // 仅住宅IP
+	OnlyNative            bool              `gorm:"default:false" json:"OnlyNative"`           // 仅原生IP
+	ResidentialType       string            `json:"ResidentialType"`                           // 住宅属性过滤: residential/datacenter/untested
+	IPType                string            `json:"IPType"`                                    // IP类型过滤: native/broadcast/untested
+	QualityStatus         string            `json:"QualityStatus"`
+	UnlockProvider        string            `json:"UnlockProvider"`
+	UnlockStatus          string            `json:"UnlockStatus"`
+	UnlockKeyword         string            `json:"UnlockKeyword"`
+	UnlockRules           string            `json:"UnlockRules"`
+	UnlockRuleMode        string            `json:"UnlockRuleMode"`
+	CreatedAt             time.Time         `json:"CreatedAt"`
+	UpdatedAt             time.Time         `json:"UpdatedAt"`
+	DeletedAt             gorm.DeletedAt    `gorm:"index" json:"DeletedAt"`
 }
 
 type GroupWithSort struct {
 	Name string `json:"Name"`
 	Sort int    `json:"Sort"`
+}
+
+type AirportPublicInfo struct {
+	ID        int    `json:"id"`
+	Name      string `json:"name"`
+	Group     string `json:"group"`
+	Enabled   bool   `json:"enabled"`
+	NodeCount int    `json:"nodeCount"`
+}
+
+type AirportWithSort struct {
+	AirportPublicInfo
+	Sort int `json:"Sort"`
 }
 
 type ScriptWithSort struct {
@@ -75,8 +102,14 @@ type SubcriptionNode struct {
 // SubcriptionGroup 订阅与分组关联表
 type SubcriptionGroup struct {
 	SubcriptionID int    `gorm:"primaryKey"`
-	GroupName     string `gorm:"primaryKey"`
+	GroupName     string `gorm:"primaryKey;size:191"`
 	Sort          int    `gorm:"default:0"`
+}
+
+type SubcriptionAirport struct {
+	SubcriptionID int `gorm:"primaryKey"`
+	AirportID     int `gorm:"primaryKey"`
+	Sort          int `gorm:"default:0"`
 }
 
 // SubcriptionScript 订阅与脚本关联表
@@ -150,6 +183,63 @@ func (sub *Subcription) AddGroups(groups []string) error {
 	return nil
 }
 
+func BuildAirportPublicInfo(airport Airport) AirportPublicInfo {
+	return AirportPublicInfo{
+		ID:        airport.ID,
+		Name:      airport.Name,
+		Group:     airport.Group,
+		Enabled:   airport.Enabled,
+		NodeCount: airport.NodeCount,
+	}
+}
+
+func ValidateAirportIDs(airportIDs []int) error {
+	seen := make(map[int]struct{}, len(airportIDs))
+	uniqueIDs := make([]int, 0, len(airportIDs))
+	for _, airportID := range airportIDs {
+		if airportID <= 0 {
+			return fmt.Errorf("机场ID无效")
+		}
+		if _, ok := seen[airportID]; ok {
+			continue
+		}
+		seen[airportID] = struct{}{}
+		uniqueIDs = append(uniqueIDs, airportID)
+	}
+	if len(uniqueIDs) == 0 {
+		return nil
+	}
+
+	var count int64
+	if err := database.DB.Model(&Airport{}).Where("id IN ?", uniqueIDs).Count(&count).Error; err != nil {
+		return err
+	}
+	if count != int64(len(uniqueIDs)) {
+		return fmt.Errorf("部分机场不存在或已被删除")
+	}
+	return nil
+}
+
+func (sub *Subcription) AddAirports(airportIDs []int) error {
+	if err := ValidateAirportIDs(airportIDs); err != nil {
+		return err
+	}
+	for i, airportID := range airportIDs {
+		if airportID <= 0 {
+			continue
+		}
+		subAirport := SubcriptionAirport{
+			SubcriptionID: sub.ID,
+			AirportID:     airportID,
+			Sort:          i,
+		}
+		if err := database.DB.Create(&subAirport).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // AddScripts 添加脚本关联
 func (sub *Subcription) AddScripts(scriptIDs []int) error {
 	for i, scriptID := range scriptIDs {
@@ -167,7 +257,7 @@ func (sub *Subcription) AddScripts(scriptIDs []int) error {
 
 // 更新订阅 (Write-Through)
 func (sub *Subcription) Update() error {
-	updates := map[string]interface{}{
+	updates := map[string]any{
 		"name":                     sub.Name,
 		"config":                   sub.Config,
 		"create_date":              sub.CreateDate,
@@ -187,6 +277,18 @@ func (sub *Subcription) Update() error {
 		"protocol_blacklist":       sub.ProtocolBlacklist,
 		"deduplication_rule":       sub.DeduplicationRule,
 		"refresh_usage_on_request": sub.RefreshUsageOnRequest,
+		"update_interval":          sub.UpdateInterval,
+		"max_fraud_score":          sub.MaxFraudScore,
+		"only_residential":         sub.OnlyResidential,
+		"only_native":              sub.OnlyNative,
+		"residential_type":         sub.ResidentialType,
+		"ip_type":                  sub.IPType,
+		"quality_status":           sub.QualityStatus,
+		"unlock_provider":          sub.UnlockProvider,
+		"unlock_status":            sub.UnlockStatus,
+		"unlock_keyword":           sub.UnlockKeyword,
+		"unlock_rules":             sub.UnlockRules,
+		"unlock_rule_mode":         sub.UnlockRuleMode,
 	}
 	err := database.DB.Model(&Subcription{}).Where("id = ? or name = ?", sub.ID, sub.Name).Updates(updates).Error
 	if err != nil {
@@ -237,6 +339,29 @@ func (sub *Subcription) UpdateGroups(groups []string) error {
 			Sort:          i,
 		}
 		if err := database.DB.Create(&subGroup).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (sub *Subcription) UpdateAirports(airportIDs []int) error {
+	if err := ValidateAirportIDs(airportIDs); err != nil {
+		return err
+	}
+	if err := database.DB.Where("subcription_id = ?", sub.ID).Delete(&SubcriptionAirport{}).Error; err != nil {
+		return err
+	}
+	for i, airportID := range airportIDs {
+		if airportID <= 0 {
+			continue
+		}
+		subAirport := SubcriptionAirport{
+			SubcriptionID: sub.ID,
+			AirportID:     airportID,
+			Sort:          i,
+		}
+		if err := database.DB.Create(&subAirport).Error; err != nil {
 			return err
 		}
 	}
@@ -435,12 +560,13 @@ func (sub *Subcription) ApplyFilters(nodes []Node) []Node {
 	if hasWhitelistRules || hasBlacklistRules {
 		var filteredNodes []Node
 		for _, node := range result {
+			filterName := node.EffectiveName()
 			// 黑名单优先
-			if hasBlacklistRules && utils.MatchesNodeNameFilter(sub.NodeNameBlacklist, node.LinkName) {
+			if hasBlacklistRules && utils.MatchesNodeNameFilter(sub.NodeNameBlacklist, filterName) {
 				continue
 			}
 			// 白名单
-			if hasWhitelistRules && !utils.MatchesNodeNameFilter(sub.NodeNameWhitelist, node.LinkName) {
+			if hasWhitelistRules && !utils.MatchesNodeNameFilter(sub.NodeNameWhitelist, filterName) {
 				continue
 			}
 			filteredNodes = append(filteredNodes, node)
@@ -487,7 +613,57 @@ func (sub *Subcription) ApplyFilters(nodes []Node) []Node {
 		result = filteredNodes
 	}
 
-	// 6. 应用去重规则
+	residentialType := sub.ResidentialType
+	if residentialType == "" && sub.OnlyResidential {
+		residentialType = "residential"
+	}
+	ipType := sub.IPType
+	if ipType == "" && sub.OnlyNative {
+		ipType = "native"
+	}
+
+	// 6. 节点质量过滤
+	if sub.MaxFraudScore > 0 || residentialType != "" || ipType != "" || sub.QualityStatus != "" {
+		var filteredNodes []Node
+		for _, node := range result {
+			// 最大欺诈评分过滤
+			if sub.MaxFraudScore > 0 {
+				if getNodeQualityStatusValue(node) != QualityStatusSuccess || node.FraudScore < 0 || node.FraudScore > sub.MaxFraudScore {
+					continue
+				}
+			}
+			if !matchNodeQualityStatus(node, sub.QualityStatus) {
+				continue
+			}
+			if !matchNodeResidentialType(node, residentialType) {
+				continue
+			}
+			if !matchNodeIPType(node, ipType) {
+				continue
+			}
+			filteredNodes = append(filteredNodes, node)
+		}
+		result = filteredNodes
+	}
+
+	unlockRules := ParseUnlockFilterRules(sub.UnlockRules)
+	if len(unlockRules) == 0 && (sub.UnlockProvider != "" || sub.UnlockStatus != "" || sub.UnlockKeyword != "") {
+		unlockRules = []UnlockFilterRule{{Provider: sub.UnlockProvider, Status: sub.UnlockStatus, Keyword: sub.UnlockKeyword}}
+	}
+	unlockRuleMode := NormalizeUnlockRuleMode(sub.UnlockRuleMode)
+	if len(unlockRules) > 0 {
+		var filteredNodes []Node
+		for _, node := range result {
+			summary := ParseUnlockSummary(node.UnlockSummary)
+			if !MatchUnlockSummaryRulesWithMode(summary, unlockRules, unlockRuleMode) {
+				continue
+			}
+			filteredNodes = append(filteredNodes, node)
+		}
+		result = filteredNodes
+	}
+
+	// 7. 应用去重规则
 	result = sub.ApplyDeduplication(result)
 
 	return result
@@ -498,14 +674,13 @@ func (sub *Subcription) GetSub(clientType string) error {
 	// 定义节点排序项结构
 	type NodeSortItem struct {
 		Node
-		Sort    int
-		IsGroup bool
+		Sort int
 	}
 
 	// 获取直接选择的节点及其排序
 	var directNodeItems []NodeSortItem
 	err := database.DB.Table("nodes").
-		Select("nodes.*, subcription_nodes.sort, 0 as is_group").
+		Select("nodes.*, subcription_nodes.sort").
 		Joins("left join subcription_nodes ON subcription_nodes.node_id = nodes.id").
 		Where("subcription_nodes.subcription_id = ?", sub.ID).
 		Scan(&directNodeItems).Error
@@ -526,26 +701,52 @@ func (sub *Subcription) GetSub(clientType string) error {
 		return err
 	}
 
+	var airports []struct {
+		AirportID int
+		Sort      int
+	}
+	err = database.DB.Table("subcription_airports").
+		Select("airport_id, sort").
+		Where("subcription_id = ?", sub.ID).
+		Scan(&airports).Error
+	if err != nil {
+		return err
+	}
+
 	// 获取通过分组动态选择的节点
 	groupNodeMap := make(map[string][]Node) // groupName -> nodes
 	for _, group := range groups {
 		var groupNodes []Node
 		err = database.DB.Table("nodes").
-			Where("nodes.`group` = ?", group.GroupName).
+			Where(clause.Eq{Column: clause.Column{Table: "nodes", Name: "group"}, Value: group.GroupName}).
 			Order("nodes.id ASC").
 			Find(&groupNodes).Error
 		if err != nil {
 			return err
 		}
+
+		// 按分组内机场排序配置重排节点，避免不同机场节点穿插（同机场内优先按 SourceSort）
+		airportSortMap := GetGroupAirportSortMap(group.GroupName)
+		groupNodes = SortNodesByAirport(groupNodes, airportSortMap)
+
 		groupNodeMap[group.GroupName] = groupNodes
 	}
 
-	// 创建一个混合列表，包含节点和分组
+	airportNodeMap := make(map[int][]Node)
+	for _, airport := range airports {
+		nodes, err := resolveAirportNodesForSubscription(airport.AirportID)
+		if err != nil {
+			return err
+		}
+		airportNodeMap[airport.AirportID] = nodes
+	}
+
 	type MixedItem struct {
-		Node    *Node
-		Group   string
-		Sort    int
-		IsGroup bool
+		Node      *Node
+		Group     string
+		AirportID int
+		Sort      int
+		Kind      string
 	}
 
 	var mixedItems []MixedItem
@@ -554,18 +755,26 @@ func (sub *Subcription) GetSub(clientType string) error {
 	for _, item := range directNodeItems {
 		node := item.Node
 		mixedItems = append(mixedItems, MixedItem{
-			Node:    &node,
-			Sort:    item.Sort,
-			IsGroup: false,
+			Node: &node,
+			Sort: item.Sort,
+			Kind: "node",
 		})
 	}
 
 	// 添加分组
 	for _, group := range groups {
 		mixedItems = append(mixedItems, MixedItem{
-			Group:   group.GroupName,
-			Sort:    group.Sort,
-			IsGroup: true,
+			Group: group.GroupName,
+			Sort:  group.Sort,
+			Kind:  "group",
+		})
+	}
+
+	for _, airport := range airports {
+		mixedItems = append(mixedItems, MixedItem{
+			AirportID: airport.AirportID,
+			Sort:      airport.Sort,
+			Kind:      "airport",
 		})
 	}
 
@@ -584,21 +793,32 @@ func (sub *Subcription) GetSub(clientType string) error {
 	sub.Nodes = make([]Node, 0)
 
 	for _, item := range mixedItems {
-		if item.IsGroup {
-			// 添加分组中的所有节点
+		switch item.Kind {
+		case "group":
 			if nodes, exists := groupNodeMap[item.Group]; exists {
 				for _, node := range nodes {
-					if !nodeMap[node.Name] {
+					nameKey := node.EffectiveName()
+					if !nodeMap[nameKey] {
 						sub.Nodes = append(sub.Nodes, node)
-						nodeMap[node.Name] = true
+						nodeMap[nameKey] = true
 					}
 				}
 			}
-		} else {
+		case "airport":
+			if nodes, exists := airportNodeMap[item.AirportID]; exists {
+				for _, node := range nodes {
+					nameKey := node.EffectiveName()
+					if !nodeMap[nameKey] {
+						sub.Nodes = append(sub.Nodes, node)
+						nodeMap[nameKey] = true
+					}
+				}
+			}
+		default:
 			// 添加单个节点
-			if item.Node != nil && !nodeMap[item.Node.Name] {
+			if item.Node != nil && !nodeMap[item.Node.EffectiveName()] {
 				sub.Nodes = append(sub.Nodes, *item.Node)
-				nodeMap[item.Node.Name] = true
+				nodeMap[item.Node.EffectiveName()] = true
 			}
 		}
 	}
@@ -623,6 +843,17 @@ func (sub *Subcription) GetSub(clientType string) error {
 	sub.Nodes = sub.ApplyNodeFilterScripts(sub.Nodes, scriptsWithSort, clientType)
 
 	return nil
+}
+
+func resolveAirportNodesForSubscription(airportID int) ([]Node, error) {
+	nodes, err := ListNodesByAirportID(airportID)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].ID < nodes[j].ID
+	})
+	return SortNodesByAirport(nodes, map[int]int{airportID: 0}), nil
 }
 
 // 订阅列表（从缓存获取，批量加载关联数据解决 N+1）
@@ -754,7 +985,42 @@ func batchLoadSubcriptionRelations(subs []Subcription) error {
 		}
 	}
 
-	// 3. 批量查询所有订阅的脚本关联
+	var subAirports []SubcriptionAirport
+	if err := database.DB.Where("subcription_id IN ?", subIDs).Order("sort ASC").Find(&subAirports).Error; err != nil {
+		return err
+	}
+
+	subAirportIDs := make(map[int][]struct {
+		AirportID int
+		Sort      int
+	})
+	for _, sa := range subAirports {
+		subAirportIDs[sa.SubcriptionID] = append(subAirportIDs[sa.SubcriptionID], struct {
+			AirportID int
+			Sort      int
+		}{sa.AirportID, sa.Sort})
+	}
+
+	for i := range subs {
+		airportInfos := subAirportIDs[subs[i].ID]
+		airportsWithSort := make([]AirportWithSort, 0, len(airportInfos))
+		for _, ai := range airportInfos {
+			if airport, ok := airportCache.Get(ai.AirportID); ok {
+				airportsWithSort = append(airportsWithSort, AirportWithSort{
+					AirportPublicInfo: BuildAirportPublicInfo(airport),
+					Sort:              ai.Sort,
+				})
+			}
+		}
+		sort.Slice(airportsWithSort, func(a, b int) bool {
+			return airportsWithSort[a].Sort < airportsWithSort[b].Sort
+		})
+		subs[i].AirportsWithSort = airportsWithSort
+		if subs[i].AirportsWithSort == nil {
+			subs[i].AirportsWithSort = []AirportWithSort{}
+		}
+	}
+
 	var subScripts []SubcriptionScript
 	if err := database.DB.Where("subcription_id IN ?", subIDs).Order("sort ASC").Find(&subScripts).Error; err != nil {
 		return err
@@ -791,7 +1057,6 @@ func batchLoadSubcriptionRelations(subs []Subcription) error {
 		subs[i].ScriptsWithSort = scriptsWithSort
 	}
 
-	// 4. 批量获取日志（使用缓存）
 	for i := range subs {
 		subs[i].SubLogs = GetSubLogsBySubcriptionID(subs[i].ID)
 	}
@@ -805,34 +1070,81 @@ func (sub *Subcription) IPlogUpdate() error {
 
 // 删除订阅（硬删除，Write-Through）
 func (sub *Subcription) Del() error {
+	tx := database.DB.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+
+	var subLogs []SubLogs
+	if err := tx.Where("subcription_id = ?", sub.ID).Find(&subLogs).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	var subscriptionShares []SubscriptionShare
+	if err := tx.Where("subscription_id = ?", sub.ID).Find(&subscriptionShares).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	var chainRules []SubscriptionChainRule
+	if err := tx.Where("subscription_id = ?", sub.ID).Find(&chainRules).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	if err := tx.Where("subcription_id = ?", sub.ID).Delete(&SubLogs{}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
 	// 先删除关联的节点关系
-	if err := database.DB.Where("subcription_id = ?", sub.ID).Delete(&SubcriptionNode{}).Error; err != nil {
+	if err := tx.Where("subcription_id = ?", sub.ID).Delete(&SubcriptionNode{}).Error; err != nil {
+		tx.Rollback()
 		return err
 	}
 	// 删除关联的分组关系
-	if err := database.DB.Where("subcription_id = ?", sub.ID).Delete(&SubcriptionGroup{}).Error; err != nil {
+	if err := tx.Where("subcription_id = ?", sub.ID).Delete(&SubcriptionGroup{}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Where("subcription_id = ?", sub.ID).Delete(&SubcriptionAirport{}).Error; err != nil {
+		tx.Rollback()
 		return err
 	}
 	// 删除关联的脚本关系
-	if err := database.DB.Where("subcription_id = ?", sub.ID).Delete(&SubcriptionScript{}).Error; err != nil {
+	if err := tx.Where("subcription_id = ?", sub.ID).Delete(&SubcriptionScript{}).Error; err != nil {
+		tx.Rollback()
 		return err
 	}
 	// 删除关联的订阅分享
-	if err := database.DB.Where("subscription_id = ?", sub.ID).Delete(&SubscriptionShare{}).Error; err != nil {
+	if err := tx.Where("subscription_id = ?", sub.ID).Delete(&SubscriptionShare{}).Error; err != nil {
+		tx.Rollback()
 		return err
 	}
 
 	// 删除关联的链式代理规则
-	if err := DeleteChainRulesBySubscriptionID(sub.ID); err != nil {
+	if err := tx.Where("subscription_id = ?", sub.ID).Delete(&SubscriptionChainRule{}).Error; err != nil {
+		tx.Rollback()
 		return err
 	}
 	// 硬删除订阅本身（Unscoped 绕过软删除）
-	err := database.DB.Unscoped().Delete(sub).Error
-	if err != nil {
+	if err := tx.Unscoped().Delete(sub).Error; err != nil {
+		tx.Rollback()
 		return err
 	}
+	if err := tx.Commit().Error; err != nil {
+		return err
+	}
+
 	// 从缓存中删除
 	subcriptionCache.Delete(sub.ID)
+	for _, subLog := range subLogs {
+		subLogsCache.Delete(subLog.ID)
+	}
+	for _, subscriptionShare := range subscriptionShares {
+		subscriptionShareCache.Delete(subscriptionShare.ID)
+	}
+	for _, chainRule := range chainRules {
+		chainRuleCache.Delete(chainRule.ID)
+	}
 	return nil
 }
 
@@ -860,6 +1172,7 @@ func (sub *Subcription) Copy() (*Subcription, error) {
 		ProtocolBlacklist:     sub.ProtocolBlacklist,
 		DeduplicationRule:     sub.DeduplicationRule,
 		RefreshUsageOnRequest: sub.RefreshUsageOnRequest,
+		UpdateInterval:        sub.UpdateInterval,
 	}
 
 	// 使用事务确保数据一致性
@@ -907,6 +1220,23 @@ func (sub *Subcription) Copy() (*Subcription, error) {
 		if err := tx.Create(&newGroup).Error; err != nil {
 			tx.Rollback()
 			return nil, fmt.Errorf("复制分组关联失败: %w", err)
+		}
+	}
+
+	var airports []SubcriptionAirport
+	if err := database.DB.Where("subcription_id = ?", sub.ID).Find(&airports).Error; err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("查询机场关联失败: %w", err)
+	}
+	for _, airport := range airports {
+		newAirport := SubcriptionAirport{
+			SubcriptionID: newSub.ID,
+			AirportID:     airport.AirportID,
+			Sort:          airport.Sort,
+		}
+		if err := tx.Create(&newAirport).Error; err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("复制机场关联失败: %w", err)
 		}
 	}
 
@@ -970,10 +1300,20 @@ func (sub *Subcription) Sort(subNodeSort dto.SubcriptionNodeSortUpdate) error {
 	}
 
 	for _, item := range subNodeSort.NodeSort {
-		// 判断是节点还是分组
 		isGroup := item.IsGroup != nil && *item.IsGroup
 
-		if isGroup {
+		isAirport := item.IsAirport != nil && *item.IsAirport
+
+		if isAirport {
+			err := tx.Model(&SubcriptionAirport{}).
+				Where("subcription_id = ? AND airport_id = ?", subNodeSort.ID, item.ID).
+				Update("sort", item.Sort).Error
+
+			if err != nil {
+				tx.Rollback()
+				return fmt.Errorf("更新机场排序失败: %w", err)
+			}
+		} else if isGroup {
 			// 更新分组排序
 			err := tx.Model(&SubcriptionGroup{}).
 				Where("subcription_id = ? AND group_name = ?", subNodeSort.ID, item.Name).
@@ -1032,7 +1372,7 @@ func (sub *Subcription) BatchSort(sortBy, sortOrder string) error {
 		case "source":
 			less = subNodes[i].Node.Source < subNodes[j].Node.Source
 		case "name":
-			less = subNodes[i].Node.Name < subNodes[j].Node.Name
+			less = subNodes[i].Node.EffectiveName() < subNodes[j].Node.EffectiveName()
 		case "protocol":
 			less = subNodes[i].Node.Protocol < subNodes[j].Node.Protocol
 		case "delay":
@@ -1133,28 +1473,15 @@ func (sub *Subcription) PreviewSub() (*PreviewResult, error) {
 
 	// 构建预览节点列表
 	previewNodes := make([]PreviewNode, 0, filteredCount)
+	nodeNamePlan := BuildNodeNamePlan(sub.Nodes, sub.NodeNamePreprocess, sub.NodeNameRule, utils.GetProtocolFromLink)
 
 	for idx, node := range sub.Nodes {
-		// 应用预处理规则到 LinkName
-		processedLinkName := utils.PreprocessNodeName(sub.NodeNamePreprocess, node.LinkName)
-
 		// 计算预览名称
-		previewName := node.Name
+		previewName := node.EffectiveName()
 		previewLink := node.Link
 
 		if sub.NodeNameRule != "" {
-			previewName = utils.RenameNode(sub.NodeNameRule, utils.NodeInfo{
-				Name:        node.Name,
-				LinkName:    processedLinkName,
-				LinkCountry: node.LinkCountry,
-				Speed:       node.Speed,
-				DelayTime:   node.DelayTime,
-				Group:       node.Group,
-				Source:      node.Source,
-				Index:       idx + 1,
-				Protocol:    utils.GetProtocolFromLink(node.Link),
-				Tags:        node.Tags,
-			})
+			previewName = nodeNamePlan.NodeNameAt(idx, node.ID)
 			previewLink = utils.RenameNodeLink(node.Link, previewName)
 		}
 
@@ -1234,7 +1561,7 @@ func (sub *Subcription) ApplyNodeFilterScripts(nodes []Node, scripts []ScriptWit
 	}
 
 	result := nodes
-	nodesJSON, err := json.Marshal(result)
+	nodesJSON, err := json.Marshal(nodesForFilterScript(result))
 	if err != nil {
 		utils.Error("序列化节点失败: %v", err)
 		return nodes
@@ -1259,6 +1586,18 @@ func (sub *Subcription) ApplyNodeFilterScripts(nodes []Node, scripts []ScriptWit
 		nodesJSON = resJSON
 	}
 
+	return result
+}
+
+func nodesForFilterScript(nodes []Node) []Node {
+	result := make([]Node, 0, len(nodes))
+	for _, node := range nodes {
+		node.Name = node.EffectiveName()
+		// 脚本收到的是运行时副本，Name 已切换为实际出站名称；设为 remark 避免后续渲染再次回退到 LinkName。
+		node.NameMode = NodeNameModeRemark
+		node.EffectiveNameValue = node.Name
+		result = append(result, node)
+	}
 	return result
 }
 
@@ -1376,36 +1715,11 @@ func deduplicateByProtocol(nodes []Node, protocolRules map[string][]string) []No
 
 // generateProtocolKey 根据协议解析结果生成去重Key
 func generateProtocolKey(link string, protoType string, fields []string) string {
-	var protoObj interface{}
-	var err error
-
-	// 根据协议类型解析节点
-	switch protoType {
-	case "vmess":
-		protoObj, err = protocol.DecodeVMESSURL(link)
-	case "vless":
-		protoObj, err = protocol.DecodeVLESSURL(link)
-	case "trojan":
-		protoObj, err = protocol.DecodeTrojanURL(link)
-	case "ss":
-		protoObj, err = protocol.DecodeSSURL(link)
-	case "ssr":
-		protoObj, err = protocol.DecodeSSRURL(link)
-	case "hysteria":
-		protoObj, err = protocol.DecodeHYURL(link)
-	case "hysteria2":
-		protoObj, err = protocol.DecodeHY2URL(link)
-	case "tuic":
-		protoObj, err = protocol.DecodeTuicURL(link)
-	case "anytls":
-		protoObj, err = protocol.DecodeAnyTLSURL(link)
-	case "socks5":
-		protoObj, err = protocol.DecodeSocks5URL(link)
-	default:
+	protoObj, detectedProto, err := protocol.DecodeProtocolObject(link)
+	if err != nil {
 		return ""
 	}
-
-	if err != nil {
+	if detectedProto != protoType {
 		return ""
 	}
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import PropTypes from 'prop-types';
 
 // material-ui
@@ -14,39 +15,74 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import FingerprintIcon from '@mui/icons-material/Fingerprint';
 
-// 示例节点名用于预览
-const PREVIEW_NODE_NAME = '香港节点-01';
-
 /**
  * 节点名称唯一化配置组件
  * 通过添加机场标识前缀防止多机场间节点名称重复
  */
-export default function NodeNameUniquifyConfig({ enabled, prefix, airportId, onChange }) {
+export default function NodeNameUniquifyConfig({ enabled, prefix, intraUniquify, airportId, onChange }) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
+  const previewNodeName = t('components.nodeNameUniquify.preview.samplePrimary');
+  const secondPreviewNodeName = t('components.nodeNameUniquify.preview.sampleSecondary');
+  const displayPrefix = prefix.trim() || (airportId ? `[A${airportId}]` : t('components.nodeNameUniquify.defaultPrefixPending'));
+
+  const getSettingRowSx = (active) => ({
+    px: 1.5,
+    py: 1,
+    borderRadius: 1.5,
+    border: '1px solid',
+    borderColor: 'divider',
+    bgcolor: active ? 'background.default' : 'action.disabledBackground',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 1.5
+  });
 
   // 根据当前配置计算预览结果
   const previewResult = useMemo(() => {
     if (!enabled) {
-      return PREVIEW_NODE_NAME;
+      return previewNodeName;
     }
-    // 使用用户自定义前缀，或默认的 [A{id}] 格式
-    const displayPrefix = prefix || `[A${airportId || 0}]`;
-    return displayPrefix + PREVIEW_NODE_NAME;
-  }, [enabled, prefix, airportId]);
+    return displayPrefix + previewNodeName;
+  }, [enabled, displayPrefix, previewNodeName]);
+
+  const duplicatePreviewGroups = useMemo(() => {
+    if (!intraUniquify) {
+      return [];
+    }
+
+    const previewPrefix = enabled ? displayPrefix : '';
+
+    return [
+      {
+        label: t('components.nodeNameUniquify.preview.duplicateGroup', { name: previewNodeName }),
+        items: [`${previewPrefix}${previewNodeName}-1`, `${previewPrefix}${previewNodeName}-2`]
+      },
+      {
+        label: t('components.nodeNameUniquify.preview.duplicateGroup', { name: secondPreviewNodeName }),
+        items: [`${previewPrefix}${secondPreviewNodeName}-1`, `${previewPrefix}${secondPreviewNodeName}-2`]
+      }
+    ];
+  }, [enabled, intraUniquify, displayPrefix, previewNodeName, secondPreviewNodeName, t]);
 
   // 自动展开面板（当开启功能时）
   useEffect(() => {
-    if (enabled) {
+    if (enabled || intraUniquify) {
       setExpanded(true);
     }
-  }, [enabled]);
+  }, [enabled, intraUniquify]);
 
   const handleEnabledChange = (event) => {
-    onChange({ enabled: event.target.checked, prefix });
+    onChange({ enabled: event.target.checked, prefix, intraUniquify });
   };
 
   const handlePrefixChange = (event) => {
-    onChange({ enabled, prefix: event.target.value });
+    onChange({ enabled, prefix: event.target.value, intraUniquify });
+  };
+
+  const handleIntraUniquifyChange = (event) => {
+    onChange({ enabled, prefix, intraUniquify: event.target.checked });
   };
 
   return (
@@ -72,66 +108,124 @@ export default function NodeNameUniquifyConfig({ enabled, prefix, airportId, onC
         }}
         onClick={() => setExpanded(!expanded)}
       >
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <FingerprintIcon color="action" fontSize="small" />
-          <Typography variant="body2" fontWeight={500}>
-            节点名称唯一化
-          </Typography>
-          {enabled && (
-            <Typography
-              variant="caption"
-              sx={{
-                px: 1,
-                py: 0.25,
-                borderRadius: 1,
-                bgcolor: 'primary.main',
-                color: 'primary.contrastText'
-              }}
-            >
-              已开启
-            </Typography>
+        <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 0.75, minWidth: 0, flex: 1 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0, width: '100%' }}>
+            <FingerprintIcon color="action" fontSize="small" />
+            <Box sx={{ minWidth: 0 }}>
+              <Typography variant="body2" fontWeight={500}>
+                {t('components.nodeNameUniquify.title')}
+              </Typography>
+              <Typography
+                variant="caption"
+                sx={{
+                  display: 'block',
+                  color: 'text.secondary'
+                }}
+              >
+                {t('components.nodeNameUniquify.subtitle')}
+              </Typography>
+            </Box>
+          </Box>
+          {(enabled || intraUniquify) && (
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+              {enabled && (
+                <Typography
+                  variant="caption"
+                  sx={{
+                    px: 1,
+                    py: 0.25,
+                    borderRadius: 1,
+                    bgcolor: 'primary.main',
+                    color: 'primary.contrastText'
+                  }}
+                >
+                  {t('components.nodeNameUniquify.crossAirport.title')}
+                </Typography>
+              )}
+              {intraUniquify && (
+                <Typography
+                  variant="caption"
+                  sx={{
+                    px: 1,
+                    py: 0.25,
+                    borderRadius: 1,
+                    bgcolor: 'secondary.main',
+                    color: 'secondary.contrastText'
+                  }}
+                >
+                  {t('components.nodeNameUniquify.intraAirport.badge')}
+                </Typography>
+              )}
+            </Box>
           )}
         </Box>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-          <Switch size="small" checked={enabled} onClick={(e) => e.stopPropagation()} onChange={handleEnabledChange} />
-          <IconButton size="small">{expanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}</IconButton>
-        </Box>
+        <IconButton size="small">{expanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}</IconButton>
       </Box>
 
       {/* 展开内容 */}
       <Collapse in={expanded}>
         <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider' }}>
           <Typography variant="caption" color="textSecondary" sx={{ display: 'block', mb: 2 }}>
-            为节点名称添加机场标识前缀，防止多个机场之间节点名称重复。同一机场的节点每次拉取生成的前缀保持一致。
+            {t('components.nodeNameUniquify.description')}
           </Typography>
 
-          {/* 自定义前缀输入 */}
-          <TextField
-            fullWidth
-            size="small"
-            label="自定义前缀（可选）"
-            placeholder={`留空使用默认前缀 [A${airportId || 0}]`}
-            value={prefix}
-            onChange={handlePrefixChange}
-            disabled={!enabled}
-            helperText="可自定义前缀使节点名称更具可读性"
-            sx={{ mb: 2 }}
-          />
+          <Box sx={{ display: 'grid', gap: 1.25, mb: 2 }}>
+            <Box sx={{ ...getSettingRowSx(enabled), display: 'grid', gap: 1.25 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1.5 }}>
+                <Box sx={{ minWidth: 0 }}>
+                  <Typography variant="body2" fontWeight={500}>
+                    {t('components.nodeNameUniquify.crossAirport.title')}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    {t('components.nodeNameUniquify.crossAirport.description')}
+                  </Typography>
+                </Box>
+                <Switch size="small" checked={enabled} onChange={handleEnabledChange} />
+              </Box>
+              {enabled && (
+                <TextField
+                  fullWidth
+                  size="small"
+                  label={t('components.nodeNameUniquify.crossAirport.prefixLabel')}
+                  placeholder={
+                    airportId
+                      ? t('components.nodeNameUniquify.crossAirport.placeholderWithId', { id: airportId })
+                      : t('components.nodeNameUniquify.crossAirport.placeholderPending')
+                  }
+                  value={prefix}
+                  onChange={handlePrefixChange}
+                  helperText={t('components.nodeNameUniquify.crossAirport.helper')}
+                />
+              )}
+            </Box>
+
+            <Box sx={getSettingRowSx(intraUniquify)}>
+              <Box sx={{ minWidth: 0 }}>
+                <Typography variant="body2" fontWeight={500}>
+                  {t('components.nodeNameUniquify.intraAirport.title')}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {t('components.nodeNameUniquify.intraAirport.description')}
+                </Typography>
+              </Box>
+              <Switch size="small" checked={intraUniquify} onChange={handleIntraUniquifyChange} />
+            </Box>
+          </Box>
 
           {/* 预览效果 */}
           <Box
             sx={{
               p: 1.5,
               borderRadius: 1,
-              bgcolor: enabled ? 'action.selected' : 'action.disabledBackground'
+              bgcolor: enabled || intraUniquify ? 'action.selected' : 'action.disabledBackground'
             }}
           >
             <Typography variant="caption" color="textSecondary" sx={{ display: 'block', mb: 0.5 }}>
-              预览效果
+              {t('components.nodeNameUniquify.preview.crossAirportTitle')}
             </Typography>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
               <Typography variant="body2" sx={{ fontFamily: 'monospace', color: 'text.secondary', textDecoration: 'line-through' }}>
-                {PREVIEW_NODE_NAME}
+                {previewNodeName}
               </Typography>
               <Typography variant="body2" color="text.secondary">
                 →
@@ -147,6 +241,38 @@ export default function NodeNameUniquifyConfig({ enabled, prefix, airportId, onC
                 {previewResult}
               </Typography>
             </Box>
+
+            <Typography variant="caption" color="textSecondary" sx={{ display: 'block', mt: 0.75 }}>
+              {t(
+                enabled
+                  ? 'components.nodeNameUniquify.preview.enabledDescription'
+                  : 'components.nodeNameUniquify.preview.disabledDescription'
+              )}
+            </Typography>
+
+            {intraUniquify && (
+              <Box sx={{ mt: 1.5 }}>
+                <Typography variant="caption" color="textSecondary" sx={{ display: 'block', mb: 0.5 }}>
+                  {t('components.nodeNameUniquify.preview.intraAirportTitle')}
+                </Typography>
+                <Typography variant="caption" color="textSecondary" sx={{ display: 'block', mb: 1 }}>
+                  {t('components.nodeNameUniquify.preview.intraAirportDescription')}
+                </Typography>
+
+                {duplicatePreviewGroups.map((group) => (
+                  <Box key={group.label} sx={{ '&:not(:last-of-type)': { mb: 1.25 } }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+                      {group.label}
+                    </Typography>
+                    {group.items.map((item) => (
+                      <Typography key={item} variant="body2" sx={{ fontFamily: 'monospace', color: 'primary.main', fontWeight: 500 }}>
+                        {item}
+                      </Typography>
+                    ))}
+                  </Box>
+                ))}
+              </Box>
+            )}
           </Box>
         </Box>
       </Collapse>
@@ -157,11 +283,13 @@ export default function NodeNameUniquifyConfig({ enabled, prefix, airportId, onC
 NodeNameUniquifyConfig.propTypes = {
   enabled: PropTypes.bool.isRequired,
   prefix: PropTypes.string,
+  intraUniquify: PropTypes.bool,
   airportId: PropTypes.number,
   onChange: PropTypes.func.isRequired
 };
 
 NodeNameUniquifyConfig.defaultProps = {
   prefix: '',
+  intraUniquify: false,
   airportId: 0
 };

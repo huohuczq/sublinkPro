@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
 // material-ui
-import { useTheme } from '@mui/material/styles';
+import { alpha, useTheme } from '@mui/material/styles';
 import Avatar from '@mui/material/Avatar';
 import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
@@ -29,10 +30,13 @@ import Box from '@mui/material/Box';
 import MainCard from 'ui-component/cards/MainCard';
 import Transitions from 'ui-component/extended/Transitions';
 import useConfig from 'hooks/useConfig';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
 import { useAuth } from 'contexts/AuthContext';
+import { getHeaderPopoverTokens, getHeaderTriggerTokens } from '../headerPopoverTokens';
+import { withAlpha } from 'utils/colorUtils';
 
 // assets
-import { IconLogout, IconUser, IconKey, IconDatabaseExport, IconSettings, IconDatabaseOff, IconWorld } from '@tabler/icons-react';
+import { IconLogout, IconKey, IconDatabaseExport, IconSettings, IconDatabaseOff, IconWorld } from '@tabler/icons-react';
 import Snackbar from '@mui/material/Snackbar';
 import Alert from '@mui/material/Alert';
 import Backdrop from '@mui/material/Backdrop';
@@ -42,27 +46,64 @@ import GeoIPSettingsDialog from 'views/settings/components/GeoIPSettingsDialog';
 
 // ==============================|| 问候语计算 ||============================== //
 
-const getGreeting = () => {
+const getGreetingKey = () => {
   const hour = new Date().getHours();
   if (hour >= 5 && hour < 9) {
-    return '早上好';
+    return 'profile.greeting.earlyMorning';
   } else if (hour >= 9 && hour < 12) {
-    return '上午好';
+    return 'profile.greeting.morning';
   } else if (hour >= 12 && hour < 14) {
-    return '中午好';
+    return 'profile.greeting.noon';
   } else if (hour >= 14 && hour < 18) {
-    return '下午好';
+    return 'profile.greeting.afternoon';
   } else if (hour >= 18 && hour < 23) {
-    return '晚上好';
+    return 'profile.greeting.evening';
   } else {
-    return '夜深了';
+    return 'profile.greeting.lateNight';
   }
+};
+
+const getProfileMenuTokens = (theme, isDark) => {
+  const {
+    palette,
+    primaryText,
+    emphasizedText,
+    secondaryText,
+    mutedText,
+    tertiaryText,
+    popoverSurface,
+    popoverSurfaceAccent,
+    popoverBorder,
+    headerSurface,
+    headerDivider,
+    nestedSurface,
+    nestedBorder,
+    listItemHover
+  } = getHeaderPopoverTokens(theme, isDark);
+
+  return {
+    palette,
+    primaryText,
+    emphasizedText,
+    secondaryText,
+    mutedText,
+    tertiaryText,
+    popoverSurface,
+    popoverSurfaceAccent,
+    popoverBorder,
+    headerSurface,
+    headerDivider,
+    nestedProfileSurface: nestedSurface,
+    nestedProfileBorder: nestedBorder,
+    menuHoverBg: listItemHover
+  };
 };
 
 // ==============================|| PROFILE MENU ||============================== //
 
 export default function ProfileSection() {
   const theme = useTheme();
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { user, logout } = useAuth();
   const {
@@ -76,7 +117,35 @@ export default function ProfileSection() {
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
   const [geoipDialogOpen, setGeoipDialogOpen] = useState(false);
   const anchorRef = useRef(null);
-  const greeting = getGreeting();
+  const greeting = t(getGreetingKey());
+  const { isDark } = useResolvedColorScheme();
+  const {
+    palette,
+    popoverSurface,
+    popoverSurfaceAccent,
+    popoverBorder,
+    headerSurface,
+    headerDivider,
+    nestedProfileSurface,
+    nestedProfileBorder,
+    primaryText,
+    emphasizedText,
+    mutedText,
+    tertiaryText,
+    menuHoverBg
+  } = getProfileMenuTokens(theme, isDark);
+  const profileAccent = isDark ? theme.palette.info.main : theme.palette.primary.main;
+  const { triggerColor, triggerSurface, triggerBorder, activeColor, activeSurface, activeBorder } = getHeaderTriggerTokens(
+    theme,
+    isDark,
+    profileAccent,
+    {
+      lightSurfaceAlpha: 0.12,
+      lightHoverAlpha: 0.2,
+      triggerColor: isDark ? primaryText : profileAccent,
+      activeColor: isDark ? emphasizedText : profileAccent
+    }
+  );
 
   // 确认对话框
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -124,7 +193,7 @@ export default function ProfileSection() {
 
   const handlePersonalCenter = () => {
     setOpen(false);
-    navigate('/settings');
+    navigate('/system/settings');
   };
 
   const handleApiKeys = () => {
@@ -136,7 +205,7 @@ export default function ProfileSection() {
     setOpen(false);
 
     // 确认备份
-    openConfirm('系统备份', '确定备份系统数据吗？数据备份文件存有您的机密信息，请妥善保管。', async () => {
+    openConfirm('profile.backup.title', 'profile.backup.confirm', async () => {
       setBackupLoading(true);
       try {
         const response = await request({
@@ -148,7 +217,7 @@ export default function ProfileSection() {
         const data = response.data || response;
 
         if (!(data instanceof Blob) || data.size === 0) {
-          setSnackbar({ open: true, message: '备份失败：服务器未返回有效的备份文件', severity: 'error' });
+          setSnackbar({ open: true, message: t('profile.backup.invalidFile'), severity: 'error' });
           return;
         }
 
@@ -172,10 +241,10 @@ export default function ProfileSection() {
         document.body.removeChild(link);
         window.URL.revokeObjectURL(url);
 
-        setSnackbar({ open: true, message: '备份文件已开始下载', severity: 'success' });
+        setSnackbar({ open: true, message: t('profile.backup.downloadStarted'), severity: 'success' });
       } catch (error) {
         console.error('Backup failed:', error);
-        setSnackbar({ open: true, message: '备份请求失败，请检查网络或服务器日志', severity: 'error' });
+        setSnackbar({ open: true, message: t('profile.backup.requestFailed'), severity: 'error' });
       } finally {
         setBackupLoading(false);
       }
@@ -197,13 +266,13 @@ export default function ProfileSection() {
   // 清除IP缓存
   const handleClearIPCache = async () => {
     setOpen(false);
-    openConfirm('清除IP缓存', `确定要清除所有IP缓存数据吗？当前共有 ${ipCacheCount} 条缓存记录。`, async () => {
+    openConfirm('profile.ipCache.clearTitle', 'profile.ipCache.clearConfirm', async () => {
       setIpCacheLoading(true);
       try {
         const { clearIPCache } = await import('api/nodes');
         await clearIPCache();
         // 成功（code === 200 时返回，否则被拦截器 reject）
-        setSnackbar({ open: true, message: 'IP缓存已清除', severity: 'success' });
+        setSnackbar({ open: true, message: t('profile.ipCache.cleared'), severity: 'success' });
         setIpCacheCount(0);
         // 同时清除前端 localStorage 中的IP缓存
         try {
@@ -213,7 +282,7 @@ export default function ProfileSection() {
         }
       } catch (error) {
         console.error('清除IP缓存失败:', error);
-        setSnackbar({ open: true, message: error.message || '清除失败', severity: 'error' });
+        setSnackbar({ open: true, message: error.message || t('profile.ipCache.clearFailed'), severity: 'error' });
       } finally {
         setIpCacheLoading(false);
       }
@@ -238,12 +307,19 @@ export default function ProfileSection() {
       <Chip
         slotProps={{ label: { sx: { lineHeight: 0 } } }}
         sx={{
-          ml: 2,
+          ml: { xs: 1, md: 2 },
           height: '48px',
           alignItems: 'center',
           borderRadius: '27px',
+          color: triggerColor,
+          background: triggerSurface,
+          border: '1px solid',
+          borderColor: triggerBorder,
           transition: 'all 0.2s',
-          '&:hover': {
+          '&:hover, &[aria-controls="menu-list-grow"]': {
+            color: activeColor,
+            background: activeSurface,
+            borderColor: activeBorder,
             boxShadow: theme.shadows[3]
           }
         }}
@@ -251,7 +327,15 @@ export default function ProfileSection() {
           <Avatar
             src={user?.avatar}
             alt={!user?.avatar && (user?.username?.[0] || user?.nickname?.[0] || 'U').toUpperCase()}
-            sx={{ typography: 'mediumAvatar', margin: '8px 0 8px 8px !important', cursor: 'pointer' }}
+            sx={{
+              typography: 'mediumAvatar',
+              margin: '8px 0 8px 8px !important',
+              cursor: 'pointer',
+              bgcolor: isDark ? withAlpha(palette.background.default, 0.72) : withAlpha(theme.palette.common.white, 0.72),
+              color: isDark ? emphasizedText : profileAccent,
+              border: '1px solid',
+              borderColor: withAlpha(profileAccent, isDark ? 0.24 : 0.18)
+            }}
             ref={anchorRef}
             aria-controls={open ? 'menu-list-grow' : undefined}
             aria-haspopup="true"
@@ -266,7 +350,7 @@ export default function ProfileSection() {
         aria-haspopup="true"
         onClick={handleToggle}
         color="primary"
-        aria-label="用户账户"
+        aria-label={t('profile.account')}
       />
       <Popper
         placement="bottom"
@@ -287,22 +371,44 @@ export default function ProfileSection() {
         {({ TransitionProps }) => (
           <ClickAwayListener onClickAway={handleClose}>
             <Transitions in={open} {...TransitionProps}>
-              <Paper>
+              <Paper sx={{ bgcolor: 'transparent' }}>
                 {open && (
-                  <MainCard border={false} elevation={16} content={false} boxShadow shadow={theme.shadows[16]}>
-                    <Box sx={{ p: 2, pb: 0 }}>
+                  <MainCard
+                    border={false}
+                    elevation={0}
+                    content={false}
+                    boxShadow
+                    shadow={isDark ? 'none' : theme.shadows[12]}
+                    sx={{
+                      bgcolor: popoverSurface,
+                      backgroundImage: popoverSurfaceAccent,
+                      border: '1px solid',
+                      borderColor: popoverBorder,
+                      boxShadow: isDark ? `inset 0 1px 0 ${alpha(theme.palette.common.white, 0.04)}` : undefined
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        p: 2,
+                        pb: 0,
+                        bgcolor: headerSurface,
+                        borderBottom: isDark ? `1px solid ${headerDivider}` : 'none'
+                      }}
+                    >
                       <Stack>
                         <Stack direction="row" sx={{ alignItems: 'center', gap: 0.5 }}>
-                          <Typography variant="h4">{greeting}，</Typography>
-                          <Typography component="span" variant="h4" sx={{ fontWeight: 600 }}>
-                            {user?.nickname || user?.username || '用户'}
+                          <Typography variant="h4" sx={{ color: primaryText }}>
+                            {greeting}，
+                          </Typography>
+                          <Typography component="span" variant="h4" sx={{ fontWeight: 600, color: emphasizedText }}>
+                            {user?.nickname || user?.username || t('profile.userFallback')}
                           </Typography>
                         </Stack>
-                        <Typography variant="subtitle2" color="textSecondary">
-                          {user?.role === 'admin' ? '管理员' : '普通用户'}
+                        <Typography variant="subtitle2" sx={{ color: mutedText }}>
+                          {user?.role === 'admin' ? t('profile.role.admin') : t('profile.role.user')}
                         </Typography>
                       </Stack>
-                      <Divider sx={{ my: 2 }} />
+                      <Divider sx={{ my: 2, borderColor: withAlpha(palette.divider, isDark ? 0.7 : 1) }} />
                     </Box>
                     <Box
                       sx={{
@@ -314,23 +420,49 @@ export default function ProfileSection() {
                         '&::-webkit-scrollbar': { width: 5 }
                       }}
                     >
-                      <Card sx={{ bgcolor: 'primary.light', mb: 2 }}>
-                        <CardContent>
+                      <Card
+                        sx={{
+                          mb: 2,
+                          bgcolor: nestedProfileSurface,
+                          border: '1px solid',
+                          borderColor: nestedProfileBorder,
+                          boxShadow: isDark ? `inset 0 1px 0 ${alpha(theme.palette.common.white, 0.04)}` : 'none'
+                        }}
+                      >
+                        <CardContent sx={{ '&:last-child': { pb: 2 } }}>
                           <Stack direction="row" sx={{ alignItems: 'center', gap: 2 }}>
-                            <Avatar src={user?.avatar} alt={(user?.username?.[0] || 'U').toUpperCase()} sx={{ width: 56, height: 56 }}>
+                            <Avatar
+                              src={user?.avatar}
+                              alt={(user?.username?.[0] || 'U').toUpperCase()}
+                              sx={{
+                                width: 56,
+                                height: 56,
+                                bgcolor: alpha(theme.palette.primary.main, isDark ? 0.18 : 0.1),
+                                color: 'primary.main',
+                                border: '1px solid',
+                                borderColor: alpha(theme.palette.primary.main, isDark ? 0.3 : 0.18)
+                              }}
+                            >
                               {!user?.avatar && (user?.username?.[0] || user?.nickname?.[0] || 'U').toUpperCase()}
                             </Avatar>
-                            <Box>
-                              <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-                                {user?.username || '未知用户'}
+                            <Box sx={{ minWidth: 0 }}>
+                              <Typography
+                                variant="subtitle1"
+                                sx={{
+                                  fontWeight: 700,
+                                  color: emphasizedText
+                                }}
+                              >
+                                {user?.username || t('profile.unknownUser')}
                               </Typography>
-                              <Typography variant="caption" color="textSecondary">
-                                {user?.nickname || user?.username || '用户'}
+                              <Typography variant="caption" color="text.secondary" sx={{ color: mutedText }}>
+                                {user?.nickname || user?.username || t('profile.userFallback')}
                               </Typography>
                             </Box>
                           </Stack>
                         </CardContent>
                       </Card>
+
                       <List
                         component="nav"
                         sx={{
@@ -338,7 +470,17 @@ export default function ProfileSection() {
                           maxWidth: 350,
                           minWidth: 300,
                           borderRadius: `${borderRadius}px`,
-                          '& .MuiListItemButton-root': { mt: 0.5 }
+                          '& .MuiListItemButton-root': {
+                            mt: 0.5,
+                            color: primaryText,
+                            '& .MuiListItemIcon-root': {
+                              minWidth: 36,
+                              color: tertiaryText
+                            },
+                            '&:hover': {
+                              bgcolor: menuHoverBg
+                            }
+                          }
                         }}
                       >
                         <ListItemButton sx={{ borderRadius: `${borderRadius}px` }} onClick={handleApiKeys}>
@@ -347,16 +489,16 @@ export default function ProfileSection() {
                           </ListItemIcon>
                           <ListItemText
                             primaryTypographyProps={{ component: 'div' }}
-                            primary={<Typography variant="body2">管理API密钥</Typography>}
+                            primary={<Typography variant="body2">{t('profile.actions.apiKeys')}</Typography>}
                           />
                         </ListItemButton>
                         <ListItemButton sx={{ borderRadius: `${borderRadius}px` }} onClick={handlePersonalCenter}>
                           <ListItemIcon>
-                            <IconUser stroke={1.5} size="20px" />
+                            <IconSettings stroke={1.5} size="20px" />
                           </ListItemIcon>
                           <ListItemText
                             primaryTypographyProps={{ component: 'div' }}
-                            primary={<Typography variant="body2">个人中心</Typography>}
+                            primary={<Typography variant="body2">{t('profile.actions.personalCenter')}</Typography>}
                           />
                         </ListItemButton>
                         <ListItemButton sx={{ borderRadius: `${borderRadius}px` }} onClick={handleBackup}>
@@ -365,7 +507,7 @@ export default function ProfileSection() {
                           </ListItemIcon>
                           <ListItemText
                             primaryTypographyProps={{ component: 'div' }}
-                            primary={<Typography variant="body2">系统备份</Typography>}
+                            primary={<Typography variant="body2">{t('profile.actions.backup')}</Typography>}
                           />
                         </ListItemButton>
                         <ListItemButton sx={{ borderRadius: `${borderRadius}px` }} onClick={handleClearIPCache} disabled={ipCacheLoading}>
@@ -374,10 +516,10 @@ export default function ProfileSection() {
                           </ListItemIcon>
                           <ListItemText
                             primaryTypographyProps={{ component: 'div' }}
-                            primary={<Typography variant="body2">清除IP缓存</Typography>}
+                            primary={<Typography variant="body2">{t('profile.actions.clearIpCache')}</Typography>}
                             secondary={
-                              <Typography variant="caption" color="textSecondary">
-                                当前缓存 {ipCacheCount} 条
+                              <Typography variant="caption" sx={{ color: mutedText }}>
+                                {t('profile.ipCache.currentCount', { count: ipCacheCount })}
                               </Typography>
                             }
                           />
@@ -394,7 +536,7 @@ export default function ProfileSection() {
                           </ListItemIcon>
                           <ListItemText
                             primaryTypographyProps={{ component: 'div' }}
-                            primary={<Typography variant="body2">GeoIP 数据库</Typography>}
+                            primary={<Typography variant="body2">{t('profile.actions.geoip')}</Typography>}
                           />
                         </ListItemButton>
                         <Divider sx={{ my: 1 }} />
@@ -403,7 +545,7 @@ export default function ProfileSection() {
                             borderRadius: `${borderRadius}px`,
                             color: 'error.main',
                             '&:hover': {
-                              bgcolor: 'error.light'
+                              bgcolor: withAlpha(theme.palette.error.main, isDark ? 0.16 : 0.12)
                             }
                           }}
                           onClick={handleLogout}
@@ -415,7 +557,7 @@ export default function ProfileSection() {
                             primaryTypographyProps={{ component: 'div' }}
                             primary={
                               <Typography variant="body2" color="error">
-                                注销登出
+                                {t('profile.actions.logout')}
                               </Typography>
                             }
                           />
@@ -431,10 +573,10 @@ export default function ProfileSection() {
       </Popper>
 
       {/* 备份加载遮罩 */}
-      <Backdrop sx={{ color: '#fff', zIndex: (theme) => theme.zIndex.drawer + 1 }} open={backupLoading}>
+      <Backdrop sx={{ color: theme.palette.common.white, zIndex: (muiTheme) => muiTheme.zIndex.drawer + 1 }} open={backupLoading}>
         <Stack alignItems="center" spacing={2}>
           <CircularProgress color="inherit" />
-          <Typography>正在生成备份文件，请稍候...</Typography>
+          <Typography>{t('profile.backup.generating')}</Typography>
         </Stack>
       </Backdrop>
 
@@ -457,14 +599,14 @@ export default function ProfileSection() {
         aria-labelledby="alert-dialog-title"
         aria-describedby="alert-dialog-description"
       >
-        <DialogTitle id="alert-dialog-title">{confirmInfo.title}</DialogTitle>
+        <DialogTitle id="alert-dialog-title">{t(confirmInfo.title)}</DialogTitle>
         <DialogContent>
-          <DialogContentText id="alert-dialog-description">{confirmInfo.content}</DialogContentText>
+          <DialogContentText id="alert-dialog-description">{t(confirmInfo.content, { count: ipCacheCount })}</DialogContentText>
         </DialogContent>
         <DialogActions>
-          <Button onClick={handleConfirmClose}>取消</Button>
+          <Button onClick={handleConfirmClose}>{t('common.cancel')}</Button>
           <Button onClick={handleConfirmAction} color="primary" autoFocus>
-            确定
+            {t('common.confirm')}
           </Button>
         </DialogActions>
       </Dialog>

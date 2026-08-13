@@ -18,8 +18,8 @@ func Backup(c *gin.Context) {
 		utils.FailWithMsg(c, "Failed to create temp file")
 		return
 	}
-	defer os.Remove(tmpFile.Name()) // 确保函数退出时删除临时文件
-	defer tmpFile.Close()           // 确保函数退出时关闭临时文件
+	defer func() { _ = os.Remove(tmpFile.Name()) }() // 确保函数退出时删除临时文件
+	defer func() { _ = tmpFile.Close() }()           // 确保函数退出时关闭临时文件
 
 	// 创建zip写入器
 	zipWriter := zip.NewWriter(tmpFile)
@@ -53,6 +53,11 @@ func Backup(c *gin.Context) {
 		walkErr := filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
+			}
+
+			// 跳过 GeoIP 数据库文件，该文件体积大且可重新下载
+			if !info.IsDir() && info.Name() == "GeoLite2-City.mmdb" {
+				return nil
 			}
 
 			// 计算相对路径
@@ -97,11 +102,15 @@ func Backup(c *gin.Context) {
 
 				// **[关键修正]** 不要使用 defer file.Close()！
 				// 立即复制并关闭文件，防止文件句柄泄露
+
 				_, err = io.Copy(writer, file)
-				file.Close() // <--- 立即关闭
+				closeErr := file.Close() // <--- 立即关闭
 
 				if err != nil {
 					return err // **[修正]** 只返回 error
+				}
+				if closeErr != nil {
+					return closeErr
 				}
 			}
 			return nil

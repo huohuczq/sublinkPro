@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import PropTypes from 'prop-types';
 import { useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
@@ -27,53 +28,31 @@ import Card from '@mui/material/Card';
 import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
 
-// 节点字段选项
-const nodeFields = [
-  { value: 'name', label: '备注' },
-  { value: 'link_name', label: '原始名称' },
-  { value: 'link_country', label: '国家代码' },
-  { value: 'protocol', label: '协议类型' },
-  { value: 'source', label: '来源' },
-  { value: 'group', label: '分组' },
-  { value: 'speed', label: '速度 (MB/s)' },
-  { value: 'delay_time', label: '延迟 (ms)' },
-  { value: 'speed_status', label: '速度状态' },
-  { value: 'delay_status', label: '延迟状态' },
-  { value: 'link_address', label: '地址' },
-  { value: 'link_host', label: 'Host' },
-  { value: 'link_port', label: '端口' },
-  { value: 'dialer_proxy_name', label: '前置代理' },
-  { value: 'link', label: '节点链接' }
-];
+// project imports
+import UnlockConditionInput from './UnlockConditionInput';
+import {
+  getNodeConditionFieldMeta,
+  getNodeConditionFields,
+  getNodeConditionValueOptions,
+  isNodeConditionNumericField,
+  isNodeConditionSelectField
+} from '../../../utils/nodeConditionOptions';
+import { UNLOCK_CONDITION_FIELD, convertBackendToUI, convertUIToBackend } from '../../../utils/unlockConditionConverter';
 
-// 状态选项（与后端 constants/status.go 保持同步）
-const statusOptions = [
-  { value: 'untested', label: '未测速' },
-  { value: 'success', label: '成功' },
-  { value: 'timeout', label: '超时' },
-  { value: 'error', label: '失败' }
-];
-
-// 操作符选项
 const operators = [
-  { value: 'equals', label: '等于', type: 'string' },
-  { value: 'not_equals', label: '不等于', type: 'string' },
-  { value: 'contains', label: '包含', type: 'string' },
-  { value: 'not_contains', label: '不包含', type: 'string' },
-  { value: 'regex', label: '正则匹配', type: 'string' },
-  { value: 'greater_than', label: '大于', type: 'number' },
-  { value: 'less_than', label: '小于', type: 'number' },
-  { value: 'greater_or_equal', label: '大于等于', type: 'number' },
-  { value: 'less_or_equal', label: '小于等于', type: 'number' }
+  { value: 'equals', labelKey: 'tags.dialog.rule.operators.equals', type: 'string' },
+  { value: 'not_equals', labelKey: 'tags.dialog.rule.operators.notEquals', type: 'string' },
+  { value: 'contains', labelKey: 'tags.dialog.rule.operators.contains', type: 'string' },
+  { value: 'not_contains', labelKey: 'tags.dialog.rule.operators.notContains', type: 'string' },
+  { value: 'regex', labelKey: 'tags.dialog.rule.operators.regex', type: 'string' },
+  { value: 'greater_than', labelKey: 'tags.dialog.rule.operators.greaterThan', type: 'number' },
+  { value: 'less_than', labelKey: 'tags.dialog.rule.operators.lessThan', type: 'number' },
+  { value: 'greater_or_equal', labelKey: 'tags.dialog.rule.operators.greaterOrEqual', type: 'number' },
+  { value: 'less_or_equal', labelKey: 'tags.dialog.rule.operators.lessOrEqual', type: 'number' }
 ];
-
-// 数值字段
-const numericFields = ['speed', 'delay_time'];
-
-// 状态字段（使用下拉框选择值）
-const statusFields = ['speed_status', 'delay_status'];
 
 export default function RuleDialog({ open, onClose, onSave, editingRule, tags }) {
+  const { t } = useTranslation();
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
 
@@ -93,7 +72,11 @@ export default function RuleDialog({ open, onClose, onSave, editingRule, tags })
       try {
         const parsed = JSON.parse(editingRule.conditions || '{}');
         setLogic(parsed.logic || 'and');
-        setConditions(parsed.conditions?.length > 0 ? parsed.conditions : [{ field: 'link_country', operator: 'equals', value: '' }]);
+        // 转换后端格式到UI格式（合并解锁字段）
+        const backendConditions =
+          parsed.conditions?.length > 0 ? parsed.conditions : [{ field: 'link_country', operator: 'equals', value: '' }];
+        const uiConditions = convertBackendToUI(backendConditions);
+        setConditions(uiConditions);
       } catch {
         setLogic('and');
         setConditions([{ field: 'link_country', operator: 'equals', value: '' }]);
@@ -120,35 +103,80 @@ export default function RuleDialog({ open, onClose, onSave, editingRule, tags })
 
   const handleConditionChange = (index, key, value) => {
     const newConditions = [...conditions];
+    const previousField = newConditions[index].field;
     newConditions[index][key] = value;
 
-    // 如果字段变化，检查操作符是否兼容
     if (key === 'field') {
-      const isNumeric = numericFields.includes(value);
-      const isStatus = statusFields.includes(value);
+      const isNumeric = isNodeConditionNumericField(value);
+      const isSelectField = isNodeConditionSelectField(value);
+      const fieldMeta = getNodeConditionFieldMeta(value);
+      const allowedOperators = fieldMeta?.operators || [];
       const currentOp = newConditions[index].operator;
       const opInfo = operators.find((o) => o.value === currentOp);
 
-      if (isStatus) {
-        // 状态字段只能使用 equals 或 not_equals
-        if (!['equals', 'not_equals'].includes(currentOp)) {
-          newConditions[index].operator = 'equals';
+      // 从解锁情况切换到其他字段，或从其他字段切换到解锁情况时，需要重置 value
+      const wasPreviousUnlock = previousField === UNLOCK_CONDITION_FIELD;
+      const isCurrentUnlock = value === UNLOCK_CONDITION_FIELD;
+
+      // 处理解锁情况虚拟字段
+      if (isCurrentUnlock) {
+        newConditions[index].operator = 'equals';
+        newConditions[index].value = {
+          provider: '',
+          status: '',
+          keyword: '',
+          providerOperator: 'equals',
+          statusOperator: 'equals',
+          keywordOperator: 'contains'
+        };
+      } else if (wasPreviousUnlock || isSelectField) {
+        // 从解锁情况切换出来，或切换到下拉字段，重置为空字符串
+        if (!allowedOperators.includes(currentOp)) {
+          newConditions[index].operator = allowedOperators[0] || 'equals';
         }
-        // 清空值，让用户从下拉框选择
         newConditions[index].value = '';
       } else if (isNumeric && opInfo?.type === 'string' && !['equals', 'not_equals'].includes(currentOp)) {
-        newConditions[index].operator = 'greater_than';
+        newConditions[index].operator = allowedOperators[0] || 'greater_than';
       } else if (!isNumeric && opInfo?.type === 'number') {
-        newConditions[index].operator = 'equals';
+        newConditions[index].operator = allowedOperators[0] || 'equals';
       }
     }
 
     setConditions(newConditions);
   };
 
+  // 处理解锁情况复合值的变化
+  const handleUnlockConditionChange = (index, subField, subValue) => {
+    const newConditions = [...conditions];
+    if (!newConditions[index].value || typeof newConditions[index].value !== 'object') {
+      newConditions[index].value = {
+        provider: '',
+        status: '',
+        keyword: '',
+        providerOperator: 'equals',
+        statusOperator: 'equals',
+        keywordOperator: 'contains'
+      };
+    }
+    // subField 为 'value' 时，subValue 是整个对象
+    if (subField === 'value') {
+      newConditions[index].value = subValue;
+    } else {
+      newConditions[index].value = {
+        ...newConditions[index].value,
+        [subField]: subValue
+      };
+    }
+    setConditions(newConditions);
+  };
+
   const handleSave = () => {
     if (!name.trim() || !tagName) return;
-    const conditionsJson = JSON.stringify({ logic, conditions });
+
+    // 转换UI格式到后端格式（展开解锁条件）
+    const backendConditions = convertUIToBackend(conditions);
+    const conditionsJson = JSON.stringify({ logic, conditions: backendConditions });
+
     onSave({
       name: name.trim(),
       tagName: tagName,
@@ -159,11 +187,13 @@ export default function RuleDialog({ open, onClose, onSave, editingRule, tags })
   };
 
   const getAvailableOperators = (field) => {
-    const isNumeric = numericFields.includes(field);
-    const isStatus = statusFields.includes(field);
-
-    if (isStatus) {
-      // 状态字段只支持等于和不等于
+    const fieldMeta = getNodeConditionFieldMeta(field);
+    if (Array.isArray(fieldMeta?.operators) && fieldMeta.operators.length > 0) {
+      return operators.filter((o) => fieldMeta.operators.includes(o.value));
+    }
+    const isNumeric = isNodeConditionNumericField(field);
+    const isSelectField = isNodeConditionSelectField(field);
+    if (isSelectField) {
       return operators.filter((o) => ['equals', 'not_equals'].includes(o.value));
     }
     if (isNumeric) {
@@ -172,17 +202,21 @@ export default function RuleDialog({ open, onClose, onSave, editingRule, tags })
     return operators.filter((o) => o.type === 'string');
   };
 
+  const getVisibleFields = () => {
+    const hiddenFields = ['unlock_provider', 'unlock_status', 'unlock_keyword'];
+    return getNodeConditionFields().filter((f) => !f.hidden && !hiddenFields.includes(f.value));
+  };
+
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth fullScreen={isMobile}>
-      <DialogTitle>{editingRule ? '编辑规则' : '添加规则'}</DialogTitle>
+      <DialogTitle>{editingRule ? t('tags.dialog.rule.editTitle') : t('tags.dialog.rule.addTitle')}</DialogTitle>
       <DialogContent>
         <Box sx={{ pt: 1, display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {/* 基本信息 */}
           <Box sx={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: 2 }}>
-            <TextField label="规则名称" value={name} onChange={(e) => setName(e.target.value)} fullWidth required />
+            <TextField label={t('tags.fields.ruleName')} value={name} onChange={(e) => setName(e.target.value)} fullWidth required />
             <FormControl sx={{ minWidth: isMobile ? '100%' : 150 }} fullWidth={isMobile}>
-              <InputLabel>关联标签</InputLabel>
-              <Select value={tagName} label="关联标签" onChange={(e) => setTagName(e.target.value)}>
+              <InputLabel>{t('tags.fields.tag')}</InputLabel>
+              <Select value={tagName} label={t('tags.fields.tag')} onChange={(e) => setTagName(e.target.value)}>
                 {tags.map((tag) => (
                   <MenuItem key={tag.name} value={tag.name}>
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -204,18 +238,20 @@ export default function RuleDialog({ open, onClose, onSave, editingRule, tags })
             }}
           >
             <FormControl sx={{ minWidth: isMobile ? '100%' : 150 }} fullWidth={isMobile}>
-              <InputLabel>触发时机</InputLabel>
-              <Select value={triggerType} label="触发时机" onChange={(e) => setTriggerType(e.target.value)}>
-                <MenuItem value="subscription_update">订阅更新后</MenuItem>
-                <MenuItem value="speed_test">测速完成后</MenuItem>
+              <InputLabel>{t('tags.fields.trigger')}</InputLabel>
+              <Select value={triggerType} label={t('tags.fields.trigger')} onChange={(e) => setTriggerType(e.target.value)}>
+                <MenuItem value="subscription_update">{t('tags.trigger.subscriptionUpdate')}</MenuItem>
+                <MenuItem value="speed_test">{t('tags.trigger.speedTest')}</MenuItem>
               </Select>
             </FormControl>
-            <FormControlLabel control={<Switch checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />} label="启用规则" />
+            <FormControlLabel
+              control={<Switch checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />}
+              label={t('tags.dialog.rule.enableRule')}
+            />
           </Box>
 
           <Divider sx={{ my: 1 }} />
 
-          {/* 条件配置 */}
           <Box>
             <Box
               sx={{
@@ -228,22 +264,21 @@ export default function RuleDialog({ open, onClose, onSave, editingRule, tags })
               }}
             >
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-                <Typography variant="subtitle1">匹配条件</Typography>
+                <Typography variant="subtitle1">{t('tags.dialog.rule.conditions')}</Typography>
                 <Chip
-                  label={logic === 'and' ? '全部满足 (AND)' : '任一满足 (OR)'}
+                  label={logic === 'and' ? t('tags.dialog.rule.logic.and') : t('tags.dialog.rule.logic.or')}
                   size="small"
                   onClick={() => setLogic(logic === 'and' ? 'or' : 'and')}
                   sx={{ cursor: 'pointer' }}
                 />
               </Box>
               <Button size="small" startIcon={<AddIcon />} onClick={handleAddCondition}>
-                添加条件
+                {t('tags.dialog.rule.addCondition')}
               </Button>
             </Box>
 
             {conditions.map((cond, index) =>
               isMobile ? (
-                // 移动端：卡片式布局
                 <Card key={index} variant="outlined" sx={{ mb: 1.5, p: 1.5, position: 'relative' }}>
                   <IconButton
                     size="small"
@@ -256,36 +291,51 @@ export default function RuleDialog({ open, onClose, onSave, editingRule, tags })
                   </IconButton>
                   <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, pr: 4 }}>
                     <FormControl size="small" fullWidth>
-                      <InputLabel>字段</InputLabel>
-                      <Select value={cond.field} label="字段" onChange={(e) => handleConditionChange(index, 'field', e.target.value)}>
-                        {nodeFields.map((f) => (
+                      <InputLabel>{t('tags.dialog.rule.field')}</InputLabel>
+                      <Select
+                        value={cond.field}
+                        label={t('tags.dialog.rule.field')}
+                        onChange={(e) => handleConditionChange(index, 'field', e.target.value)}
+                      >
+                        {getVisibleFields().map((f) => (
                           <MenuItem key={f.value} value={f.value}>
-                            {f.label}
+                            {f.labelKey ? t(f.labelKey, f.label) : f.label}
                           </MenuItem>
                         ))}
                       </Select>
                     </FormControl>
                     <FormControl size="small" fullWidth>
-                      <InputLabel>操作符</InputLabel>
+                      <InputLabel>{t('tags.dialog.rule.operator')}</InputLabel>
                       <Select
                         value={cond.operator}
-                        label="操作符"
+                        label={t('tags.dialog.rule.operator')}
                         onChange={(e) => handleConditionChange(index, 'operator', e.target.value)}
+                        disabled={cond.field === UNLOCK_CONDITION_FIELD}
                       >
                         {getAvailableOperators(cond.field).map((op) => (
                           <MenuItem key={op.value} value={op.value}>
-                            {op.label}
+                            {t(op.labelKey)}
                           </MenuItem>
                         ))}
                       </Select>
                     </FormControl>
-                    {statusFields.includes(cond.field) ? (
+                    {cond.field === UNLOCK_CONDITION_FIELD ? (
+                      <UnlockConditionInput
+                        value={cond.value}
+                        onChange={(newValue) => handleUnlockConditionChange(index, 'value', newValue)}
+                        isMobile={true}
+                      />
+                    ) : getNodeConditionValueOptions(cond.field) ? (
                       <FormControl size="small" fullWidth>
-                        <InputLabel>值</InputLabel>
-                        <Select value={cond.value} label="值" onChange={(e) => handleConditionChange(index, 'value', e.target.value)}>
-                          {statusOptions.map((opt) => (
+                        <InputLabel>{t('tags.dialog.rule.value')}</InputLabel>
+                        <Select
+                          value={cond.value}
+                          label={t('tags.dialog.rule.value')}
+                          onChange={(e) => handleConditionChange(index, 'value', e.target.value)}
+                        >
+                          {getNodeConditionValueOptions(cond.field).map((opt) => (
                             <MenuItem key={opt.value} value={opt.value}>
-                              {opt.label}
+                              {opt.labelKey ? t(opt.labelKey, opt.label) : opt.label}
                             </MenuItem>
                           ))}
                         </Select>
@@ -293,46 +343,64 @@ export default function RuleDialog({ open, onClose, onSave, editingRule, tags })
                     ) : (
                       <TextField
                         size="small"
-                        label="值"
+                        label={t('tags.dialog.rule.value')}
                         value={cond.value}
                         onChange={(e) => handleConditionChange(index, 'value', e.target.value)}
                         fullWidth
-                        type={numericFields.includes(cond.field) ? 'number' : 'text'}
-                        placeholder={cond.operator === 'regex' ? '正则表达式' : ''}
+                        type={isNodeConditionNumericField(cond.field) ? 'number' : 'text'}
+                        placeholder={cond.operator === 'regex' ? t('tags.dialog.rule.regexPlaceholder') : ''}
                       />
                     )}
                   </Box>
                 </Card>
               ) : (
-                // 桌面端：水平布局
                 <Box key={index} sx={{ display: 'flex', gap: 1, mb: 1.5, alignItems: 'center' }}>
                   <FormControl size="small" sx={{ minWidth: 140 }}>
-                    <InputLabel>字段</InputLabel>
-                    <Select value={cond.field} label="字段" onChange={(e) => handleConditionChange(index, 'field', e.target.value)}>
-                      {nodeFields.map((f) => (
+                    <InputLabel>{t('tags.dialog.rule.field')}</InputLabel>
+                    <Select
+                      value={cond.field}
+                      label={t('tags.dialog.rule.field')}
+                      onChange={(e) => handleConditionChange(index, 'field', e.target.value)}
+                    >
+                      {getVisibleFields().map((f) => (
                         <MenuItem key={f.value} value={f.value}>
-                          {f.label}
+                          {f.labelKey ? t(f.labelKey, f.label) : f.label}
                         </MenuItem>
                       ))}
                     </Select>
                   </FormControl>
                   <FormControl size="small" sx={{ minWidth: 120 }}>
-                    <InputLabel>操作符</InputLabel>
-                    <Select value={cond.operator} label="操作符" onChange={(e) => handleConditionChange(index, 'operator', e.target.value)}>
+                    <InputLabel>{t('tags.dialog.rule.operator')}</InputLabel>
+                    <Select
+                      value={cond.operator}
+                      label={t('tags.dialog.rule.operator')}
+                      onChange={(e) => handleConditionChange(index, 'operator', e.target.value)}
+                      disabled={cond.field === UNLOCK_CONDITION_FIELD}
+                    >
                       {getAvailableOperators(cond.field).map((op) => (
                         <MenuItem key={op.value} value={op.value}>
-                          {op.label}
+                          {t(op.labelKey)}
                         </MenuItem>
                       ))}
                     </Select>
                   </FormControl>
-                  {statusFields.includes(cond.field) ? (
+                  {cond.field === UNLOCK_CONDITION_FIELD ? (
+                    <UnlockConditionInput
+                      value={cond.value}
+                      onChange={(newValue) => handleUnlockConditionChange(index, 'value', newValue)}
+                      isMobile={false}
+                    />
+                  ) : getNodeConditionValueOptions(cond.field) ? (
                     <FormControl size="small" sx={{ minWidth: 140 }}>
-                      <InputLabel>值</InputLabel>
-                      <Select value={cond.value} label="值" onChange={(e) => handleConditionChange(index, 'value', e.target.value)}>
-                        {statusOptions.map((opt) => (
+                      <InputLabel>{t('tags.dialog.rule.value')}</InputLabel>
+                      <Select
+                        value={cond.value}
+                        label={t('tags.dialog.rule.value')}
+                        onChange={(e) => handleConditionChange(index, 'value', e.target.value)}
+                      >
+                        {getNodeConditionValueOptions(cond.field).map((opt) => (
                           <MenuItem key={opt.value} value={opt.value}>
-                            {opt.label}
+                            {opt.labelKey ? t(opt.labelKey, opt.label) : opt.label}
                           </MenuItem>
                         ))}
                       </Select>
@@ -340,12 +408,12 @@ export default function RuleDialog({ open, onClose, onSave, editingRule, tags })
                   ) : (
                     <TextField
                       size="small"
-                      label="值"
+                      label={t('tags.dialog.rule.value')}
                       value={cond.value}
                       onChange={(e) => handleConditionChange(index, 'value', e.target.value)}
                       sx={{ flex: 1 }}
-                      type={numericFields.includes(cond.field) ? 'number' : 'text'}
-                      placeholder={cond.operator === 'regex' ? '正则表达式' : ''}
+                      type={isNodeConditionNumericField(cond.field) ? 'number' : 'text'}
+                      placeholder={cond.operator === 'regex' ? t('tags.dialog.rule.regexPlaceholder') : ''}
                     />
                   )}
                   <IconButton size="small" color="error" onClick={() => handleRemoveCondition(index)} disabled={conditions.length === 1}>
@@ -356,15 +424,15 @@ export default function RuleDialog({ open, onClose, onSave, editingRule, tags })
             )}
 
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-              示例：国家代码 等于 CN — 匹配所有中国节点
+              {t('tags.dialog.rule.example')}
             </Typography>
           </Box>
         </Box>
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose}>取消</Button>
+        <Button onClick={onClose}>{t('common.cancel')}</Button>
         <Button variant="contained" onClick={handleSave} disabled={!name.trim() || !tagName}>
-          保存
+          {t('common.save')}
         </Button>
       </DialogActions>
     </Dialog>

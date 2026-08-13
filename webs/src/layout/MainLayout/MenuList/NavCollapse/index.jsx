@@ -1,5 +1,6 @@
 import PropTypes from 'prop-types';
 import { Activity, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
 
 // material-ui
@@ -23,6 +24,8 @@ import Transitions from 'ui-component/extended/Transitions';
 import { useGetMenuMaster } from 'api/menu';
 import useConfig from 'hooks/useConfig';
 import useMenuCollapse from 'hooks/useMenuCollapse';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
+import { getSidebarNavTokens } from '../../sidebarNavTokens';
 
 // assets
 import { IconChevronDown, IconChevronRight, IconChevronUp } from '@tabler/icons-react';
@@ -30,6 +33,8 @@ import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
 
 export default function NavCollapse({ menu, level, parentId }) {
   const theme = useTheme();
+  const { t } = useTranslation();
+  const { isDark } = useResolvedColorScheme();
   const ref = useRef(null);
 
   const {
@@ -38,6 +43,10 @@ export default function NavCollapse({ menu, level, parentId }) {
 
   const { menuMaster } = useGetMenuMaster();
   const drawerOpen = menuMaster.isDashboardDrawerOpened;
+  const navTokens = getSidebarNavTokens(theme, isDark);
+  const isCollapsedLevelOne = !drawerOpen && level === 1;
+  const menuTitle = menu.titleKey ? t(menu.titleKey) : menu.title;
+  const menuCaption = menu.captionKey ? t(menu.captionKey) : menu.caption;
 
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState(null);
@@ -138,14 +147,34 @@ export default function NavCollapse({ menu, level, parentId }) {
         sx={{
           zIndex: 1201,
           borderRadius: `${borderRadius}px`,
-          mb: 0.5,
+          mb: isCollapsedLevelOne ? 0.125 : 0.5,
+          color: isSelected || anchorEl ? navTokens.accent : navTokens.itemText,
           ...(drawerOpen && level !== 1 && { ml: `${level * 18}px` }),
           ...(!drawerOpen && { pl: 1.25 }),
-          ...((!drawerOpen || level !== 1) && {
-            py: level === 1 ? 0 : 1,
-            '&:hover': { bgcolor: 'transparent' },
-            '&.Mui-selected': { '&:hover': { bgcolor: 'transparent' }, bgcolor: 'transparent' }
-          })
+          ...(isCollapsedLevelOne
+            ? {
+                pl: navTokens.collapsedLevelOneInset,
+                py: 0.125,
+                '&:hover': {
+                  bgcolor: 'transparent'
+                },
+                '&.Mui-selected': {
+                  bgcolor: 'transparent',
+                  '&:hover': { bgcolor: 'transparent' }
+                }
+              }
+            : {
+                ...((!drawerOpen || level !== 1) && {
+                  py: level === 1 ? 0 : 1
+                }),
+                '&:hover': {
+                  bgcolor: navTokens.hoverSurface
+                },
+                '&.Mui-selected': {
+                  bgcolor: navTokens.selectedSurface,
+                  '&:hover': { bgcolor: navTokens.selectedHoverSurface }
+                }
+              })
         }}
         selected={isSelected}
         {...(!drawerOpen && { onMouseEnter: handleClickMini, onMouseLeave: handleMiniClose })}
@@ -156,28 +185,23 @@ export default function NavCollapse({ menu, level, parentId }) {
           <ListItemIcon
             sx={{
               minWidth: level === 1 ? 36 : 18,
-              color: isSelected ? 'secondary.main' : 'text.primary',
-              ...(!drawerOpen &&
-                level === 1 && {
-                  borderRadius: `${borderRadius}px`,
-                  width: 46,
-                  height: 46,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  '&:hover': { bgcolor: 'secondary.light' },
-
-                  ...((isSelected || anchorEl) && {
-                    bgcolor: 'secondary.light',
-                    '&:hover': { bgcolor: 'secondary.light' }
-                  })
-                })
+              color: isSelected || anchorEl ? navTokens.accent : navTokens.itemText,
+              ...(isCollapsedLevelOne && {
+                borderRadius: `${borderRadius}px`,
+                width: navTokens.collapsedLevelOneTileSize,
+                height: navTokens.collapsedLevelOneTileSize,
+                alignItems: 'center',
+                justifyContent: 'center',
+                backgroundColor: isSelected || anchorEl ? navTokens.iconActiveSurface : navTokens.iconSurface,
+                '&:hover': { bgcolor: isSelected || anchorEl ? navTokens.iconActiveSurface : navTokens.iconHoverSurface }
+              })
             }}
           >
             {menuIcon}
           </ListItemIcon>
         </Activity>
         {(drawerOpen || (!drawerOpen && level !== 1)) && (
-          <Tooltip title={menu.title} disableHoverListener={!hoverStatus}>
+          <Tooltip title={menuTitle} disableHoverListener={!hoverStatus}>
             <ListItemText
               primary={
                 <Typography
@@ -191,11 +215,11 @@ export default function NavCollapse({ menu, level, parentId }) {
                     width: 120
                   }}
                 >
-                  {menu.title}
+                  {menuTitle}
                 </Typography>
               }
               secondary={
-                menu.caption && (
+                menuCaption && (
                   <Typography
                     gutterBottom
                     sx={{
@@ -207,7 +231,7 @@ export default function NavCollapse({ menu, level, parentId }) {
                       lineHeight: 1.66
                     }}
                   >
-                    {menu.caption}
+                    {menuCaption}
                   </Typography>
                 )
               }
@@ -251,7 +275,9 @@ export default function NavCollapse({ menu, level, parentId }) {
                   sx={{
                     overflow: 'hidden',
                     boxShadow: theme.shadows[8],
-                    backgroundImage: 'none'
+                    backgroundImage: 'none',
+                    border: '1px solid',
+                    borderColor: navTokens.selectedBorder
                   }}
                 >
                   <ClickAwayListener onClickAway={handleClosePopper}>

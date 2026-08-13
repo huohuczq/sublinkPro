@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 
 // material-ui
 import { useTheme } from '@mui/material/styles';
@@ -14,6 +15,7 @@ import IconButton from '@mui/material/IconButton';
 import Snackbar from '@mui/material/Snackbar';
 import Alert from '@mui/material/Alert';
 import Stack from '@mui/material/Stack';
+import { formatDateTime } from 'i18n/locales';
 import Switch from '@mui/material/Switch';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
@@ -29,24 +31,46 @@ import ScheduleIcon from '@mui/icons-material/Schedule';
 import SpeedIcon from '@mui/icons-material/Speed';
 import TimerIcon from '@mui/icons-material/Timer';
 import FilterListIcon from '@mui/icons-material/FilterList';
+import LockOpenIcon from '@mui/icons-material/LockOpen';
 
 // project imports
 import MainCard from 'ui-component/cards/MainCard';
 import TaskProgressPanel from 'components/TaskProgressPanel';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
+import { getNodeCheckStrategyChipSx, getNodeCheckStrategyThemeTokens } from 'views/nodes/nodeCheckTheme';
 
 // api
-import { getNodeCheckProfiles, updateNodeCheckProfile, deleteNodeCheckProfile, runNodeCheckWithProfile } from 'api/nodeCheck';
+import {
+  getNodeCheckMeta,
+  getNodeCheckProfiles,
+  updateNodeCheckProfile,
+  deleteNodeCheckProfile,
+  runNodeCheckWithProfile
+} from 'api/nodeCheck';
 import { getNodeGroups } from 'api/nodes';
 import { getTags } from 'api/tags';
 
 // local components
 import NodeCheckProfileFormDialog from 'views/nodes/component/NodeCheckProfileFormDialog';
 
+import { buildNodeCheckProfilePayload, formatUnlockProvidersSummary, setUnlockMeta } from 'views/nodes/utils';
+
 // ==============================|| 节点检测策略管理 ||============================== //
 
 export default function NodeCheckList() {
   const theme = useTheme();
-  const isDark = theme.palette.mode === 'dark';
+  const { t, i18n } = useTranslation();
+  const { isDark } = useResolvedColorScheme();
+  const themeTokens = getNodeCheckStrategyThemeTokens(theme, isDark);
+  const {
+    cardSurface,
+    cardEnabledBorder,
+    cardIdleBorder,
+    cardHoverShadow,
+    primaryActionHoverSurface,
+    successActionHoverSurface,
+    errorActionHoverSurface
+  } = themeTokens;
 
   const [profiles, setProfiles] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -69,18 +93,19 @@ export default function NodeCheckList() {
       setProfiles(response.data || []);
     } catch (error) {
       console.error('加载策略列表失败:', error);
-      showMessage('加载策略列表失败', 'error');
+      showMessage(t('nodes.nodeCheckProfiles.messages.loadFailed'), 'error');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   // 加载分组和标签选项
   const loadOptions = useCallback(async () => {
     try {
-      const [groupRes, tagRes] = await Promise.all([getNodeGroups(), getTags()]);
+      const [groupRes, tagRes, metaRes] = await Promise.all([getNodeGroups(), getTags(), getNodeCheckMeta()]);
       setGroupOptions((groupRes.data || []).sort());
       setTagOptions(tagRes.data || []);
+      setUnlockMeta(metaRes.data || {});
     } catch (error) {
       console.error('加载选项失败:', error);
     }
@@ -94,51 +119,27 @@ export default function NodeCheckList() {
   // 切换启用状态
   const handleToggleEnabled = async (profile) => {
     try {
-      // 将 groups 和 tags 字符串转换为数组格式（后端 API 期望数组类型）
-      const groups = profile.groups ? profile.groups.split(',').filter(Boolean) : [];
-      const tags = profile.tags ? profile.tags.split(',').filter(Boolean) : [];
-
-      await updateNodeCheckProfile(profile.id, {
-        name: profile.name,
-        enabled: !profile.enabled,
-        cronExpr: profile.cronExpr,
-        mode: profile.mode,
-        testUrl: profile.testUrl,
-        latencyUrl: profile.latencyUrl,
-        timeout: profile.timeout,
-        groups,
-        tags,
-        latencyConcurrency: profile.latencyConcurrency,
-        speedConcurrency: profile.speedConcurrency,
-        detectCountry: profile.detectCountry,
-        landingIpUrl: profile.landingIpUrl,
-        includeHandshake: profile.includeHandshake,
-        speedRecordMode: profile.speedRecordMode,
-        peakSampleInterval: profile.peakSampleInterval,
-        trafficByGroup: profile.trafficByGroup,
-        trafficBySource: profile.trafficBySource,
-        trafficByNode: profile.trafficByNode
-      });
+      await updateNodeCheckProfile(profile.id, buildNodeCheckProfilePayload(profile, { enabled: !profile.enabled }));
       loadProfiles();
-      showMessage(profile.enabled ? '已禁用定时检测' : '已启用定时检测');
+      showMessage(profile.enabled ? t('nodes.nodeCheckProfiles.messages.disabled') : t('nodes.nodeCheckProfiles.messages.enabled'));
     } catch (error) {
       console.error('切换状态失败:', error);
-      showMessage('操作失败', 'error');
+      showMessage(t('nodes.nodeCheckProfiles.messages.operationFailed'), 'error');
     }
   };
 
   // 删除策略
   const handleDelete = async (profile) => {
-    if (!window.confirm(`确定要删除策略 "${profile.name}" 吗？`)) {
+    if (!window.confirm(t('nodes.nodeCheckProfiles.confirmDelete', { name: profile.name }))) {
       return;
     }
     try {
       await deleteNodeCheckProfile(profile.id);
       loadProfiles();
-      showMessage('删除成功');
+      showMessage(t('nodes.nodeCheckProfiles.messages.deleteSuccess'));
     } catch (error) {
       console.error('删除失败:', error);
-      showMessage(error.message || '删除失败', 'error');
+      showMessage(error.message || t('nodes.nodeCheckProfiles.messages.deleteFailed'), 'error');
     }
   };
 
@@ -146,10 +147,10 @@ export default function NodeCheckList() {
   const handleRun = async (profile) => {
     try {
       await runNodeCheckWithProfile(profile.id);
-      showMessage('检测任务已启动');
+      showMessage(t('nodes.nodeCheckProfiles.messages.started'));
     } catch (error) {
       console.error('执行检测失败:', error);
-      showMessage(error.message || '执行失败', 'error');
+      showMessage(error.message || t('nodes.nodeCheckProfiles.messages.executeFailed'), 'error');
     }
   };
 
@@ -170,7 +171,7 @@ export default function NodeCheckList() {
     setFormOpen(false);
     setEditingProfile(null);
     loadProfiles();
-    showMessage(editingProfile ? '更新成功' : '创建成功');
+    showMessage(editingProfile ? t('nodes.nodeCheckProfiles.messages.updateSuccess') : t('nodes.nodeCheckProfiles.messages.createSuccess'));
   };
 
   const formatTime = (timeStr) => {
@@ -178,7 +179,7 @@ export default function NodeCheckList() {
     const date = new Date(timeStr);
     // 检查是否是有效日期
     if (isNaN(date.getTime())) return '-';
-    return date.toLocaleString('zh-CN', {
+    return formatDateTime(date, i18n.resolvedLanguage || i18n.language, {
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
@@ -191,18 +192,18 @@ export default function NodeCheckList() {
       title={
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <SpeedIcon color="primary" />
-          <span>节点检测策略</span>
+          <span>{t('nodes.nodeCheckProfiles.title')}</span>
         </Box>
       }
       secondary={
         <Stack direction="row" spacing={1}>
-          <Tooltip title="刷新">
+          <Tooltip title={t('common.refresh')}>
             <IconButton onClick={loadProfiles} disabled={loading}>
               <RefreshIcon />
             </IconButton>
           </Tooltip>
           <Button variant="contained" startIcon={<AddIcon />} onClick={handleAdd}>
-            新建策略
+            {t('nodes.nodeCheckProfiles.new')}
           </Button>
         </Stack>
       }
@@ -218,13 +219,13 @@ export default function NodeCheckList() {
         <Box sx={{ textAlign: 'center', py: 8 }}>
           <SpeedIcon sx={{ fontSize: 64, opacity: 0.2, mb: 2 }} />
           <Typography variant="h6" color="text.secondary" gutterBottom>
-            暂无检测策略
+            {t('nodes.nodeCheckProfiles.empty')}
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-            创建检测策略来自动或手动检测节点延迟和速度
+            {t('nodes.nodeCheckProfiles.description')}
           </Typography>
           <Button variant="contained" startIcon={<AddIcon />} onClick={handleAdd}>
-            创建第一个策略
+            {t('nodes.nodeCheckProfiles.createFirst')}
           </Button>
         </Box>
       ) : (
@@ -251,19 +252,13 @@ export default function NodeCheckList() {
                 display: 'flex',
                 flexDirection: 'column',
                 overflow: 'hidden',
-                borderColor: profile.enabled
-                  ? isDark
-                    ? 'rgba(76, 175, 80, 0.5)'
-                    : 'rgba(76, 175, 80, 0.3)'
-                  : isDark
-                    ? 'rgba(255,255,255,0.12)'
-                    : 'rgba(0,0,0,0.12)',
-                backgroundColor: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.01)',
+                borderColor: profile.enabled ? cardEnabledBorder : cardIdleBorder,
+                backgroundColor: cardSurface,
                 transition: 'all 0.2s',
                 '&:hover': {
                   borderColor: 'primary.main',
                   transform: 'translateY(-2px)',
-                  boxShadow: isDark ? '0 4px 20px rgba(0,0,0,0.3)' : '0 4px 20px rgba(0,0,0,0.1)'
+                  boxShadow: cardHoverShadow
                 }
               }}
             >
@@ -293,7 +288,9 @@ export default function NodeCheckList() {
                     sx={{
                       display: 'flex',
                       alignItems: 'center',
-                      gap: 1,
+                      columnGap: 0.75,
+                      rowGap: 0.75,
+                      flexWrap: 'wrap',
                       minWidth: 0,
                       flex: 1,
                       overflow: 'hidden'
@@ -313,16 +310,36 @@ export default function NodeCheckList() {
                       {profile.name}
                     </Typography>
                     <Chip
-                      label={profile.mode === 'mihomo' ? '延迟+速度' : '仅延迟'}
+                      label={
+                        profile.mode === 'mihomo' ? t('nodes.nodeCheckProfiles.mode.full') : t('nodes.nodeCheckProfiles.mode.delayOnly')
+                      }
                       size="small"
-                      sx={{
-                        height: 20,
-                        fontSize: '0.65rem',
-                        flexShrink: 0,
-                        backgroundColor: profile.mode === 'mihomo' ? 'rgba(76, 175, 80, 0.15)' : 'rgba(33, 150, 243, 0.15)',
-                        color: profile.mode === 'mihomo' ? 'primary.main' : 'error.main'
-                      }}
+                      sx={getNodeCheckStrategyChipSx(themeTokens, profile.mode === 'mihomo' ? 'success' : 'info')}
                     />
+                    {profile.detectCountry && (
+                      <Chip
+                        label={t('nodes.nodeCheckProfiles.detect.country')}
+                        size="small"
+                        sx={getNodeCheckStrategyChipSx(themeTokens, 'neutral')}
+                      />
+                    )}
+                    {profile.detectQuality && (
+                      <Chip
+                        label={t('nodes.nodeCheckProfiles.detect.quality')}
+                        size="small"
+                        sx={getNodeCheckStrategyChipSx(themeTokens, 'warning')}
+                      />
+                    )}
+                    {profile.detectUnlock && (
+                      <Chip
+                        icon={<LockOpenIcon sx={{ fontSize: '12px !important' }} />}
+                        label={t('nodes.nodeCheckProfiles.detect.unlock', {
+                          suffix: profile.unlockProviders?.length ? ` · ${formatUnlockProvidersSummary(profile.unlockProviders, 1)}` : ''
+                        })}
+                        size="small"
+                        sx={getNodeCheckStrategyChipSx(themeTokens, 'info')}
+                      />
+                    )}
                   </Box>
                   <Switch
                     size="small"
@@ -348,7 +365,7 @@ export default function NodeCheckList() {
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0 }}>
                     <TimerIcon sx={{ fontSize: 14, opacity: 0.6, flexShrink: 0 }} />
                     <Typography variant="caption" color="text.secondary" noWrap>
-                      超时: {profile.timeout}s
+                      {t('nodes.nodeCheckProfiles.timeout', { seconds: profile.timeout })}
                     </Typography>
                   </Box>
 
@@ -356,7 +373,7 @@ export default function NodeCheckList() {
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0 }}>
                       <ScheduleIcon sx={{ fontSize: 14, opacity: 0.6, flexShrink: 0 }} />
                       <Typography variant="caption" color="text.secondary" noWrap>
-                        下次: {formatTime(profile.nextRunTime)}
+                        {t('nodes.nodeCheckProfiles.schedule.next', { time: formatTime(profile.nextRunTime) })}
                       </Typography>
                     </Box>
                   )}
@@ -364,7 +381,7 @@ export default function NodeCheckList() {
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0 }}>
                     <HistoryIcon sx={{ fontSize: 14, opacity: 0.6, flexShrink: 0 }} />
                     <Typography variant="caption" color="text.secondary" noWrap>
-                      上次: {formatTime(profile.lastRunTime)}
+                      {t('nodes.nodeCheckProfiles.lastRun', { time: formatTime(profile.lastRunTime) })}
                     </Typography>
                   </Box>
 
@@ -381,8 +398,30 @@ export default function NodeCheckList() {
                           minWidth: 0
                         }}
                       >
-                        范围: {profile.groups || '全部'}
-                        {profile.tags ? ` | ${profile.tags}` : ''}
+                        {t('nodes.nodeCheckProfiles.scope', {
+                          groups: profile.groups || t('nodes.nodeCheckProfiles.allGroups'),
+                          tags: profile.tags ? t('nodes.nodeCheckProfiles.scopeTags', { tags: profile.tags }) : ''
+                        })}
+                      </Typography>
+                    </Box>
+                  )}
+
+                  {profile.detectUnlock && (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0, overflow: 'hidden' }}>
+                      <LockOpenIcon sx={{ fontSize: 14, opacity: 0.6, flexShrink: 0 }} />
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          minWidth: 0
+                        }}
+                      >
+                        {t('nodes.nodeCheckProfiles.unlockProviders', {
+                          providers: formatUnlockProvidersSummary(profile.unlockProviders, 2)
+                        })}
                       </Typography>
                     </Box>
                   )}
@@ -390,30 +429,34 @@ export default function NodeCheckList() {
 
                 {/* 操作按钮 */}
                 <Stack direction="row" spacing={0.5} justifyContent="flex-end" sx={{ mt: 1, flexShrink: 0 }}>
-                  <Tooltip title="立即执行">
+                  <Tooltip title={t('nodes.nodeCheckProfiles.runNow')}>
                     <IconButton
                       size="small"
                       onClick={() => handleRun(profile)}
                       sx={{
                         color: 'success.main',
-                        '&:hover': { backgroundColor: 'rgba(76, 175, 80, 0.1)' }
+                        '&:hover': { backgroundColor: successActionHoverSurface }
                       }}
                     >
                       <PlayArrowIcon fontSize="small" />
                     </IconButton>
                   </Tooltip>
-                  <Tooltip title="编辑">
-                    <IconButton size="small" onClick={() => handleEdit(profile)}>
+                  <Tooltip title={t('nodes.nodeCheckProfiles.edit')}>
+                    <IconButton
+                      size="small"
+                      onClick={() => handleEdit(profile)}
+                      sx={{ '&:hover': { backgroundColor: primaryActionHoverSurface } }}
+                    >
                       <EditIcon fontSize="small" />
                     </IconButton>
                   </Tooltip>
-                  <Tooltip title="删除">
+                  <Tooltip title={t('nodes.nodeCheckProfiles.delete')}>
                     <IconButton
                       size="small"
                       onClick={() => handleDelete(profile)}
                       sx={{
                         color: 'error.main',
-                        '&:hover': { backgroundColor: 'rgba(244, 67, 54, 0.1)' }
+                        '&:hover': { backgroundColor: errorActionHoverSurface }
                       }}
                     >
                       <DeleteIcon fontSize="small" />

@@ -7,12 +7,39 @@ import (
 	"sublink/node"
 	"sublink/services/geoip"
 	"sublink/services/mihomo"
-	"sublink/services/sse"
+	"sublink/services/notifications"
+	"sublink/services/unlock"
 	"sublink/utils"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+func resetNodeQualityInfo(node *models.Node) {
+	node.IsBroadcast = false
+	node.IsResidential = false
+	node.FraudScore = -1
+	node.QualityStatus = models.QualityStatusUntested
+	node.QualityFamily = ""
+}
+
+func applyNodeQualityInfo(node *models.Node, quality *mihomo.QualityCheckResult) {
+	if quality == nil {
+		resetNodeQualityInfo(node)
+		return
+	}
+	node.QualityStatus = quality.Status
+	node.QualityFamily = quality.Family
+	if quality.Status == models.QualityStatusSuccess {
+		node.IsBroadcast = quality.IsBroadcast
+		node.IsResidential = quality.IsResidential
+		node.FraudScore = quality.FraudScore
+		return
+	}
+	node.IsBroadcast = false
+	node.IsResidential = false
+	node.FraudScore = -1
+}
 
 // RunSpeedTestWithConfig 使用指定配置执行节点测速（并发安全）
 // 每个任务使用独立的配置实例，完全避免配置覆盖问题
@@ -39,7 +66,7 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 	defer func() {
 		if r := recover(); r != nil {
 			utils.Error("测速任务执行过程中发生严重错误: %v", r)
-			tm.FailTask(taskID, fmt.Sprintf("任务执行异常: %v", r))
+			_ = tm.FailTask(taskID, fmt.Sprintf("任务执行异常: %v", r))
 		}
 	}()
 
@@ -69,6 +96,13 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 	if landingIPUrl == "" {
 		landingIPUrl = "https://api.ipify.org"
 	}
+	detectQuality := config.DetectQuality
+	qualityCheckURL := config.QualityCheckURL
+	if qualityCheckURL == "" {
+		qualityCheckURL = "https://my.123169.xyz/v1/info"
+	}
+	detectUnlock := config.DetectUnlock
+	unlockProviders := models.NormalizeUnlockProviders(config.UnlockProviders)
 
 	// 流量统计开关
 	trafficByGroup := config.TrafficByGroup
@@ -161,6 +195,7 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 		node    models.Node
 		latency int
 		err     error
+		unlock  models.UnlockSummary
 	}
 	nodeResults := make([]nodeResult, len(nodes))
 
@@ -189,7 +224,6 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 			cancelled = true
 			mu.Unlock()
 			utils.Debug("任务被取消，停止新的延迟测试")
-			break
 		default:
 		}
 
@@ -227,7 +261,17 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 			// 使用 Mihomo URLTest 测量延迟
 			// TCP模式下需要检测IP（因为没有速度测试阶段），mihomo模式在速度阶段检测
 			detectIPInLatency := detectCountry && speedTestMode == "tcp"
-			latency, landingIP, err := mihomo.MihomoDelayTest(n.Link, latencyTestUrl, speedTestTimeout, includeHandshake, detectIPInLatency, landingIPUrl)
+			detectQualityInLatency := detectQuality && speedTestMode == "tcp"
+			latency, landingIP, qualityInfo, err := mihomo.MihomoDelayTest(
+				n.Link,
+				latencyTestUrl,
+				speedTestTimeout,
+				includeHandshake,
+				detectIPInLatency,
+				landingIPUrl,
+				detectQualityInLatency,
+				qualityCheckURL,
+			)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -257,6 +301,9 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 			// TCP模式下收集结果（稍后批量写入）
 			if speedTestMode == "tcp" {
 				preserveSpeed := config.PreserveSpeedResult
+				if detectQualityInLatency {
+					applyNodeQualityInfo(&n, qualityInfo)
+				}
 				if err != nil {
 					failCount++
 					utils.Debug("节点 [%s] 延迟测试失败: %v", n.Name, err)
@@ -306,6 +353,14 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 						}
 					}
 				}
+
+				if detectUnlock {
+					unlockSummary := unlock.CheckUnlock(n.Link, speedTestTimeout, n.LinkCountry, unlockProviders)
+					nodeResults[idx].unlock = unlockSummary
+					n.UnlockSummary = models.BuildUnlockSummaryJSON(unlockSummary)
+					n.UnlockCheckAt = unlockSummary.UpdatedAt
+				}
+
 				n.LatencyCheckAt = time.Now().Format("2006-01-02 15:04:05")
 				// 收集结果到批量更新列表（不再立即写数据库）
 				speedTestResults = append(speedTestResults, models.SpeedTestResult{
@@ -319,6 +374,13 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 					LinkCountry:     n.LinkCountry,
 					LandingIP:       n.LandingIP,
 					SkipSpeedFields: preserveSpeed, // 标记是否跳过速度字段更新
+					IsBroadcast:     n.IsBroadcast,
+					IsResidential:   n.IsResidential,
+					FraudScore:      n.FraudScore,
+					QualityStatus:   n.QualityStatus,
+					QualityFamily:   n.QualityFamily,
+					UnlockSummary:   n.UnlockSummary,
+					UnlockCheckAt:   n.UnlockCheckAt,
 				})
 			}
 
@@ -338,7 +400,7 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 			}
 			// 格式化节点显示项（包含分组和来源信息，方便手机端查看）
 			currentItemDisplay := formatNodeDisplayItem(n.Name, n.Group, n.Source)
-			tm.UpdateProgress(taskID, progressCurrent, currentItemDisplay, map[string]interface{}{
+			_ = tm.UpdateProgress(taskID, progressCurrent, currentItemDisplay, map[string]any{
 				"status":  resultStatus,
 				"phase":   "latency",
 				"latency": latency,
@@ -346,7 +408,7 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 
 			// 同时更新任务的 Total（如果是 mihomo 模式）
 			if speedTestMode != "tcp" && idx == 0 {
-				tm.UpdateTotal(taskID, progressTotal)
+				_ = tm.UpdateTotal(taskID, progressTotal)
 			}
 		}(i, node)
 	}
@@ -356,7 +418,7 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 	// 检查是否被取消
 	if cancelled || ctx.Err() != nil {
 		utils.Info("任务被取消，跳过阶段二 (已完成: %d/%d)", completedCount, totalNodes)
-		tm.UpdateProgress(taskID, int(completedCount), "已取消", nil)
+		_ = tm.UpdateProgress(taskID, int(completedCount), "已取消", nil)
 		// 任务已被 CancelTask 标记为取消，无需再次更新
 		goto applyTags
 	}
@@ -383,7 +445,6 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 				cancelled = true
 				mu.Unlock()
 				utils.Debug("任务被取消，停止新的速度测试")
-				break
 			default:
 			}
 
@@ -397,6 +458,13 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 				mu.Lock()
 				failCount++
 				completedCount++
+				if detectQuality {
+					resetNodeQualityInfo(&nr.node)
+				}
+				if detectUnlock {
+					nr.node.UnlockSummary = models.BuildUnlockSummaryJSON(nr.unlock)
+					nr.node.UnlockCheckAt = nr.unlock.UpdatedAt
+				}
 				nr.node.Speed = -1
 				nr.node.SpeedStatus = constants.StatusError // 因延迟失败无法测速
 				nr.node.DelayTime = -1
@@ -413,6 +481,13 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 					SpeedCheckAt:   "",
 					LinkCountry:    nr.node.LinkCountry,
 					LandingIP:      nr.node.LandingIP,
+					IsBroadcast:    nr.node.IsBroadcast,
+					IsResidential:  nr.node.IsResidential,
+					FraudScore:     nr.node.FraudScore,
+					QualityStatus:  nr.node.QualityStatus,
+					QualityFamily:  nr.node.QualityFamily,
+					UnlockSummary:  nr.node.UnlockSummary,
+					UnlockCheckAt:  nr.node.UnlockCheckAt,
 				})
 				mu.Unlock()
 				continue
@@ -446,7 +521,17 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 				}
 
 				// 速度测试（延迟已在阶段一获取，同时可选检测落地IP）
-				speed, _, bytesDownloaded, landingIP, err := mihomo.MihomoSpeedTest(result.node.Link, speedTestUrl, speedTestTimeout, detectCountry, landingIPUrl, speedRecordMode, peakSampleInterval)
+				speed, _, bytesDownloaded, landingIP, qualityInfo, err := mihomo.MihomoSpeedTest(
+					result.node.Link,
+					speedTestUrl,
+					speedTestTimeout,
+					detectCountry,
+					landingIPUrl,
+					detectQuality,
+					qualityCheckURL,
+					speedRecordMode,
+					peakSampleInterval,
+				)
 
 				mu.Lock()
 				defer mu.Unlock()
@@ -502,30 +587,36 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 				}
 
 				var resultStatus string
-				var resultData map[string]interface{}
+				var resultData map[string]any
 
 				if err != nil {
 					atomic.AddInt32(&failCount, 1)
+					if detectQuality {
+						resetNodeQualityInfo(&result.node)
+					}
 					utils.Debug("节点 [%s] 速度测试失败: %v (延迟: %d ms, 已下载: %s)", result.node.Name, err, result.latency, formatBytes(bytesDownloaded))
 					result.node.Speed = -1
 					result.node.SpeedStatus = constants.StatusError
 					result.node.DelayTime = result.latency            // 保留延迟测试结果
 					result.node.DelayStatus = constants.StatusSuccess // 延迟测试是成功的
 					resultStatus = "failed"
-					resultData = map[string]interface{}{
+					resultData = map[string]any{
 						"speed":   -1,
 						"latency": result.latency,
 						"error":   err.Error(),
 					}
 				} else {
 					atomic.AddInt32(&successCount, 1)
+					if detectQuality {
+						applyNodeQualityInfo(&result.node, qualityInfo)
+					}
 					utils.Debug("节点 [%s] 测速成功: 速度 %.2f MB/s, 延迟 %d ms, 流量消耗: %s", result.node.Name, speed, result.latency, formatBytes(bytesDownloaded))
 					result.node.Speed = speed
 					result.node.SpeedStatus = constants.StatusSuccess
 					result.node.DelayTime = result.latency
 					result.node.DelayStatus = constants.StatusSuccess
 					resultStatus = "success"
-					resultData = map[string]interface{}{
+					resultData = map[string]any{
 						"speed":   speed,
 						"latency": result.latency,
 					}
@@ -561,6 +652,14 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 					}
 				}
 
+				if detectUnlock {
+					unlockSummary := unlock.CheckUnlock(result.node.Link, speedTestTimeout, result.node.LinkCountry, unlockProviders)
+					result.unlock = unlockSummary
+					result.node.UnlockSummary = models.BuildUnlockSummaryJSON(unlockSummary)
+					result.node.UnlockCheckAt = unlockSummary.UpdatedAt
+					resultData["unlock"] = unlockSummary
+				}
+
 				result.node.LatencyCheckAt = time.Now().Format("2006-01-02 15:04:05")
 				result.node.SpeedCheckAt = time.Now().Format("2006-01-02 15:04:05")
 				// 收集结果到批量更新列表（不再立即写数据库）
@@ -574,6 +673,13 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 					SpeedCheckAt:   result.node.SpeedCheckAt,
 					LinkCountry:    result.node.LinkCountry,
 					LandingIP:      result.node.LandingIP,
+					IsBroadcast:    result.node.IsBroadcast,
+					IsResidential:  result.node.IsResidential,
+					FraudScore:     result.node.FraudScore,
+					QualityStatus:  result.node.QualityStatus,
+					QualityFamily:  result.node.QualityFamily,
+					UnlockSummary:  result.node.UnlockSummary,
+					UnlockCheckAt:  result.node.UnlockCheckAt,
 				})
 
 				// 获取当前流量统计（用于实时显示）
@@ -585,13 +691,13 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 				// 更新任务进度（速度测试占后50%）
 				// 格式化节点显示项（包含分组和来源信息，方便手机端查看）
 				currentItemDisplay := formatNodeDisplayItem(result.node.Name, result.node.Group, result.node.Source)
-				tm.UpdateProgress(taskID, totalNodes+currentCompleted, currentItemDisplay, map[string]interface{}{
+				_ = tm.UpdateProgress(taskID, totalNodes+currentCompleted, currentItemDisplay, map[string]any{
 					"status":  resultStatus,
 					"phase":   "speed",
 					"speed":   result.node.Speed,
 					"latency": result.latency,
 					"data":    resultData,
-					"traffic": map[string]interface{}{
+					"traffic": map[string]any{
 						"totalBytes":     currentTrafficTotal,
 						"totalFormatted": currentTrafficFormatted,
 					},
@@ -644,16 +750,16 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 		// 格式化流量统计数据
 		trafficAcc.mutex.Lock()
 		// 构建流量统计对象
-		trafficData := map[string]interface{}{
+		trafficData := map[string]any{
 			"totalBytes":     trafficAcc.totalBytes,
 			"totalFormatted": formatBytes(trafficAcc.totalBytes),
 		}
 
 		// 按分组统计（仅开关开启时包含）
 		if trafficAcc.enableGroup && len(trafficAcc.groupBytes) > 0 {
-			formattedGroupStats := make(map[string]map[string]interface{})
+			formattedGroupStats := make(map[string]map[string]any)
 			for group, bytes := range trafficAcc.groupBytes {
-				formattedGroupStats[group] = map[string]interface{}{
+				formattedGroupStats[group] = map[string]any{
 					"bytes":     bytes,
 					"formatted": formatBytes(bytes),
 				}
@@ -663,9 +769,9 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 
 		// 按来源统计（仅开关开启时包含）
 		if trafficAcc.enableSource && len(trafficAcc.sourceBytes) > 0 {
-			formattedSourceStats := make(map[string]map[string]interface{})
+			formattedSourceStats := make(map[string]map[string]any)
 			for source, bytes := range trafficAcc.sourceBytes {
-				formattedSourceStats[source] = map[string]interface{}{
+				formattedSourceStats[source] = map[string]any{
 					"bytes":     bytes,
 					"formatted": formatBytes(bytes),
 				}
@@ -681,26 +787,41 @@ func RunSpeedTestWithConfig(nodes []models.Node, trigger models.TaskTrigger, pro
 		trafficTotal := trafficAcc.totalBytes
 		trafficAcc.mutex.Unlock()
 
-		resultData := map[string]interface{}{
+		resultData := map[string]any{
 			"success": successCount,
 			"fail":    failCount,
 			"total":   totalNodes,
 			"traffic": trafficData,
 		}
+		if detectUnlock {
+			unlockSummaries := make([]models.UnlockSummary, 0, len(speedTestResults))
+			for _, item := range speedTestResults {
+				summary := models.ParseUnlockSummary(item.UnlockSummary)
+				if len(summary.Providers) == 0 {
+					continue
+				}
+				unlockSummaries = append(unlockSummaries, summary)
+			}
+			resultData["unlockEnabled"] = true
+			resultData["unlockProviders"] = unlockProviders
+			resultData["unlock"] = models.BuildUnlockAggregate(unlockSummaries, unlockProviders)
+		}
 		utils.Info("测速任务完成 - 总计: %d, 成功: %d, 失败: %d, 流量: %s", totalNodes, successCount, failCount, formatBytes(trafficTotal))
-		tm.CompleteTask(taskID, fmt.Sprintf("测速完成 (成功: %d, 失败: %d, 流量: %s)", successCount, failCount, formatBytes(trafficTotal)), resultData)
+		_ = tm.CompleteTask(taskID, fmt.Sprintf("测速完成 (成功: %d, 失败: %d, 流量: %s)", successCount, failCount, formatBytes(trafficTotal)), resultData)
 
 		// 广播测速完成通知（让用户在通知中心看到）
-		sse.GetSSEBroker().BroadcastEvent("task_update", sse.NotificationPayload{
-			Event:   "speed_test",
+		notifications.Publish("task.speed_test_completed", notifications.Payload{
 			Title:   "节点测速完成",
 			Message: fmt.Sprintf("测速完成: 成功 %d 个, 失败 %d 个, 消耗流量 %s", successCount, failCount, formatBytes(trafficTotal)),
-			Data: map[string]interface{}{
-				"status":  "success",
-				"success": successCount,
-				"fail":    failCount,
-				"total":   totalNodes,
-				"traffic": formatBytes(trafficTotal),
+			Data: map[string]any{
+				"status":           "success",
+				"success":          successCount,
+				"success_count":    successCount,
+				"fail":             failCount,
+				"fail_count":       failCount,
+				"total":            totalNodes,
+				"traffic":          formatBytes(trafficTotal),
+				"total_traffic_mb": float64(trafficTotal) / 1024 / 1024,
 			},
 		})
 	}
@@ -801,8 +922,7 @@ func ExecuteNodeCheckWithProfile(profileID int, nodeIDs []int, trigger models.Ta
 	RunSpeedTestWithConfig(nodes, trigger, profile.Name, config)
 
 	// 更新策略的上次执行时间（保留现有的下次执行时间）
-	now := time.Now()
-	if err := profile.UpdateLastRunTime(&now); err != nil {
+	if err := profile.UpdateLastRunTime(new(time.Now())); err != nil {
 		utils.Warn("更新策略执行时间失败: %v", err)
 	}
 }

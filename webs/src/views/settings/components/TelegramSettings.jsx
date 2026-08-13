@@ -18,6 +18,7 @@ import InputAdornment from '@mui/material/InputAdornment';
 import Collapse from '@mui/material/Collapse';
 import Divider from '@mui/material/Divider';
 import Tooltip from '@mui/material/Tooltip';
+import { Trans, useTranslation } from 'react-i18next';
 
 // qrcode
 import { QRCodeSVG } from 'qrcode.react';
@@ -36,19 +37,23 @@ import ErrorIcon from '@mui/icons-material/Error';
 import { getTelegramConfig, saveTelegramConfig, testTelegramConnection, reconnectTelegram } from 'api/telegram';
 import { getNodes } from 'api/nodes';
 import SearchableNodeSelect from 'components/SearchableNodeSelect';
+import NotificationEventSelector from './NotificationEventSelector';
 
 // ==============================|| Telegram 设置组件 ||============================== //
 
 export default function TelegramSettings({ showMessage, loading, setLoading }) {
+  const { t } = useTranslation();
   const [form, setForm] = useState({
     enabled: false,
     botToken: '',
     chatId: '',
     useProxy: false,
-    proxyLink: ''
+    proxyLink: '',
+    eventKeys: []
   });
   const [showToken, setShowToken] = useState(false);
   const [status, setStatus] = useState({ connected: false, error: '', botUsername: '', botId: 0 });
+  const [eventOptions, setEventOptions] = useState([]);
 
   // 代理节点选择
   const [proxyNodes, setProxyNodes] = useState([]);
@@ -76,8 +81,10 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
           botToken: response.data.botToken || '',
           chatId: response.data.chatId ? String(response.data.chatId) : '',
           useProxy: response.data.useProxy || false,
-          proxyLink: response.data.proxyLink || ''
+          proxyLink: response.data.proxyLink || '',
+          eventKeys: response.data.eventKeys || []
         });
+        setEventOptions(response.data.eventOptions || []);
         setStatus({
           connected: response.data.connected || false,
           error: response.data.lastError || '',
@@ -98,7 +105,7 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
   const fetchProxyNodes = async () => {
     setLoadingNodes(true);
     try {
-      const res = await getNodes({ minSpeed: 0.01, pageSize: 200 });
+      const res = await getNodes({ pageSize: 200 });
       if (res.data) {
         const items = res.data.items || res.data || [];
         setProxyNodes(items);
@@ -122,7 +129,7 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
 
   const handleSave = async () => {
     if (form.enabled && !form.botToken) {
-      showMessage('请输入 Bot Token', 'warning');
+      showMessage(t('settings.telegramPanel.messages.botTokenRequired'), 'warning');
       return;
     }
 
@@ -133,12 +140,13 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
         botToken: form.botToken,
         chatId: form.chatId ? parseInt(form.chatId, 10) : 0,
         useProxy: form.useProxy,
-        proxyLink: form.proxyLink
+        proxyLink: form.proxyLink,
+        eventKeys: form.eventKeys
       });
-      showMessage('保存成功');
+      showMessage(t('settings.telegramPanel.messages.saveSuccess'));
       fetchConfig();
     } catch (error) {
-      showMessage('保存失败: ' + (error.response?.data?.message || error.message), 'error');
+      showMessage(t('settings.telegramPanel.messages.saveFailed', { message: error.response?.data?.message || error.message }), 'error');
     } finally {
       setLoading(false);
     }
@@ -146,7 +154,7 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
 
   const handleTest = async () => {
     if (!form.botToken) {
-      showMessage('请输入 Bot Token', 'warning');
+      showMessage(t('settings.telegramPanel.messages.botTokenRequired'), 'warning');
       return;
     }
 
@@ -159,12 +167,12 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
         proxyLink: form.proxyLink
       });
       if (response.data?.messageSent) {
-        showMessage('连接成功，测试消息已发送');
+        showMessage(t('settings.telegramPanel.messages.testSent'));
       } else {
-        showMessage('连接成功');
+        showMessage(t('settings.telegramPanel.messages.testSuccess'));
       }
     } catch (error) {
-      showMessage('测试失败: ' + (error.response?.data?.message || error.message), 'error');
+      showMessage(t('settings.telegramPanel.messages.testFailed', { message: error.response?.data?.message || error.message }), 'error');
     } finally {
       setLoading(false);
     }
@@ -174,10 +182,13 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
     setLoading(true);
     try {
       await reconnectTelegram();
-      showMessage('重连成功');
+      showMessage(t('settings.telegramPanel.messages.reconnectSuccess'));
       fetchConfig();
     } catch (error) {
-      showMessage('重连失败: ' + (error.response?.data?.message || error.message), 'error');
+      showMessage(
+        t('settings.telegramPanel.messages.reconnectFailed', { message: error.response?.data?.message || error.message }),
+        'error'
+      );
     } finally {
       setLoading(false);
     }
@@ -186,14 +197,14 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
   return (
     <Card>
       <CardHeader
-        title="Telegram 机器人"
+        title={t('settings.telegramPanel.title')}
         avatar={<TelegramIcon sx={{ color: '#0088cc' }} />}
         action={
           <Stack direction="row" spacing={1} alignItems="center">
             {form.enabled && (
               <Chip
                 icon={status.connected ? <CheckCircleIcon /> : <ErrorIcon />}
-                label={status.connected ? '已连接' : '未连接'}
+                label={status.connected ? t('settings.telegramPanel.status.connected') : t('settings.telegramPanel.status.disconnected')}
                 color={status.connected ? 'success' : 'error'}
                 size="small"
                 variant="outlined"
@@ -201,7 +212,7 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
             )}
             <FormControlLabel
               control={<Switch checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />}
-              label={form.enabled ? '启用' : '禁用'}
+              label={form.enabled ? t('common.enabled') : t('common.disabled')}
             />
           </Stack>
         }
@@ -210,16 +221,19 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
         <Stack spacing={2.5}>
           <Alert severity="info">
             <Typography variant="body2">
-              使用{' '}
-              <a
-                href="https://t.me/BotFather"
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ color: '#0088cc', fontWeight: 600, textDecoration: 'none' }}
-              >
-                @BotFather
-              </a>{' '}
-              创建机器人并获取 Token。 首次发送 /start 命令后，机器人会自动绑定您的 Chat ID。
+              <Trans
+                i18nKey="settings.telegramPanel.botFatherHint"
+                components={{
+                  botFather: (
+                    <a
+                      href="https://t.me/BotFather"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: '#0088cc', fontWeight: 600, textDecoration: 'none' }}
+                    />
+                  )
+                }}
+              />
             </Typography>
           </Alert>
 
@@ -237,7 +251,7 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
               <Stack direction="row" alignItems="center" spacing={2} flexWrap="wrap">
                 <TelegramIcon sx={{ color: '#0088cc' }} />
                 <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                  机器人已连接:
+                  {t('settings.telegramPanel.connectedAs')}
                 </Typography>
                 <Chip
                   label={`@${status.botUsername}`}
@@ -263,7 +277,7 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
 
               {/* 二维码区域 */}
               <Box sx={{ mt: 2, display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-                <Tooltip title="使用手机扫描二维码打开机器人" placement="top">
+                <Tooltip title={t('settings.telegramPanel.qrTooltip')} placement="top">
                   <Box
                     component="a"
                     href={`https://t.me/${status.botUsername}`}
@@ -299,10 +313,10 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
                 </Tooltip>
                 <Box>
                   <Typography variant="body2" color="textSecondary" sx={{ mb: 0.5 }}>
-                    扫描二维码打开机器人
+                    {t('settings.telegramPanel.qrTitle')}
                   </Typography>
                   <Typography variant="caption" color="textSecondary">
-                    或点击上方机器人名称直接跳转
+                    {t('settings.telegramPanel.qrHelper')}
                   </Typography>
                 </Box>
               </Box>
@@ -332,15 +346,15 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
             label="Chat ID"
             value={form.chatId}
             onChange={(e) => setForm({ ...form, chatId: e.target.value })}
-            placeholder="发送 /start 后自动获取"
-            helperText="可留空，首次发送 /start 后自动绑定"
+            placeholder={t('settings.telegramPanel.chatIdPlaceholder')}
+            helperText={t('settings.telegramPanel.chatIdHelper')}
           />
 
           <Divider />
 
           <FormControlLabel
             control={<Switch checked={form.useProxy} onChange={(e) => setForm({ ...form, useProxy: e.target.checked })} />}
-            label="使用代理连接 Telegram"
+            label={t('settings.telegramPanel.useProxy')}
           />
 
           <Collapse in={form.useProxy}>
@@ -352,9 +366,9 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
                 onChange={handleNodeChange}
                 displayField="Name"
                 valueField="Link"
-                label="选择代理节点"
-                placeholder="留空则自动选择最佳节点"
-                helperText="如果未选择具体代理，系统将自动选择延迟最低且速度最快的节点作为下载代理，你也可以输入外部代理地址"
+                label={t('settings.telegramPanel.proxyNode')}
+                placeholder={t('settings.telegramPanel.proxyPlaceholder')}
+                helperText={t('settings.telegramPanel.proxyHelper')}
                 freeSolo={true}
                 limit={50}
               />
@@ -367,17 +381,27 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
             </Alert>
           )}
 
+          <Divider />
+
+          <NotificationEventSelector
+            value={form.eventKeys}
+            eventOptions={eventOptions}
+            disabled={loading}
+            description={t('settings.telegramPanel.eventsDescription')}
+            onChange={(eventKeys) => setForm((prev) => ({ ...prev, eventKeys }))}
+          />
+
           <Stack direction="row" spacing={2} flexWrap="wrap">
             <Button variant="outlined" color="success" onClick={handleTest} disabled={loading || !form.botToken} startIcon={<SendIcon />}>
-              测试连接
+              {t('settings.telegramPanel.actions.test')}
             </Button>
             {form.enabled && (
               <Button variant="outlined" onClick={handleReconnect} disabled={loading} startIcon={<RefreshIcon />}>
-                重新连接
+                {t('settings.telegramPanel.actions.reconnect')}
               </Button>
             )}
             <Button variant="contained" onClick={handleSave} disabled={loading} startIcon={<SaveIcon />}>
-              保存设置
+              {t('settings.telegramPanel.actions.save')}
             </Button>
           </Stack>
 
@@ -385,18 +409,18 @@ export default function TelegramSettings({ showMessage, loading, setLoading }) {
 
           <Box>
             <Typography variant="subtitle2" gutterBottom>
-              支持的命令
+              {t('settings.telegramPanel.commands.title')}
             </Typography>
             <Typography variant="body2" color="textSecondary" component="div">
               <ul style={{ margin: 0, paddingLeft: 20 }}>
-                <li>/start - 开始使用</li>
-                <li>/stats - 查看仪表盘统计</li>
-                <li>/monitor - 查看系统监控</li>
-                <li>/speedtest - 开始节点测速</li>
-                <li>/subscriptions - 管理订阅</li>
-                <li>/nodes - 查看节点信息</li>
-                <li>/tags - 执行标签规则</li>
-                <li>/tasks - 管理任务</li>
+                <li>/start - {t('settings.telegramPanel.commands.start')}</li>
+                <li>/stats - {t('settings.telegramPanel.commands.stats')}</li>
+                <li>/monitor - {t('settings.telegramPanel.commands.monitor')}</li>
+                <li>/speedtest - {t('settings.telegramPanel.commands.speedtest')}</li>
+                <li>/subscriptions - {t('settings.telegramPanel.commands.subscriptions')}</li>
+                <li>/nodes - {t('settings.telegramPanel.commands.nodes')}</li>
+                <li>/tags - {t('settings.telegramPanel.commands.tags')}</li>
+                <li>/tasks - {t('settings.telegramPanel.commands.tasks')}</li>
               </ul>
             </Typography>
           </Box>

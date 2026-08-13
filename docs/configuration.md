@@ -1,95 +1,295 @@
-# 配置说明
+English | [简体中文](configuration.zh-CN.md)
 
-本文档详细介绍 SublinkPro 的配置方式和各项参数。
+# Configuration
 
----
-
-## 配置优先级
-
-SublinkPro 支持多种配置方式，优先级从高到低为：
-
-1. **命令行参数** - 适用于临时覆盖，如 `--port 9000`
-2. **环境变量** - 推荐用于 Docker 部署
-3. **配置文件** - `db/config.yaml`
-4. **数据库存储** - 敏感配置自动存储
-5. **默认值** - 程序内置默认配置
+This document describes SublinkPro configuration methods and parameters.
 
 ---
 
-## 环境变量列表
+## Configuration Priority
 
-| 环境变量 | 说明 | 默认值 |
-|----------|------|--------|
-| `SUBLINK_PORT` | 服务端口 | 8000 |
-| `SUBLINK_DB_PATH` | 数据库目录 | ./db |
-| `SUBLINK_LOG_PATH` | 日志目录 | ./logs |
-| `SUBLINK_JWT_SECRET` | JWT签名密钥 | (自动生成) |
-| `SUBLINK_API_ENCRYPTION_KEY` | API加密密钥 | (自动生成) |
-| `SUBLINK_EXPIRE_DAYS` | Token过期天数 | 14 |
-| `SUBLINK_LOGIN_FAIL_COUNT` | 登录失败次数限制 | 5 |
-| `SUBLINK_LOGIN_FAIL_WINDOW` | 登录失败窗口(分钟) | 1 |
-| `SUBLINK_LOGIN_BAN_DURATION` | 登录封禁时间(分钟) | 10 |
-| `SUBLINK_GEOIP_PATH` | GeoIP数据库路径 | ./db/GeoLite2-City.mmdb |
-| `SUBLINK_CAPTCHA_MODE` | 验证码模式 (1=关闭, 2=传统, 3=Turnstile) | 2 |
+SublinkPro supports several configuration methods. Priority from highest to lowest:
+
+1. **Command line flags**, useful for temporary overrides such as `--port 9000`
+2. **Environment variables**, recommended for Docker deployments
+3. **Configuration file**, `db/config.yaml`
+4. **Database stored settings**, used for sensitive configuration
+5. **Default values**, built into the program
+
+---
+
+## Environment Variables
+
+| Environment variable | Description | Default |
+|----------|---------------------------------|-------------------------------------|
+| `SUBLINK_PORT` | Service port | 8000 |
+| `SUBLINK_DSN` | Database DSN, supports sqlite/mysql/postgres | SQLite by default: `sqlite://./db/sublink.db` |
+| `SUBLINK_DB_PATH` | Local data directory and default SQLite database directory | ./db |
+| `SUBLINK_LOG_PATH` | Log directory | ./logs |
+| `SUBLINK_JWT_SECRET` | JWT signing secret | Generated automatically |
+| `SUBLINK_API_ENCRYPTION_KEY` | API encryption key | Generated automatically |
+| `SUBLINK_EXPIRE_DAYS` | Token expiration days | 14 |
+| `SUBLINK_LOGIN_FAIL_COUNT` | Login failure limit | 5 |
+| `SUBLINK_LOGIN_FAIL_WINDOW` | Login failure window, in minutes | 1 |
+| `SUBLINK_LOGIN_BAN_DURATION` | Login ban duration, in minutes | 10 |
+| `SUBLINK_GEOIP_PATH` | GeoIP database path | ./db/GeoLite2-City.mmdb |
+| `SUBLINK_CAPTCHA_MODE` | CAPTCHA mode, 1=off, 2=image, 3=Turnstile | 2 |
 | `SUBLINK_TURNSTILE_SITE_KEY` | Cloudflare Turnstile Site Key | - |
 | `SUBLINK_TURNSTILE_SECRET_KEY` | Cloudflare Turnstile Secret Key | - |
-| `SUBLINK_TURNSTILE_PROXY_LINK` | Turnstile 验证代理链接（mihomo 格式） | - |
-| `SUBLINK_WEB_BASE_PATH` | 前端访问基础路径（站点隐藏） | - |
-| `SUBLINK_ADMIN_PASSWORD` | 初始管理员密码 | 123456 |
-| `SUBLINK_ADMIN_PASSWORD_REST` | 重置管理员密码 | 输入新管理员密码 |
+| `SUBLINK_TURNSTILE_PROXY_LINK` | Proxy link for Turnstile verification, mihomo format | - |
+| `SUBLINK_TRUSTED_PROXIES` | Trusted reverse proxy IP/CIDR list, comma separated | `127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10` |
+| `SUBLINK_WEB_BASE_PATH` | Frontend base path for hiding the site entry | - |
+| `SUBLINK_ADMIN_PASSWORD` | Initial admin password | 123456 |
+| `SUBLINK_ADMIN_PASSWORD_REST` | Reset admin password | Enter the new admin password |
+| `SUBLINK_MFA_RESET_SECRET` | Secret used to generate restricted TOTP emergency reset tokens, environment variable only | - |
+| `SUBLINK_DEMO_MODE` | Enable demo mode, memory database and some sensitive operations disabled | false |
+| `SUBLINK_FEATURE` | Experimental feature flags | Reserved experimental flags, comma separated. Node preview is now stable and no longer needs configuration |
 
 ---
 
-## 命令行参数
+## Sub-Store Sidecar Conversion
+
+SublinkPro can use an external Sub-Store backend as an optional sidecar for additional subscription output formats. Native `clash`/`mihomo`, `surge`, and `v2ray` links stay handled by SublinkPro. Expanded targets such as `loon`, `egern`, `stash`, `surfboard`, `shadowrocket`, `quanx`, `sing-box`, `uri`, and `json` first generate SublinkPro's mihomo/Clash bridge YAML, then send the proxy list to Sub-Store's `/api/proxy/parse` endpoint.
+
+Sign in and open **Application Settings -> Sub-Store** to enable the sidecar, set its base URL, adjust timeout/response limits, choose allowed targets, and test the connection. Sub-Store settings are page-managed only; this integration is not configured through environment variables or `config.yaml` keys.
+
+Keep the Sub-Store service on a private network or loopback address. SublinkPro does not embed or vendor Sub-Store code; the sidecar is a separate service boundary because Sub-Store is a Node project with GPL/AGPL licensing considerations. The one-shot parser converts proxy nodes and does not preserve full Clash strategy groups, rules, or DNS sections.
+
+---
+
+## Cloudflare Tunnel
+
+The **Cloudflare Tunnel** tab in Application Settings can host the local `cloudflared` process and connect the current SublinkPro instance to a remotely managed Tunnel in Cloudflare Zero Trust.
+
+- The Docker image includes `cloudflared`, so you usually only need to enter the Tunnel token on the page and start it.
+- Non Docker deployments need `cloudflared` installed first, with the `cloudflared` command available in `PATH`.
+- The page never echoes the raw token. Status APIs only return a masked token.
+
+At runtime this is equivalent to `cloudflared tunnel --no-autoupdate run`. The token is passed through the `TUNNEL_TOKEN` environment variable so it does not appear in process arguments.
+
+See the full guide at [Cloudflare Tunnel remote access](features/cloudflare-tunnel.md).
+
+---
+
+## Command Line Flags
 
 ```bash
-# 查看帮助
+# Show help
 ./sublinkpro help
 
-# 指定端口启动
+# Start with a specific port
 ./sublinkpro run --port 9000
 
-# 指定数据库目录
-./sublinkpro run --db /data/db
+# Use a specific SQLite database
+./sublinkpro run --dsn "sqlite:///data/sublink.db"
 
-# 重置管理员密码
+# Use MySQL
+./sublinkpro run --dsn "mysql://user:pass@tcp(127.0.0.1:3306)/sublink?charset=utf8mb4&parseTime=True&loc=Local"
+
+# Use PostgreSQL
+./sublinkpro run --dsn "postgres://user:pass@127.0.0.1:5432/sublink?sslmode=disable"
+
+# Set the local data directory, used for config file, GeoIP, and default SQLite
+./sublinkpro run --db /data
+
+# Reset admin password
 ./sublinkpro setting -username admin -password newpass
 ```
 
 ---
 
-## 敏感配置说明
+## Database DSN
+
+SublinkPro now supports unified database connection configuration through `dsn`, with these dialects:
+
+- `sqlite://`
+- `mysql://`
+- `postgres://`
+- `postgresql://`
+
+If `dsn` is empty, the system falls back to SQLite and uses `db_path/sublink.db` as the database file.
+
+### SQLite example
+
+```yaml
+dsn: sqlite:///app/db/sublink.db
+```
+
+### MySQL example
+
+```yaml
+dsn: mysql://user:pass@tcp(mysql:3306)/sublink?charset=utf8mb4&parseTime=True&loc=Local
+```
+
+### PostgreSQL example
+
+```yaml
+dsn: postgres://user:pass@postgres:5432/sublink?sslmode=disable
+```
 
 > [!TIP]
-> **JWT Secret** 和 **API 加密密钥** 是敏感配置，系统会按以下方式处理：
-> 1. 优先从环境变量读取
-> 2. 如未设置环境变量，从数据库读取
-> 3. 如数据库也没有，自动生成随机密钥并存储到数据库
-> 
-> **特别说明**：如果您通过环境变量设置了这些值，系统会自动同步到数据库。这样即使后续忘记设置环境变量，系统也能从数据库恢复，方便迁移部署。
+> When using MySQL or PostgreSQL, `db_path` is still used for local config files and GeoIP database storage. It no longer decides the actual database backend.
 
-> [!WARNING]
-> 如果您需要**多实例部署**或**集群部署**，请务必通过环境变量设置相同的 `SUBLINK_JWT_SECRET` 和 `SUBLINK_API_ENCRYPTION_KEY`，以确保各实例间的登录状态和 API Key 一致。
+## Migrate from SQLite to MySQL / PostgreSQL
+
+If an old instance has always used SQLite and you want to migrate to MySQL or PostgreSQL, use the built in “Data Migration” feature.
+
+### Before migration
+
+1. Prepare a new empty MySQL or PostgreSQL database.
+2. Configure database `DSN` for the new instance.
+3. Confirm that the old instance can sign in normally.
+4. If you need to keep old `AccessKey` values, confirm that `SUBLINK_API_ENCRYPTION_KEY` is the same on both instances.
+
+### Step 1: Configure DSN in the new instance
+
+You can configure the database for the new instance in any of these ways:
+
+- Environment variable: `SUBLINK_DSN`
+- Config file: `dsn:` in `db/config.yaml`
+- Command line flag: `./sublinkpro run --dsn "..."`
+
+Example:
+
+```yaml
+# MySQL
+dsn: mysql://user:pass@tcp(mysql:3306)/sublink?charset=utf8mb4&parseTime=True&loc=Local
+
+# PostgreSQL
+dsn: postgres://user:pass@postgres:5432/sublink?sslmode=disable
+```
+
+> [!IMPORTANT]
+> A fresh empty target database is recommended. Don't import directly into a database that already has business data.
+
+### Step 2: Export a backup from the old SQLite instance
+
+After signing in to the old instance:
+
+1. Click the avatar menu in the upper right.
+2. Choose **System Backup**.
+3. Download the generated `backup.zip`.
+
+Using `backup.zip` is recommended because it includes:
+
+- The SQLite database file from the `db` directory
+- Template files from the `template` directory
+
+> [!TIP]
+> You can also upload a `.db`, `.sqlite`, or `.sqlite3` file directly, but that only migrates database records and won't restore the template directory.
+
+### Step 3: Run migration in the new instance
+
+After starting the new instance, open:
+
+`Settings -> Data Migration`
+
+Then:
+
+1. Upload the `backup.zip` exported from the old instance.
+2. Choose whether to migrate `AccessKey`.
+3. Choose whether to migrate subscription access logs.
+4. Check “I confirm that this import will overwrite business data in the current instance”.
+5. Click **Start Migration**.
+
+The migration task runs in the background. You can view progress and results in:
+
+- The task progress panel in the lower right
+- `Task Center`
+
+### After migration
+
+1. Check whether the migration result is successful.
+2. If it reports “N warnings”, open the corresponding “Database Migration” task in `Task Center` to view details.
+3. **Manually restart the project instance**.
+4. Sign in again and check that important data is normal.
+
+### Migration notes
+
+- This import overwrites business data in the current instance.
+- It is recommended only for first time migration into a newly deployed MySQL / PostgreSQL instance.
+- Subscription access logs are usually large, so migrating them is not recommended by default.
+- If old `AccessKey` values cannot be used after migration, check whether `SUBLINK_API_ENCRYPTION_KEY` matches the old instance.
+- If login state behaves oddly after migration, sign in again.
 
 ---
 
-## 验证码配置
+## Sensitive Configuration
 
-SublinkPro 支持三种验证码模式，通过 `SUBLINK_CAPTCHA_MODE` 环境变量配置：
+> [!TIP]
+> **JWT Secret** and **API encryption key** are sensitive settings. The system handles them in this order:
+> 1. Read from environment variables first.
+> 2. If not set in environment variables, read from the database.
+> 3. If missing from the database too, generate random keys automatically and store them in the database.
+>
+> **Special note**: If you set these values through environment variables, the system automatically syncs them to the database. That lets the system recover them from the database later even if you forget to set the environment variables, which helps migration and deployment.
 
-| 模式 | 说明 |
+> [!WARNING]
+> If you need **multi instance deployment** or **cluster deployment**, set the same `SUBLINK_JWT_SECRET` and `SUBLINK_API_ENCRYPTION_KEY` through environment variables for all instances. This keeps login state and API Keys consistent across instances.
+
+## TOTP / MFA Security Notes
+
+SublinkPro supports TOTP based multi factor authentication. When enabled, login becomes:
+
+1. Username + password + CAPTCHA
+2. Authenticator code or one time recovery code
+
+### Enablement and usage recommendations
+
+- Start setup in `Settings -> Personal Settings -> Multi Factor Authentication (TOTP)`.
+- After scanning the QR code, enter the current 6 digit code once to enable it.
+- The system generates a set of **one time recovery codes**. Save them offline, separate from account passwords.
+- If the current account has TOTP enabled, changing password, changing username or nickname, disabling TOTP, or resetting recovery codes requires the current dynamic code again.
+
+### Recovery code policy
+
+- Recovery codes can be used for login only **after TOTP is fully enabled**.
+- Each recovery code can be used once.
+- Old recovery codes become invalid immediately after recovery codes are regenerated.
+
+### Emergency reset, break glass, policy
+
+`SUBLINK_MFA_RESET_SECRET` is used to generate **restricted emergency TOTP reset tokens**. It is for operators helping users who lost their authenticator and cannot use recovery codes.
+
+This setting has these constraints:
+
+- **Environment variable only**, it is not written to config files
+- It does not provide a global universal login bypass
+- It can only clear TOTP for an account after username + password have been verified
+- It is recommended only as a temporary operations setting, with careful rotation
+
+### Recommended operations flow
+
+1. Temporarily set `SUBLINK_MFA_RESET_SECRET`.
+2. Generate a reset token with an expiration time for the target user.
+3. Call `/api/v1/auth/mfa/reset` with:
+   - `username`
+   - `password`
+   - `resetToken`
+4. The user signs in again and binds TOTP again.
+
+> [!WARNING]
+> Don't keep `SUBLINK_MFA_RESET_SECRET` as a permanent public setting, and don't treat it as a backdoor for bypassing MFA login. It is only for **restricted TOTP reset when the account password is known**.
+
+---
+
+## CAPTCHA Configuration
+
+SublinkPro supports three CAPTCHA modes through `SUBLINK_CAPTCHA_MODE`:
+
+| Mode | Description |
 |:---:|:---|
-| **1** | 关闭验证码（不推荐，仅限内网环境） |
-| **2** | 传统图形验证码（默认） |
-| **3** | Cloudflare Turnstile（推荐，更安全） |
+| **1** | Disable CAPTCHA, not recommended, only for internal networks |
+| **2** | Traditional image CAPTCHA, default |
+| **3** | Cloudflare Turnstile, recommended and more secure |
 
-### Cloudflare Turnstile 配置
+### Cloudflare Turnstile configuration
 
-如需使用 Turnstile，请：
+To use Turnstile:
 
-1. 访问 [Cloudflare Turnstile 控制台](https://dash.cloudflare.com/?to=/:account/turnstile) 创建站点
-2. 获取 **Site Key** 和 **Secret Key**
-3. 配置环境变量：
+1. Open the [Cloudflare Turnstile console](https://dash.cloudflare.com/?to=/:account/turnstile) and create a site.
+2. Get the **Site Key** and **Secret Key**.
+3. Configure environment variables:
 
 ```yaml
 environment:
@@ -99,11 +299,11 @@ environment:
 ```
 
 > [!NOTE]
-> **降级机制**：如果配置了 Turnstile 模式但未提供完整的密钥配置，系统会自动降级为传统图形验证码。
+> **Fallback behavior**: If Turnstile mode is configured but complete keys are missing, the system automatically falls back to traditional image CAPTCHA.
 
-### Turnstile 代理配置
+### Turnstile proxy configuration
 
-如果您的服务器无法直接访问 Cloudflare API，可能会遇到 `context deadline exceeded` 超时错误。此时可以配置代理：
+If your server cannot access the Cloudflare API directly, you may see a `context deadline exceeded` timeout. Configure a proxy in that case:
 
 ```yaml
 environment:
@@ -111,42 +311,80 @@ environment:
 ```
 
 > [!TIP]
-> **代理链接格式**：使用 mihomo 支持的代理链接格式（如 `vless://`、`vmess://`、`ss://` 等）。与 Telegram 代理配置类似。
+> **Proxy link format**: Use proxy links supported by mihomo, such as `vless://`, `vmess://`, `ss://`, and others. This is similar to Telegram proxy configuration.
 
-### Turnstile 验证模式
+### Turnstile verification modes
 
-Cloudflare Turnstile 支持三种验证模式，在 Cloudflare 控制台创建 Site Key 时选择：
+Cloudflare Turnstile supports three verification modes. Choose one when creating the Site Key in the Cloudflare console:
 
-| 模式 | 说明 |
+| Mode | Description |
 |:---:|:---|
-| **Managed** | Cloudflare 自动决策是否需要交互，大多数用户无感通过 |
-| **Non-Interactive** | 显示加载指示器，但无需用户交互 |
-| **Invisible** | 完全不可见，后台静默完成验证 |
+| **Managed** | Cloudflare decides whether interaction is needed. Most users pass without noticing. |
+| **Non-Interactive** | Shows a loading indicator but requires no user interaction. |
+| **Invisible** | Fully invisible, verification completes silently in the background. |
 
-前端 widget 会自动根据 Site Key 对应的模式进行渲染，无需额外配置。
+The frontend widget renders automatically based on the mode associated with the Site Key. No extra configuration is needed.
 
 ---
 
-## 站点隐藏配置
+## Site Hiding Configuration
 
-通过设置 `SUBLINK_WEB_BASE_PATH` 可以隐藏管理站点入口，类似 3x-ui 的自定义路径功能。
+Set `SUBLINK_WEB_BASE_PATH` to hide the admin site entry, similar to custom path features in 3x-ui.
 
 ```yaml
 environment:
   - SUBLINK_WEB_BASE_PATH=/admin
 ```
 
-设置后：
-- 访问 `http://domain/` 返回 404
-- 访问 `http://domain/admin` 才能进入管理界面
-- API 接口 (`/api/*`) 和订阅获取 (`/c/*`) **不受影响**
+After setting it:
+
+- `http://domain/` returns 404
+- `http://domain/admin` opens the admin UI
+- API paths (`/api/*`) and subscription fetch paths (`/c/*`) are **not affected**
 
 > [!TIP]
-> 路径支持带或不带前导斜杠，如 `admin` 或 `/admin` 效果相同。
+> Paths work with or without a leading slash. `admin` and `/admin` have the same effect.
 
 ---
 
-## Docker 部署示例（带环境变量）
+## Reverse Proxy and Real IP
+
+If you access SublinkPro through Nginx, Caddy, BaoTa, Docker reverse proxy, Cloudflare Tunnel, or another proxy, the client IP in access logs depends on whether the server trusts that proxy.
+
+- By default, local addresses and common private network ranges are trusted, so reverse proxies on the host or container network usually expose the real source IP automatically.
+- If logs keep showing proxy addresses like `127.0.0.1` or `172.x.x.x`, the proxy egress is usually not in the trusted list.
+- Add proxy IPs or CIDRs through `SUBLINK_TRUSTED_PROXIES` or `trusted_proxies` in `config.yaml`.
+
+Example:
+
+```yaml
+trusted_proxies:
+  - 127.0.0.1
+  - ::1
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 100.64.0.0/10
+  - 203.0.113.10
+  - 198.51.100.0/24
+```
+
+Docker Compose environment variable form:
+
+```yaml
+environment:
+  - SUBLINK_TRUSTED_PROXIES=127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10
+```
+
+If you are sure you do not want to trust any proxy headers, explicitly disable them:
+
+```yaml
+trusted_proxies: []
+```
+
+---
+
+## Docker Deployment Example with Environment Variables
 
 ```yaml
 services:
@@ -161,15 +399,22 @@ services:
       - "./logs:/app/logs"
     environment:
       - SUBLINK_PORT=8000
+      # Database DSN, optional. SQLite is used by default when unset.
+      # - SUBLINK_DSN=mysql://user:pass@mysql:3306/sublink?charset=utf8mb4&parseTime=True&loc=Local
       - SUBLINK_EXPIRE_DAYS=14
       - SUBLINK_LOGIN_FAIL_COUNT=5
-      # GeoIP 数据库路径（可选，默认为 ./db/GeoLite2-City.mmdb）
+      # Local data directory, optional, default for config.yaml / GeoIP / SQLite
+      # - SUBLINK_DB_PATH=/app/db
+      # GeoIP database path, optional, defaults to ./db/GeoLite2-City.mmdb
       # - SUBLINK_GEOIP_PATH=/app/db/GeoLite2-City.mmdb
-      # 敏感配置（可选，不设置则自动生成）
+      # Trusted reverse proxies, optional, comma separated. Host or private network reverse proxies usually need no extra change.
+      # - SUBLINK_TRUSTED_PROXIES=127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10
+      # Sensitive configuration, optional, generated automatically when unset
       # - SUBLINK_JWT_SECRET=your-secret-key
       # - SUBLINK_API_ENCRYPTION_KEY=your-encryption-key
+      # - SUBLINK_MFA_RESET_SECRET=your-break-glass-secret
     restart: unless-stopped
 ```
 
 > [!NOTE]
-> 完整的 Docker Compose 模板请参考项目根目录的 `docker-compose.example.yml` 文件。
+> For the full Docker Compose template, see `docker-compose.example.yml` in the project root.

@@ -1,7 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 
 // material-ui
-import { useTheme } from '@mui/material/styles';
+import { alpha, useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
 import Button from '@mui/material/Button';
 import Dialog from '@mui/material/Dialog';
@@ -35,28 +37,284 @@ import Switch from '@mui/material/Switch';
 
 // icons
 import AddIcon from '@mui/icons-material/Add';
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import EditIcon from '@mui/icons-material/Edit';
 import DeleteIcon from '@mui/icons-material/Delete';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import TransformIcon from '@mui/icons-material/Transform';
 import UnfoldMoreIcon from '@mui/icons-material/UnfoldMore';
+import FullscreenIcon from '@mui/icons-material/Fullscreen';
+import FullscreenExitIcon from '@mui/icons-material/FullscreenExit';
 import CircularProgress from '@mui/material/CircularProgress';
+import CompareArrowsIcon from '@mui/icons-material/CompareArrows';
+import CheckIcon from '@mui/icons-material/Check';
+import UndoIcon from '@mui/icons-material/Undo';
 
 import MainCard from 'ui-component/cards/MainCard';
 import Pagination from 'components/Pagination';
 import SearchableNodeSelect from 'components/SearchableNodeSelect';
-import { getTemplates, addTemplate, updateTemplate, deleteTemplate, getACL4SSRPresets, convertRules } from 'api/templates';
-import { getBaseTemplates, updateBaseTemplate } from 'api/settings';
+import {
+  getTemplates,
+  addTemplate,
+  updateTemplate,
+  deleteTemplate,
+  getTemplateUsage,
+  getACL4SSRPresets,
+  convertRules,
+  streamTemplateAIEditSession,
+  acceptTemplateAIEditSession,
+  discardTemplateAIEditSession
+} from 'api/templates';
+import { getAISettings, getBaseTemplates, updateBaseTemplate } from 'api/settings';
 import { getNodes } from 'api/nodes';
+import { withAlpha } from 'utils/colorUtils';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
 
 // Monaco Editor
-import Editor from '@monaco-editor/react';
+import Editor, { DiffEditor } from '@monaco-editor/react';
 
-// ==============================|| 模板管理 ||============================== //
+const createEmptyTemplateAIAssistant = () => ({
+  sessionId: '',
+  status: 'idle',
+  sourceText: '',
+  candidateText: '',
+  operations: [],
+  validation: null,
+  warningFingerprint: '',
+  expiresAt: '',
+  error: '',
+  progressText: '',
+  modelDeltaText: '',
+  summary: '',
+  warnings: [],
+  baseHash: '',
+  candidateHash: '',
+  finishReason: '',
+  usage: null,
+  sourceFilename: '',
+  sourceCategory: '',
+  sourceRuleSource: '',
+  sourceUseProxy: false,
+  sourceProxyLink: '',
+  sourceEnableIncludeAll: false
+});
+
+const normalizeMessages = (messages) => (Array.isArray(messages) ? messages.filter(Boolean) : []);
+
+const TEMPLATE_AI_DIAGNOSTIC_CODE_PATTERN = /^(AI_EDIT|PATCH)_[A-Z_]+$/;
+
+const getTemplateAIDiagnosticCode = (value) => {
+  const code = typeof value === 'string' ? value.trim() : '';
+  return TEMPLATE_AI_DIAGNOSTIC_CODE_PATTERN.test(code) ? code : '';
+};
+
+const translateTemplateAIDiagnostic = (t, code, namespace = 'errorCodes') => {
+  const diagnosticCode = getTemplateAIDiagnosticCode(code);
+
+  if (!diagnosticCode) {
+    return '';
+  }
+
+  const namespacedKey = `templates.ai.${namespace}.${diagnosticCode}`;
+  const fallbackKey = `templates.ai.errorCodes.${diagnosticCode}`;
+  const translatedMessage = t(namespacedKey);
+  const message = translatedMessage === namespacedKey ? t(fallbackKey) : translatedMessage;
+
+  return message && message !== fallbackKey ? `${message} (${diagnosticCode})` : diagnosticCode;
+};
+
+const extractTemplateAIErrorPayload = (error) => {
+  const responseData = error?.response?.data;
+  const nestedResponseData = responseData?.data;
+  const errorData = error?.data;
+  const nestedErrorData = errorData?.data;
+
+  if (nestedResponseData && typeof nestedResponseData === 'object' && !Array.isArray(nestedResponseData)) {
+    return nestedResponseData;
+  }
+
+  if (responseData && typeof responseData === 'object' && !Array.isArray(responseData)) {
+    return responseData;
+  }
+
+  if (nestedErrorData && typeof nestedErrorData === 'object' && !Array.isArray(nestedErrorData)) {
+    return nestedErrorData;
+  }
+
+  if (errorData && typeof errorData === 'object' && !Array.isArray(errorData)) {
+    return errorData;
+  }
+
+  return error && typeof error === 'object' ? error : null;
+};
+
+const getTemplateAIErrorMessage = (t, error) => {
+  const payload = extractTemplateAIErrorPayload(error);
+  const code = getTemplateAIDiagnosticCode(payload?.code || error?.code);
+  const translatedDiagnostic = translateTemplateAIDiagnostic(t, code);
+
+  if (translatedDiagnostic) {
+    return translatedDiagnostic;
+  }
+
+  return payload?.message || payload?.msg || error?.message || t('templates.ai.messages.generateFailed');
+};
+
+const AI_SETUP_ERROR_MARKERS = [
+  'AI \u52a9\u624b\u672a\u542f\u7528',
+  'AI \u8bbe\u7f6e\u4e0d\u5b8c\u6574\uff0c\u8bf7\u5148\u914d\u7f6e Base URL\u3001\u6a21\u578b\u548c API Key'
+];
+
+const createTemplateAISourceSnapshot = (formData, useProxy, proxyLink) => ({
+  sourceText: formData.text,
+  sourceFilename: formData.filename.trim(),
+  sourceCategory: formData.category,
+  sourceRuleSource: formData.ruleSource,
+  sourceUseProxy: useProxy,
+  sourceProxyLink: proxyLink,
+  sourceEnableIncludeAll: formData.enableIncludeAll
+});
+
+const normalizeTemplateAIValidation = (validation) => {
+  if (!validation || typeof validation !== 'object' || Array.isArray(validation)) {
+    return null;
+  }
+
+  return {
+    ...validation,
+    errors: normalizeMessages(validation.errors),
+    warnings: normalizeMessages(validation.warnings)
+  };
+};
+
+const hasPayloadField = (payload, field) =>
+  Boolean(payload && typeof payload === 'object' && !Array.isArray(payload) && Object.prototype.hasOwnProperty.call(payload, field));
+
+const buildTemplateAIAssistantState = (payload, sourceSnapshot, previousState = {}) => {
+  const validation = hasPayloadField(payload, 'validation')
+    ? normalizeTemplateAIValidation(payload.validation)
+    : previousState.validation || null;
+  const warningFingerprint = hasPayloadField(payload, 'warningFingerprint')
+    ? payload.warningFingerprint || ''
+    : previousState.warningFingerprint || '';
+
+  return {
+    ...previousState,
+    ...sourceSnapshot,
+    sessionId: payload?.sessionId || previousState.sessionId || '',
+    status: payload?.status || previousState.status || 'idle',
+    sourceText: sourceSnapshot?.sourceText ?? previousState.sourceText ?? '',
+    candidateText: hasPayloadField(payload, 'candidateText') ? payload.candidateText || '' : previousState.candidateText || '',
+    operations: Array.isArray(payload?.operations) ? payload.operations : previousState.operations || [],
+    validation,
+    warningFingerprint,
+    expiresAt: payload?.expiresAt || previousState.expiresAt || '',
+    error: payload?.lastError || payload?.message || previousState.error || '',
+    progressText: payload?.progressText || previousState.progressText || '',
+    modelDeltaText: previousState.modelDeltaText || '',
+    summary: payload?.summary || previousState.summary || '',
+    warnings: normalizeMessages(payload?.warnings || previousState.warnings),
+    baseHash: payload?.baseHash || previousState.baseHash || '',
+    candidateHash: payload?.candidateHash || previousState.candidateHash || '',
+    finishReason: payload?.finishReason || previousState.finishReason || '',
+    usage: payload?.usage || previousState.usage || null
+  };
+};
+
+const extractResponseUsage = (eventData) => {
+  if (!eventData || typeof eventData !== 'object' || Array.isArray(eventData)) {
+    return null;
+  }
+
+  const response = eventData.response;
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    return null;
+  }
+
+  return response.usage && typeof response.usage === 'object' && !Array.isArray(response.usage) ? response.usage : null;
+};
+
+const extractResponseFinishReason = (eventData) => {
+  if (!eventData || typeof eventData !== 'object' || Array.isArray(eventData)) {
+    return '';
+  }
+
+  const response = eventData.response;
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    return '';
+  }
+
+  return typeof response.status === 'string' ? response.status : '';
+};
+
+const getUsageNumber = (container, key) => {
+  if (!container || typeof container !== 'object' || Array.isArray(container) || !Object.prototype.hasOwnProperty.call(container, key)) {
+    return null;
+  }
+
+  const value = container[key];
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsedValue = Number(value);
+
+    if (Number.isFinite(parsedValue)) {
+      return parsedValue;
+    }
+  }
+
+  return null;
+};
+
+const buildTemplateAIUsageItems = (usage, t) => {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
+    return [];
+  }
+
+  const inputTokens = getUsageNumber(usage, 'input_tokens') ?? getUsageNumber(usage, 'prompt_tokens');
+  const outputTokens = getUsageNumber(usage, 'output_tokens') ?? getUsageNumber(usage, 'completion_tokens');
+  const inputTokenDetails =
+    usage.input_tokens_details && typeof usage.input_tokens_details === 'object' && !Array.isArray(usage.input_tokens_details)
+      ? usage.input_tokens_details
+      : null;
+  const cacheTokens =
+    getUsageNumber(inputTokenDetails, 'cached_tokens') ??
+    getUsageNumber(usage, 'cached_tokens') ??
+    getUsageNumber(usage, 'cache_tokens') ??
+    getUsageNumber(usage, 'cached_input_tokens');
+
+  return [
+    inputTokens !== null ? { key: 'input', label: t('templates.ai.usage.input'), value: inputTokens } : null,
+    outputTokens !== null ? { key: 'output', label: t('templates.ai.usage.output'), value: outputTokens } : null,
+    cacheTokens !== null ? { key: 'cache', label: t('templates.ai.usage.cache'), value: cacheTokens } : null
+  ].filter(Boolean);
+};
 
 export default function TemplateList() {
+  const { t } = useTranslation();
   const theme = useTheme();
+  const { isDark } = useResolvedColorScheme();
+  const palette = theme.vars?.palette || theme.palette;
+  const aiPromptPrimaryLight = theme.palette.primary.light;
+  const aiPromptPrimaryMain = theme.palette.primary.main;
+  const aiPromptSurface = theme.palette.grey[900];
+  const aiPromptCollapsedSurface = theme.palette.grey[800];
+  const aiPanelTextPrimary = isDark ? withAlpha(palette.text.dark || theme.palette.common.white, 0.94) : palette.text.primary;
+  const aiPanelTextSecondary = isDark ? withAlpha(palette.text.dark || theme.palette.common.white, 0.78) : palette.text.secondary;
+  const aiPanelSurface = isDark ? withAlpha(palette.background.default, 0.94) : withAlpha(palette.background.paper, 0.96);
+  const aiPanelBorder = isDark ? withAlpha(palette.divider, 0.82) : withAlpha(palette.divider, 0.9);
+  const aiPanelSoftShadow = isDark
+    ? `0 16px 36px ${alpha(theme.palette.common.black, 0.34)}, inset 0 1px 0 ${alpha(theme.palette.common.white, 0.04)}`
+    : `0 12px 30px ${alpha(theme.palette.common.black, 0.16)}`;
+  const aiNeutralChipSurface = isDark ? withAlpha(palette.background.paper, 0.62) : withAlpha(palette.background.default, 0.92);
+  const aiNeutralChipBorder = isDark ? withAlpha(palette.divider, 0.78) : withAlpha(palette.divider, 0.86);
+  const aiWarningText = isDark ? alpha(theme.palette.warning.light, 0.96) : palette.warning.contrastText || palette.text.primary;
+  const navigate = useNavigate();
   const matchDownMd = useMediaQuery(theme.breakpoints.down('md'));
+  const aiGenerationAbortRef = useRef(null);
 
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -67,7 +325,19 @@ export default function TemplateList() {
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
   const [aclPresets, setAclPresets] = useState([]);
   const [converting, setConverting] = useState(false);
+  const [editorFullscreen, setEditorFullscreen] = useState(false);
+  const [templateEditorMode, setTemplateEditorMode] = useState('edit');
+  const [aiPrompt, setAIPrompt] = useState('');
+  const [aiGenerating, setAIGenerating] = useState(false);
+  const [aiAssistant, setAIAssistant] = useState(createEmptyTemplateAIAssistant);
+  const [aiGenerationError, setAIGenerationError] = useState('');
+  const [aiPreviewAccepting, setAIPreviewAccepting] = useState(false);
+  const [aiPreviewDiscarding, setAIPreviewDiscarding] = useState(false);
+  const [isAIEnabled, setIsAIEnabled] = useState(false);
+  const [aiCommandOpen, setAICommandOpen] = useState(false);
+  const [aiDisabledPromptOpen, setAIDisabledPromptOpen] = useState(false);
   const [errorDialog, setErrorDialog] = useState({ open: false, title: '', message: '' });
+  const [usageDialog, setUsageDialog] = useState({ open: false, title: '', message: '', subscriptions: [], action: null });
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(() => {
     const saved = localStorage.getItem('templates_rowsPerPage');
@@ -75,7 +345,6 @@ export default function TemplateList() {
   });
   const [totalItems, setTotalItems] = useState(0);
 
-  // 确认对话框
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmInfo, setConfirmInfo] = useState({
     title: '',
@@ -83,14 +352,12 @@ export default function TemplateList() {
     action: null
   });
 
-  // 基础模板编辑对话框
   const [baseTemplateDialogOpen, setBaseTemplateDialogOpen] = useState(false);
   const [baseTemplateCategory, setBaseTemplateCategory] = useState('clash');
   const [baseTemplateContent, setBaseTemplateContent] = useState('');
   const [baseTemplateLoading, setBaseTemplateLoading] = useState(false);
   const [baseTemplateSaving, setBaseTemplateSaving] = useState(false);
 
-  // 代理设置
   const [useProxy, setUseProxy] = useState(false);
   const [proxyLink, setProxyLink] = useState('');
   const [proxyNodeOptions, setProxyNodeOptions] = useState([]);
@@ -99,6 +366,23 @@ export default function TemplateList() {
   const openConfirm = (title, content, action) => {
     setConfirmInfo({ title, content, action });
     setConfirmOpen(true);
+  };
+
+  const abortAIGeneration = () => {
+    if (aiGenerationAbortRef.current) {
+      aiGenerationAbortRef.current.abort();
+      aiGenerationAbortRef.current = null;
+    }
+  };
+
+  const resetTemplateAIAssistant = () => {
+    abortAIGeneration();
+    setTemplateEditorMode('edit');
+    setAIPrompt('');
+    setAICommandOpen(false);
+    setAIAssistant(createEmptyTemplateAIAssistant());
+    setAIGenerationError('');
+    setAIGenerating(false);
   };
 
   const handleConfirmClose = () => {
@@ -116,33 +400,39 @@ export default function TemplateList() {
     setLoading(true);
     try {
       const response = await getTemplates({ page: currentPage + 1, pageSize: currentPageSize });
-      // 处理分页响应
       if (response.data && response.data.items !== undefined) {
         setTemplates(response.data.items || []);
         setTotalItems(response.data.total || 0);
       } else {
-        // 向后兼容：老格式直接返回数组
         setTemplates(response.data || []);
         setTotalItems((response.data || []).length);
       }
     } catch (error) {
       console.log(error);
-      showMessage(error.message || '获取模板列表失败', 'error');
+      showMessage(error.message || t('templates.messages.loadFailed'), 'error');
     } finally {
       setLoading(false);
     }
   };
 
+  const handleRefresh = () => {
+    fetchTemplates(page, rowsPerPage);
+  };
+
   useEffect(() => {
     fetchTemplates(0, rowsPerPage);
-    // 获取 ACL4SSR 预设列表
+    getAISettings()
+      .then((res) => {
+        setIsAIEnabled(Boolean(res.data?.enabled));
+      })
+      .catch((err) => console.log('Failed to load AI settings:', err));
     getACL4SSRPresets()
       .then((res) => {
         if (res.data) {
           setAclPresets(res.data);
         }
       })
-      .catch((err) => console.log('获取预设列表失败:', err));
+      .catch((err) => console.log('Failed to load preset list:', err));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const showMessage = (message, severity = 'success') => {
@@ -155,12 +445,15 @@ export default function TemplateList() {
     setFormData({ filename: '', text: '', category: 'clash', ruleSource: '', enableIncludeAll: false });
     setUseProxy(false);
     setProxyLink('');
+    setEditorFullscreen(false);
+    resetTemplateAIAssistant();
     setDialogOpen(true);
   };
 
   const handleEdit = (template) => {
     setIsEdit(true);
     setCurrentTemplate(template);
+    setEditorFullscreen(false);
     setFormData({
       filename: template.file,
       text: template.text,
@@ -168,31 +461,395 @@ export default function TemplateList() {
       ruleSource: template.ruleSource || '',
       enableIncludeAll: template.enableIncludeAll || false
     });
-    // 从模板数据加载代理设置
     setUseProxy(template.useProxy || false);
     setProxyLink(template.proxyLink || '');
-    // 如果之前保存了使用代理，预加载节点列表
     if (template.useProxy) {
       fetchProxyNodes();
     }
+    resetTemplateAIAssistant();
     setDialogOpen(true);
   };
 
   const handleDelete = async (template) => {
-    openConfirm('删除模板', `确定要删除模板 "${template.file}" 吗？`, async () => {
+    let usedSubscriptions = [];
+
+    try {
+      const response = await getTemplateUsage({ filename: template.file });
+      usedSubscriptions = response.data?.subscriptions || [];
+    } catch (error) {
+      console.log(error);
+      showMessage(error.message || t('templates.messages.usageFailed'), 'error');
+      return;
+    }
+
+    const deleteAction = async () => {
       try {
         await deleteTemplate({ filename: template.file });
-        showMessage('删除成功');
+        showMessage(t('templates.messages.deleteSuccess'));
         fetchTemplates(page, rowsPerPage);
       } catch (error) {
         console.log(error);
-        showMessage(error.message || '删除失败', 'error');
+        showMessage(error.message || t('templates.messages.deleteFailed'), 'error');
       }
+    };
+
+    if (usedSubscriptions.length > 0) {
+      setUsageDialog({
+        open: true,
+        title: t('templates.usage.title'),
+        message: t('templates.usage.message', { name: template.file }),
+        subscriptions: usedSubscriptions,
+        action: deleteAction
+      });
+      return;
+    }
+
+    openConfirm(t('templates.delete.title'), t('templates.delete.confirm', { name: template.file }), deleteAction);
+  };
+
+  const handleCloseDialog = () => {
+    setDialogOpen(false);
+    setEditorFullscreen(false);
+    resetTemplateAIAssistant();
+  };
+
+  useEffect(() => () => abortAIGeneration(), []);
+
+  const handleGenerateWithAI = async () => {
+    if (!aiPrompt.trim()) {
+      showMessage(t('templates.ai.messages.promptRequired'), 'warning');
+      return;
+    }
+
+    abortAIGeneration();
+    const sourceSnapshot = createTemplateAISourceSnapshot(formData, useProxy, proxyLink);
+    const controller = new AbortController();
+    aiGenerationAbortRef.current = controller;
+
+    setAIGenerating(true);
+    setAIGenerationError('');
+    setTemplateEditorMode('edit');
+    setAIAssistant({
+      ...createEmptyTemplateAIAssistant(),
+      ...sourceSnapshot,
+      status: 'starting',
+      progressText: t('templates.ai.progress.starting')
     });
+
+    try {
+      const data = await streamTemplateAIEditSession(
+        {
+          filename: formData.filename.trim(),
+          category: formData.category,
+          currentText: formData.text,
+          userPrompt: aiPrompt.trim(),
+          ruleSource: formData.ruleSource,
+          useProxy,
+          proxyLink,
+          enableIncludeAll: formData.enableIncludeAll
+        },
+        {
+          signal: controller.signal,
+          onSessionCreated: (eventData) => {
+            setAIAssistant((prev) =>
+              buildTemplateAIAssistantState(
+                {
+                  ...eventData,
+                  status: eventData?.status || 'created',
+                  progressText: t('templates.ai.progress.sessionCreated')
+                },
+                sourceSnapshot,
+                prev
+              )
+            );
+          },
+          onDelta: (eventData) => {
+            const deltaText = typeof eventData === 'string' ? eventData : eventData?.delta || '';
+            if (!deltaText) {
+              return;
+            }
+
+            setAIAssistant((prev) => ({
+              ...prev,
+              status: 'streaming',
+              progressText: t('templates.ai.progress.streaming'),
+              modelDeltaText: `${prev.modelDeltaText || ''}${deltaText}`.slice(-12000)
+            }));
+          },
+          onOperationsReady: (eventData) => {
+            setAIAssistant((prev) =>
+              buildTemplateAIAssistantState(
+                {
+                  ...eventData,
+                  status: eventData?.status || 'operations_ready',
+                  progressText: t('templates.ai.progress.operationsReady')
+                },
+                sourceSnapshot,
+                prev
+              )
+            );
+          },
+          onPreviewValidating: (eventData) => {
+            setAIAssistant((prev) =>
+              buildTemplateAIAssistantState(
+                {
+                  ...eventData,
+                  status: eventData?.status || 'validating',
+                  progressText: t('templates.ai.progress.validating')
+                },
+                sourceSnapshot,
+                prev
+              )
+            );
+          },
+          onWarning: (eventData) => {
+            setAIAssistant((prev) =>
+              buildTemplateAIAssistantState(
+                {
+                  ...eventData,
+                  status: eventData?.status || prev.status || 'validating',
+                  progressText: t('templates.ai.progress.warning')
+                },
+                sourceSnapshot,
+                prev
+              )
+            );
+          },
+          onPreviewReady: (eventData) => {
+            setAIAssistant((prev) =>
+              buildTemplateAIAssistantState(
+                {
+                  ...eventData,
+                  progressText: t('templates.ai.progress.previewReady')
+                },
+                sourceSnapshot,
+                prev
+              )
+            );
+          },
+          onCompleted: (eventData) => {
+            if (!eventData || typeof eventData !== 'object') {
+              return;
+            }
+
+            setAIAssistant((prev) =>
+              buildTemplateAIAssistantState(
+                {
+                  ...eventData,
+                  finishReason: extractResponseFinishReason(eventData) || eventData.finishReason,
+                  usage: extractResponseUsage(eventData) || eventData.usage,
+                  progressText: t('templates.ai.progress.completed')
+                },
+                sourceSnapshot,
+                prev
+              )
+            );
+          },
+          onError: (eventData) => {
+            const errorMessage = getTemplateAIErrorMessage(t, eventData);
+            setAIAssistant((prev) => ({
+              ...prev,
+              status: 'failed',
+              error: errorMessage,
+              progressText: errorMessage
+            }));
+          }
+        }
+      );
+
+      const finalAssistantState = buildTemplateAIAssistantState(
+        {
+          ...data,
+          progressText: t('templates.ai.progress.completed')
+        },
+        sourceSnapshot,
+        createEmptyTemplateAIAssistant()
+      );
+      setAIAssistant((prev) => buildTemplateAIAssistantState(finalAssistantState, sourceSnapshot, prev));
+      setAIGenerationError('');
+
+      if (finalAssistantState.candidateText) {
+        setTemplateEditorMode('diff');
+        showMessage(t('templates.ai.messages.generated'));
+      } else {
+        showMessage(t('templates.ai.messages.emptyCandidate'), 'warning');
+      }
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        return;
+      }
+
+      const errorMessage = getTemplateAIErrorMessage(t, error);
+      const friendlyErrorMessage = AI_SETUP_ERROR_MARKERS.some((marker) => errorMessage.includes(marker))
+        ? t('templates.ai.messages.setupUnavailable')
+        : errorMessage;
+      setAIGenerationError(errorMessage);
+      setAIAssistant((prev) => ({
+        ...prev,
+        status: 'failed',
+        error: errorMessage,
+        progressText: errorMessage
+      }));
+      showMessage(friendlyErrorMessage, 'error');
+    } finally {
+      if (aiGenerationAbortRef.current === controller) {
+        aiGenerationAbortRef.current = null;
+      }
+      setAIGenerating(false);
+    }
+  };
+
+  const aiCandidateMatchesEditor = Boolean(aiAssistant.candidateText) && aiAssistant.candidateText === formData.text;
+  const aiCandidateOutdated =
+    Boolean(aiAssistant.candidateText) &&
+    !aiCandidateMatchesEditor &&
+    (aiAssistant.sourceText !== formData.text ||
+      aiAssistant.sourceFilename !== formData.filename.trim() ||
+      aiAssistant.sourceCategory !== formData.category ||
+      aiAssistant.sourceRuleSource !== formData.ruleSource ||
+      aiAssistant.sourceUseProxy !== useProxy ||
+      aiAssistant.sourceProxyLink !== proxyLink ||
+      aiAssistant.sourceEnableIncludeAll !== formData.enableIncludeAll);
+  const canReviewAICandidate = Boolean(aiAssistant.candidateText) && !aiCandidateOutdated && !aiCandidateMatchesEditor;
+  const isDiffMode = templateEditorMode === 'diff';
+  const showDiffReview = isDiffMode && canReviewAICandidate;
+  const aiPreviewBusy = aiGenerating || aiPreviewAccepting || aiPreviewDiscarding;
+  const isAIPreviewAccepted = aiAssistant.status === 'accepted';
+  const canAcceptAIPreview =
+    Boolean(aiAssistant.sessionId && aiAssistant.candidateText) &&
+    !isAIPreviewAccepted &&
+    !aiCandidateOutdated &&
+    !aiCandidateMatchesEditor;
+  const canDiscardAIPreview =
+    !isAIPreviewAccepted && Boolean(aiAssistant.sessionId || aiAssistant.candidateText || aiAssistant.operations.length > 0);
+  const canSwitchToDiffMode = canReviewAICandidate;
+
+  useEffect(() => {
+    if (templateEditorMode === 'diff' && (!canSwitchToDiffMode || !isAIEnabled)) {
+      setTemplateEditorMode('edit');
+    }
+  }, [templateEditorMode, canSwitchToDiffMode, isAIEnabled]);
+
+  const handleAcceptAIPreview = async () => {
+    if (!aiAssistant.candidateText || !aiAssistant.sessionId) {
+      showMessage(t('templates.ai.messages.generateFirst'), 'warning');
+      return;
+    }
+
+    if (aiCandidateMatchesEditor) {
+      showMessage(t('templates.ai.messages.alreadyApplied'), 'info');
+      return;
+    }
+
+    if (aiCandidateOutdated) {
+      showMessage(t('templates.ai.messages.outdatedAccept'), 'warning');
+      return;
+    }
+
+    setAIPreviewAccepting(true);
+    try {
+      const response = await acceptTemplateAIEditSession(aiAssistant.sessionId, { currentText: formData.text });
+      const acceptedPayload = response.data || response;
+      const acceptedCandidateText = acceptedPayload?.candidateText || '';
+
+      if (!acceptedCandidateText) {
+        showMessage(t('templates.ai.messages.emptyCandidate'), 'warning');
+        return;
+      }
+
+      setFormData((prev) => ({
+        ...prev,
+        text: acceptedCandidateText
+      }));
+      setTemplateEditorMode('edit');
+      setAIAssistant((prev) => ({
+        ...prev,
+        status: 'accepted',
+        candidateText: acceptedCandidateText,
+        candidateHash: acceptedPayload?.candidateHash || prev.candidateHash,
+        validation: normalizeTemplateAIValidation(acceptedPayload?.validation) || prev.validation,
+        error: '',
+        progressText: t('templates.ai.progress.accepted')
+      }));
+      showMessage(t('templates.ai.messages.accepted'));
+    } catch (error) {
+      const errorMessage = getTemplateAIErrorMessage(t, error);
+      setAIAssistant((prev) => ({
+        ...prev,
+        error: errorMessage,
+        progressText: errorMessage
+      }));
+      showMessage(errorMessage, 'error');
+    } finally {
+      setAIPreviewAccepting(false);
+    }
+  };
+
+  const handleDiscardAIPreview = async () => {
+    const sessionId = aiAssistant.sessionId;
+    if (!sessionId && !aiAssistant.candidateText) {
+      showMessage(t('templates.ai.messages.noPreviewToDiscard'), 'warning');
+      return;
+    }
+
+    setAIPreviewDiscarding(true);
+    try {
+      if (sessionId) {
+        await discardTemplateAIEditSession(sessionId);
+      }
+      showMessage(t('templates.ai.messages.discarded'));
+    } catch (error) {
+      const errorMessage = getTemplateAIErrorMessage(t, error);
+      showMessage(errorMessage, 'error');
+    } finally {
+      setTemplateEditorMode('edit');
+      setAIAssistant(createEmptyTemplateAIAssistant());
+      setAIPreviewDiscarding(false);
+    }
+  };
+
+  const handleConvertTemplate = async (expand) => {
+    setConverting(true);
+    try {
+      const res = await convertRules({
+        ruleSource: formData.ruleSource,
+        category: formData.category,
+        expand,
+        template: formData.text,
+        useProxy: useProxy,
+        proxyLink: proxyLink,
+        enableIncludeAll: formData.enableIncludeAll
+      });
+      if (res.code === 200 && res.data && res.data.content) {
+        setFormData({ ...formData, text: res.data.content });
+        showMessage(expand ? t('templates.messages.convertExpandSuccess') : t('templates.messages.convertSuccess'));
+      } else {
+        setErrorDialog({
+          open: true,
+          title: t('templates.messages.convertFailed'),
+          message: res.msg || t('templates.messages.convertError')
+        });
+      }
+    } catch (error) {
+      console.error(error);
+      const errorMsg = error.response?.data?.msg || error.message || t('templates.messages.convertFailed');
+      setErrorDialog({
+        open: true,
+        title: t('templates.messages.convertFailed'),
+        message: errorMsg
+      });
+    } finally {
+      setConverting(false);
+    }
   };
 
   const handleSubmit = async () => {
     try {
+      if (templateEditorMode === 'diff') {
+        showMessage(t('templates.ai.messages.diffSaveBlocked'), 'warning');
+        return;
+      }
+
       if (isEdit) {
         await updateTemplate({
           oldname: currentTemplate.file,
@@ -204,7 +861,7 @@ export default function TemplateList() {
           proxyLink: proxyLink,
           enableIncludeAll: formData.enableIncludeAll
         });
-        showMessage('更新成功');
+        showMessage(t('templates.messages.updateSuccess'));
       } else {
         await addTemplate({
           filename: formData.filename,
@@ -215,17 +872,18 @@ export default function TemplateList() {
           proxyLink: proxyLink,
           enableIncludeAll: formData.enableIncludeAll
         });
-        showMessage('添加成功');
+        showMessage(t('templates.messages.addSuccess'));
       }
+      setEditorFullscreen(false);
       setDialogOpen(false);
+      resetTemplateAIAssistant();
       fetchTemplates(page, rowsPerPage);
     } catch (error) {
       console.log(error);
-      showMessage(error.message || (isEdit ? '更新失败' : '添加失败'), 'error');
+      showMessage(error.message || (isEdit ? t('templates.messages.updateFailed') : t('templates.messages.addFailed')), 'error');
     }
   };
 
-  // 打开基础模板编辑对话框
   const handleOpenBaseTemplate = async (category) => {
     setBaseTemplateCategory(category);
     setBaseTemplateDialogOpen(true);
@@ -238,70 +896,744 @@ export default function TemplateList() {
       }
     } catch (error) {
       console.error(error);
-      showMessage(error.message || '获取基础模板失败', 'error');
+      showMessage(error.message || t('templates.messages.baseTemplateLoadFailed'), 'error');
     } finally {
       setBaseTemplateLoading(false);
     }
   };
 
-  // 保存基础模板
   const handleSaveBaseTemplate = async () => {
     setBaseTemplateSaving(true);
     try {
       await updateBaseTemplate(baseTemplateCategory, baseTemplateContent);
-      showMessage(`${baseTemplateCategory === 'clash' ? 'Clash' : 'Surge'} 基础模板保存成功`);
+      showMessage(t('templates.messages.baseTemplateSaveSuccess', { category: baseTemplateCategory === 'clash' ? 'Clash' : 'Surge' }));
       setBaseTemplateDialogOpen(false);
     } catch (error) {
       console.error(error);
-      showMessage(error.message || '保存基础模板失败', 'error');
+      showMessage(error.message || t('templates.messages.baseTemplateSaveFailed'), 'error');
     } finally {
       setBaseTemplateSaving(false);
     }
   };
 
-  // 获取代理节点列表
   const fetchProxyNodes = async () => {
     setLoadingProxyNodes(true);
     try {
-      const res = await getNodes({ minSpeed: 0.01, pageSize: 100 }); // 获取有速度的节点
+      const res = await getNodes({ pageSize: 100 });
       if (res.data) {
         const items = res.data.items || res.data || [];
         setProxyNodeOptions(items);
       }
     } catch (error) {
-      console.error('获取代理节点失败:', error);
+      console.error('Failed to load proxy nodes:', error);
     } finally {
       setLoadingProxyNodes(false);
     }
   };
 
+  const outlinedLabelFixSx = {
+    '& .MuiInputLabel-shrink': {
+      px: 0.5,
+      backgroundColor: 'background.paper',
+      lineHeight: 1.35,
+      transform: 'translate(14px, -4px) scale(0.75)'
+    }
+  };
+
+  const aiWorkspacePanelSx = {
+    border: 1,
+    borderColor: 'divider',
+    borderRadius: 1,
+    bgcolor: 'background.paper'
+  };
+
+  const isEditMode = templateEditorMode === 'edit';
+
+  const aiStatusText = aiGenerationError
+    ? aiGenerationError
+    : aiAssistant.error
+      ? aiAssistant.error
+      : aiAssistant.progressText
+        ? aiAssistant.progressText
+        : aiCandidateOutdated
+          ? t('templates.ai.status.outdated')
+          : !isEdit && aiAssistant.candidateText
+            ? t('templates.ai.status.unsavedTemplate')
+            : showDiffReview
+              ? t('templates.ai.status.diffReadonly')
+              : aiCandidateMatchesEditor
+                ? t('templates.ai.status.applied')
+                : aiAssistant.candidateText
+                  ? t('templates.ai.status.ready')
+                  : t('templates.ai.status.prompt');
+  const aiStatusColor =
+    aiGenerationError || aiAssistant.error
+      ? isDark
+        ? withAlpha(palette.error.light, 0.96)
+        : palette.error.dark
+      : aiCandidateOutdated
+        ? aiWarningText
+        : showDiffReview
+          ? aiPanelTextPrimary
+          : aiCandidateMatchesEditor
+            ? isDark
+              ? withAlpha(palette.success.light, 0.94)
+              : palette.success.dark
+            : aiPanelTextSecondary;
+  const isAISetupIssue = AI_SETUP_ERROR_MARKERS.some((marker) => aiGenerationError.includes(marker));
+  const aiSetupGuidanceText = isAISetupIssue ? t('templates.ai.setupGuidance') : '';
+  const aiFriendlyGenerationError = isAISetupIssue ? t('templates.ai.setupUnavailable') : aiGenerationError;
+  const aiUsageItems = buildTemplateAIUsageItems(aiAssistant.usage, t);
+
+  const getAISemanticChipSx = (tone = 'neutral') => {
+    if (tone === 'neutral') {
+      return {
+        bgcolor: aiNeutralChipSurface,
+        color: aiPanelTextPrimary,
+        borderColor: aiNeutralChipBorder,
+        '& .MuiChip-label': {
+          fontWeight: 600
+        }
+      };
+    }
+
+    const tonePalette = theme.palette[tone] || palette[tone] || theme.palette.primary;
+    const toneText =
+      tone === 'warning'
+        ? aiWarningText
+        : isDark
+          ? withAlpha(tonePalette.light || tonePalette.main, 0.94)
+          : tonePalette.dark || tonePalette.main;
+
+    return {
+      bgcolor: withAlpha(tonePalette.main, isDark ? 0.18 : 0.09),
+      color: toneText,
+      borderColor: withAlpha(tonePalette.main, isDark ? 0.36 : 0.22),
+      '& .MuiChip-icon': {
+        color: 'inherit'
+      },
+      '& .MuiChip-label': {
+        fontWeight: 600
+      }
+    };
+  };
+
+  const configureTemplateMonacoTheme = (monaco) => {
+    monaco.editor.defineTheme('template-ai-editor', {
+      base: 'vs-dark',
+      inherit: true,
+      rules: [],
+      colors: {
+        'editor.rangeHighlightBackground': '#00000000'
+      }
+    });
+  };
+
+  const renderAIControlPanel = ({ compact = false, minimal = false } = {}) => {
+    if (!isAIEnabled) return null;
+    const dense = compact || minimal;
+
+    return (
+      <Box
+        sx={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          gap: dense ? 0.75 : 1,
+          justifyContent: 'flex-end'
+        }}
+      >
+        <Box
+          sx={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            border: 1,
+            borderColor: 'divider',
+            borderRadius: 1,
+            overflow: 'hidden',
+            bgcolor: alpha(theme.palette.background.default, 0.4),
+            flexShrink: 0
+          }}
+        >
+          <Button
+            variant={isEditMode ? 'contained' : 'text'}
+            size="small"
+            color={isEditMode ? 'primary' : 'inherit'}
+            startIcon={<EditIcon fontSize="small" />}
+            disabled={aiGenerating}
+            onClick={() => setTemplateEditorMode('edit')}
+            sx={{
+              borderRadius: 0,
+              minWidth: dense ? 78 : 86,
+              px: 1.25,
+              ...(isEditMode
+                ? {}
+                : {
+                    color: 'text.secondary'
+                  })
+            }}
+          >
+            {t('templates.ai.mode.edit')}
+          </Button>
+          <Divider orientation="vertical" flexItem />
+          <Button
+            variant={showDiffReview ? 'contained' : 'text'}
+            size="small"
+            color={showDiffReview ? 'primary' : 'inherit'}
+            startIcon={<CompareArrowsIcon />}
+            disabled={!canSwitchToDiffMode || aiGenerating}
+            onClick={() => setTemplateEditorMode('diff')}
+            sx={{
+              borderRadius: 0,
+              minWidth: dense ? 78 : 86,
+              px: 1.25,
+              ...(showDiffReview
+                ? {}
+                : {
+                    color: 'text.secondary'
+                  })
+            }}
+          >
+            {t('templates.ai.mode.diff')}
+          </Button>
+        </Box>
+      </Box>
+    );
+  };
+
+  const renderAIFloatingCommandBar = ({ fullscreen = false } = {}) => {
+    if (!isAIEnabled) return null;
+    return (
+      <Box
+        sx={{
+          position: 'absolute',
+          top: fullscreen ? 18 : 12,
+          left: '50%',
+          transform: 'translateX(-50%)',
+          width: '100%',
+          maxWidth: '100%',
+          zIndex: 6,
+          display: 'flex',
+          justifyContent: 'center'
+        }}
+      >
+        <Box
+          role={aiCommandOpen ? undefined : 'button'}
+          tabIndex={aiCommandOpen ? undefined : 0}
+          aria-label={aiCommandOpen ? undefined : t('templates.ai.aria.expandCommand')}
+          onClick={aiCommandOpen ? undefined : () => setAICommandOpen(true)}
+          onKeyDown={
+            aiCommandOpen
+              ? undefined
+              : (event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    setAICommandOpen(true);
+                  }
+                }
+          }
+          sx={{
+            width: aiCommandOpen
+              ? {
+                  xs: 'calc(100% - 32px)',
+                  sm: fullscreen ? 'min(560px, calc(100% - 84px))' : 'min(500px, calc(100% - 64px))'
+                }
+              : 38,
+            minHeight: 38,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 0.75,
+            px: aiCommandOpen ? 0.75 : 0,
+            py: aiCommandOpen ? 0.5 : 0,
+            justifyContent: aiCommandOpen ? 'flex-start' : 'center',
+            borderRadius: 999,
+            border: 1,
+            borderColor: alpha(aiPromptPrimaryLight, aiCommandOpen ? 0.34 : 0.42),
+            bgcolor: alpha(aiCommandOpen ? aiPromptSurface : aiPromptCollapsedSurface, aiCommandOpen ? 0.82 : 0.72),
+            boxShadow: `0 ${aiCommandOpen ? 10 : 8}px ${aiCommandOpen ? 26 : 20}px ${alpha(theme.palette.common.black, aiCommandOpen ? 0.24 : 0.18)}`,
+            backdropFilter: 'blur(10px)',
+            overflow: 'hidden',
+            cursor: aiCommandOpen ? 'default' : 'pointer',
+            transition: theme.transitions.create(
+              ['width', 'min-height', 'padding', 'border-radius', 'background-color', 'border-color', 'box-shadow'],
+              {
+                duration: theme.transitions.duration.shorter,
+                easing: theme.transitions.easing.easeOut
+              }
+            ),
+            '&:hover': aiCommandOpen
+              ? undefined
+              : {
+                  borderColor: alpha(aiPromptPrimaryMain, 0.62),
+                  bgcolor: alpha(aiPromptSurface, 0.9),
+                  boxShadow: `0 12px 28px ${alpha(aiPromptPrimaryMain, 0.18)}`
+                },
+            '&:focus-visible': {
+              outline: `2px solid ${alpha(aiPromptPrimaryLight, 0.68)}`,
+              outlineOffset: 3
+            }
+          }}
+        >
+          <IconButton
+            component={aiCommandOpen ? 'button' : 'div'}
+            size="small"
+            aria-label={aiCommandOpen ? t('templates.ai.aria.collapseCommand') : undefined}
+            onClick={
+              aiCommandOpen
+                ? (e) => {
+                    e.stopPropagation();
+                    setAICommandOpen(false);
+                  }
+                : undefined
+            }
+            disabled={aiCommandOpen && aiPreviewBusy}
+            disableRipple={!aiCommandOpen}
+            sx={{
+              width: aiCommandOpen ? 32 : 36,
+              height: aiCommandOpen ? 32 : 36,
+              flexShrink: 0,
+              color: aiCommandOpen ? alpha(theme.palette.common.white, aiPreviewBusy ? 0.48 : 0.94) : alpha(aiPromptPrimaryLight, 0.95),
+              transition: theme.transitions.create(['width', 'height', 'color', 'background-color']),
+              '&:hover': aiCommandOpen
+                ? {
+                    bgcolor: alpha(theme.palette.common.white, 0.08)
+                  }
+                : {
+                    bgcolor: 'transparent'
+                  },
+              '&.Mui-disabled': {
+                color: alpha(theme.palette.common.white, 0.42)
+              }
+            }}
+          >
+            <AutoAwesomeIcon fontSize="small" />
+          </IconButton>
+          {aiCommandOpen ? (
+            <>
+              <TextField
+                fullWidth
+                size="small"
+                value={aiPrompt}
+                onChange={(e) => setAIPrompt(e.target.value)}
+                disabled={aiPreviewBusy}
+                placeholder={t('templates.ai.promptPlaceholder')}
+                slotProps={{ htmlInput: { 'aria-label': t('templates.ai.promptAria') } }}
+                sx={{
+                  minWidth: 0,
+                  '& .MuiOutlinedInput-root': {
+                    bgcolor: 'transparent',
+                    color: alpha(theme.palette.common.white, 0.96),
+                    height: 34,
+                    pr: 0.25,
+                    borderRadius: 999,
+                    '&.Mui-disabled': {
+                      color: alpha(theme.palette.common.white, 0.72),
+                      WebkitTextFillColor: alpha(theme.palette.common.white, 0.72)
+                    },
+                    '& fieldset': {
+                      borderColor: 'transparent'
+                    },
+                    '&:hover fieldset': {
+                      borderColor: 'transparent'
+                    },
+                    '&.Mui-focused fieldset': {
+                      borderColor: alpha(theme.palette.primary.main, 0.6)
+                    }
+                  },
+                  '& .MuiInputBase-input': {
+                    color: alpha(theme.palette.common.white, 0.96)
+                  },
+                  '& .MuiInputBase-input.Mui-disabled': {
+                    WebkitTextFillColor: alpha(theme.palette.common.white, 0.72)
+                  },
+                  '& .MuiInputBase-input::placeholder': {
+                    color: alpha(theme.palette.common.white, 0.64),
+                    opacity: 1
+                  }
+                }}
+              />
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={aiGenerating ? <CircularProgress size={16} sx={{ color: 'common.white' }} /> : <AutoAwesomeIcon />}
+                disabled={aiPreviewBusy}
+                onClick={handleGenerateWithAI}
+                sx={{
+                  flexShrink: 0,
+                  minWidth: 92,
+                  borderRadius: 999,
+                  color: 'common.white',
+                  boxShadow: 'none',
+                  '&.Mui-disabled': {
+                    color: 'common.white',
+                    bgcolor: alpha(theme.palette.primary.main, 0.5)
+                  }
+                }}
+              >
+                {aiGenerating ? t('templates.ai.generating') : t('templates.ai.generate')}
+              </Button>
+              <IconButton
+                size="small"
+                aria-label={t('templates.ai.aria.acceptPreview')}
+                disabled={!canAcceptAIPreview || aiPreviewBusy}
+                onClick={handleAcceptAIPreview}
+                sx={{
+                  flexShrink: 0,
+                  borderRadius: 1,
+                  bgcolor: alpha(theme.palette.common.white, 0.06),
+                  color:
+                    canAcceptAIPreview && !aiPreviewBusy
+                      ? alpha(theme.palette.common.white, 0.96)
+                      : alpha(theme.palette.common.white, 0.42),
+                  '&.Mui-disabled': {
+                    bgcolor: alpha(theme.palette.common.white, 0.04),
+                    color: alpha(theme.palette.common.white, 0.34)
+                  }
+                }}
+              >
+                <CheckIcon fontSize="small" />
+              </IconButton>
+              <IconButton
+                size="small"
+                aria-label={t('templates.ai.aria.discardPreview')}
+                disabled={!canDiscardAIPreview || aiPreviewBusy}
+                onClick={handleDiscardAIPreview}
+                sx={{
+                  flexShrink: 0,
+                  borderRadius: 1,
+                  bgcolor: alpha(theme.palette.common.white, 0.06),
+                  color:
+                    canDiscardAIPreview && !aiPreviewBusy
+                      ? alpha(theme.palette.common.white, 0.92)
+                      : alpha(theme.palette.common.white, 0.4),
+                  '&.Mui-disabled': {
+                    bgcolor: alpha(theme.palette.common.white, 0.04),
+                    color: alpha(theme.palette.common.white, 0.32)
+                  }
+                }}
+              >
+                <UndoIcon fontSize="small" />
+              </IconButton>
+              {isAISetupIssue ? (
+                <Button
+                  size="small"
+                  variant="text"
+                  disabled={aiPreviewBusy}
+                  onClick={() => navigate('/system/settings', { state: { targetTab: 'ai' } })}
+                  sx={{
+                    flexShrink: 0,
+                    minWidth: 'auto',
+                    px: 0.75,
+                    color: alpha(theme.palette.common.white, 0.92),
+                    textDecoration: 'underline',
+                    textUnderlineOffset: '2px',
+                    '&.Mui-disabled': {
+                      color: alpha(theme.palette.common.white, 0.5)
+                    }
+                  }}
+                >
+                  {t('templates.ai.goSettings')}
+                </Button>
+              ) : null}
+            </>
+          ) : null}
+        </Box>
+      </Box>
+    );
+  };
+
+  const renderTemplateEditor = ({ fullscreen = false } = {}) => (
+    <Box
+      className="template-ai-editor-shell"
+      sx={{
+        position: 'relative',
+        display: 'flex',
+        flexDirection: 'column',
+        minHeight: fullscreen ? 0 : 350,
+        flex: fullscreen ? 1 : '0 0 auto',
+        ...(fullscreen
+          ? {
+              height: '100%',
+              borderRadius: 1,
+              overflow: 'hidden'
+            }
+          : null),
+        '& .monaco-editor, & .monaco-diff-editor': {
+          '--vscode-editorGutter-addedBackground': theme.palette.success.main,
+          '--vscode-editorGutter-modifiedBackground': theme.palette.primary.main,
+          '--vscode-editorGutter-deletedBackground': theme.palette.warning.main,
+          '--vscode-diffEditor-insertedTextBackground': alpha(theme.palette.success.main, 0.2),
+          '--vscode-diffEditor-removedTextBackground': alpha(theme.palette.warning.main, 0.16),
+          '--vscode-diffEditor-insertedLineBackground': alpha(theme.palette.success.main, 0.08),
+          '--vscode-diffEditor-removedLineBackground': alpha(theme.palette.warning.main, 0.08)
+        }
+      }}
+    >
+      {renderAIFloatingCommandBar({ fullscreen })}
+      {converting && (
+        <Box
+          sx={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            bgcolor: 'rgba(0,0,0,0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 10,
+            borderRadius: 1
+          }}
+        >
+          <Stack alignItems="center" spacing={1}>
+            <CircularProgress />
+            <Typography color="white">{t('templates.messages.converting')}</Typography>
+          </Stack>
+        </Box>
+      )}
+      {showDiffReview ? (
+        <DiffEditor
+          height={fullscreen ? '100%' : '350px'}
+          language={formData.category === 'surge' ? 'ini' : 'yaml'}
+          original={aiAssistant.sourceText || ''}
+          modified={aiAssistant.candidateText || ''}
+          theme="template-ai-editor"
+          beforeMount={configureTemplateMonacoTheme}
+          options={{
+            renderSideBySide: true,
+            readOnly: true,
+            originalEditable: false,
+            minimap: { enabled: !matchDownMd },
+            fontSize: matchDownMd ? 12 : 14,
+            wordWrap: 'on',
+            contextmenu: true,
+            automaticLayout: true,
+            scrollBeyondLastLine: false,
+            lineNumbers: matchDownMd ? 'off' : 'on',
+            renderOverviewRuler: !matchDownMd,
+            diffWordWrap: 'on'
+          }}
+        />
+      ) : (
+        <Editor
+          height={fullscreen ? '100%' : '350px'}
+          language={formData.category === 'surge' ? 'ini' : 'yaml'}
+          value={formData.text}
+          onChange={(value) => {
+            setFormData({ ...formData, text: value || '' });
+          }}
+          theme="template-ai-editor"
+          beforeMount={configureTemplateMonacoTheme}
+          options={{
+            minimap: { enabled: !matchDownMd },
+            fontSize: matchDownMd ? 12 : 14,
+            readOnly: converting,
+            wordWrap: 'on',
+            contextmenu: true,
+            selectOnLineNumbers: true,
+            automaticLayout: true,
+            scrollBeyondLastLine: false,
+            lineNumbers: matchDownMd ? 'off' : 'on'
+          }}
+        />
+      )}
+      {isAIEnabled && aiCommandOpen ? (
+        <Box
+          sx={{
+            position: 'absolute',
+            right: { xs: 24, sm: 32 },
+            bottom: 16,
+            maxWidth: { xs: 'calc(100% - 48px)', sm: 380 },
+            px: 1.25,
+            py: 0.75,
+            borderRadius: 1,
+            bgcolor: aiPanelSurface,
+            backgroundImage: isDark ? `linear-gradient(180deg, ${alpha(theme.palette.common.white, 0.035)} 0%, transparent 100%)` : 'none',
+            backdropFilter: 'blur(8px)',
+            border: 1,
+            borderColor: aiPanelBorder,
+            boxShadow: aiPanelSoftShadow,
+            zIndex: 5,
+            pointerEvents: 'auto'
+          }}
+        >
+          <Stack spacing={0.75} sx={{ minWidth: 0 }}>
+            <Typography
+              variant="caption"
+              sx={{
+                color: aiCandidateMatchesEditor ? aiPanelTextPrimary : isAISetupIssue ? aiPanelTextPrimary : aiStatusColor,
+                display: 'block',
+                lineHeight: 1.45,
+                textShadow: 'none'
+              }}
+            >
+              {isAISetupIssue ? aiFriendlyGenerationError : aiStatusText}
+            </Typography>
+            {isAISetupIssue ? (
+              <Typography variant="caption" sx={{ color: aiPanelTextSecondary, display: 'block', lineHeight: 1.4 }}>
+                {aiSetupGuidanceText}
+              </Typography>
+            ) : null}
+            {aiUsageItems.length > 0 ? (
+              <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+                {aiUsageItems.map((item) => (
+                  <Chip
+                    key={item.key}
+                    size="small"
+                    variant="outlined"
+                    label={`${item.label} ${item.value}`}
+                    sx={{
+                      ...getAISemanticChipSx('primary'),
+                      '& .MuiChip-label': {
+                        px: 1,
+                        fontWeight: 500
+                      }
+                    }}
+                  />
+                ))}
+              </Stack>
+            ) : null}
+          </Stack>
+        </Box>
+      ) : !isAIEnabled ? (
+        <Box
+          sx={{
+            position: 'absolute',
+            right: { xs: 14, sm: 18 },
+            bottom: 16,
+            zIndex: 5,
+            display: 'flex',
+            justifyContent: 'flex-end',
+            maxWidth: { xs: 'calc(100% - 28px)', sm: 320 },
+            pointerEvents: 'auto'
+          }}
+        >
+          <Box
+            component="button"
+            type="button"
+            aria-label={aiDisabledPromptOpen ? t('templates.ai.aria.collapseDisabledPrompt') : t('templates.ai.aria.viewDisabledPrompt')}
+            onClick={() => setAIDisabledPromptOpen((open) => !open)}
+            sx={{
+              width: aiDisabledPromptOpen ? { xs: 248, sm: 292 } : 38,
+              minHeight: aiCommandOpen ? 44 : 38,
+              p: 0,
+              border: 1,
+              borderColor: alpha(aiPromptPrimaryLight, aiDisabledPromptOpen ? 0.46 : 0.34),
+              borderRadius: 999,
+              bgcolor: aiDisabledPromptOpen ? alpha(aiPromptSurface, 0.86) : alpha(aiPromptCollapsedSurface, 0.68),
+              color: alpha(theme.palette.common.white, 0.92),
+              backdropFilter: 'blur(10px)',
+              boxShadow: `0 10px 24px ${alpha(theme.palette.common.black, aiDisabledPromptOpen ? 0.28 : 0.18)}`,
+              cursor: 'pointer',
+              overflow: 'hidden',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: aiDisabledPromptOpen ? 'flex-start' : 'center',
+              transition: theme.transitions.create(['width', 'background-color', 'border-color', 'box-shadow', 'transform'], {
+                duration: theme.transitions.duration.shorter,
+                easing: theme.transitions.easing.easeOut
+              }),
+              animation: aiDisabledPromptOpen ? 'none' : 'template-ai-disabled-pulse 2.8s ease-in-out infinite',
+              '@keyframes template-ai-disabled-pulse': {
+                '0%, 100%': { transform: 'scale(1)' },
+                '50%': { transform: 'scale(1.06)' }
+              },
+              '&:hover': {
+                borderColor: alpha(aiPromptPrimaryMain, 0.58),
+                bgcolor: alpha(aiPromptSurface, 0.9),
+                boxShadow: `0 12px 28px ${alpha(aiPromptPrimaryMain, 0.18)}`
+              }
+            }}
+          >
+            <Box
+              sx={{
+                width: 36,
+                height: 36,
+                borderRadius: '50%',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+                color: alpha(aiPromptPrimaryLight, 0.95)
+              }}
+            >
+              <AutoAwesomeIcon fontSize="small" />
+            </Box>
+            <Stack
+              direction="row"
+              spacing={1}
+              alignItems="center"
+              sx={{
+                minWidth: 0,
+                pr: 1.25,
+                opacity: aiDisabledPromptOpen ? 1 : 0,
+                transform: aiDisabledPromptOpen ? 'translateX(0)' : 'translateX(8px)',
+                transition: theme.transitions.create(['opacity', 'transform'], { duration: theme.transitions.duration.shorter }),
+                whiteSpace: 'nowrap'
+              }}
+            >
+              <Typography variant="caption" sx={{ color: alpha(theme.palette.common.white, 0.82) }}>
+                {t('templates.ai.disabled')}
+              </Typography>
+              <Typography
+                component="span"
+                variant="caption"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  navigate('/system/settings', { state: { targetTab: 'ai' } });
+                }}
+                sx={{ color: aiPromptPrimaryLight, fontWeight: 700, textDecoration: 'underline', textUnderlineOffset: 3 }}
+              >
+                {t('templates.ai.goSettingsShort')}
+              </Typography>
+            </Stack>
+          </Box>
+        </Box>
+      ) : null}
+    </Box>
+  );
+
+  const getCategoryChipSx = (category) => {
+    const semanticColor = category === 'surge' ? palette.secondary : palette.primary;
+
+    return {
+      bgcolor: withAlpha(semanticColor.main, isDark ? 0.12 : 0.08),
+      color: isDark ? semanticColor.main : semanticColor.dark,
+      borderColor: withAlpha(semanticColor.main, isDark ? 0.28 : 0.22),
+      borderWidth: 1,
+      borderStyle: 'solid',
+      fontWeight: 600
+    };
+  };
+
   return (
     <MainCard
-      title="模板管理"
+      title={t('templates.title')}
       secondary={
         matchDownMd ? (
           <Button variant="contained" size="small" startIcon={<AddIcon />} onClick={handleAdd}>
-            添加
+            {t('common.add')}
           </Button>
         ) : (
           <Stack direction="row" spacing={1}>
             <Button variant="outlined" size="small" onClick={() => handleOpenBaseTemplate('clash')}>
-              Clash 基础模板
+              {t('templates.baseTemplate.button', { category: 'Clash' })}
             </Button>
             <Button variant="outlined" size="small" color="secondary" onClick={() => handleOpenBaseTemplate('surge')}>
-              Surge 基础模板
+              {t('templates.baseTemplate.button', { category: 'Surge' })}
             </Button>
             <Button variant="contained" startIcon={<AddIcon />} onClick={handleAdd}>
-              添加模板
+              {t('templates.actions.addTemplate')}
             </Button>
-            <IconButton onClick={() => fetchTemplates(page, rowsPerPage)} disabled={loading}>
+            <IconButton onClick={handleRefresh} disabled={loading}>
               <RefreshIcon
                 sx={
                   loading
                     ? {
-                      animation: 'spin 1s linear infinite',
-                      '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } }
-                    }
+                        animation: 'spin 1s linear infinite',
+                        '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } }
+                      }
                     : {}
                 }
               />
@@ -312,14 +1644,14 @@ export default function TemplateList() {
     >
       {matchDownMd && (
         <Stack direction="row" justifyContent="flex-end" sx={{ mb: 2 }}>
-          <IconButton onClick={() => fetchTemplates(page, rowsPerPage)} disabled={loading} size="small">
+          <IconButton onClick={handleRefresh} disabled={loading} size="small">
             <RefreshIcon
               sx={
                 loading
                   ? {
-                    animation: 'spin 1s linear infinite',
-                    '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } }
-                  }
+                      animation: 'spin 1s linear infinite',
+                      '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } }
+                    }
                   : {}
               }
             />
@@ -358,11 +1690,11 @@ export default function TemplateList() {
           <Table size="small">
             <TableHead>
               <TableRow>
-                <TableCell>文件名</TableCell>
-                <TableCell>类别</TableCell>
-                <TableCell>规则源</TableCell>
-                <TableCell>创建时间</TableCell>
-                <TableCell align="right">操作</TableCell>
+                <TableCell>{t('templates.fields.filename')}</TableCell>
+                <TableCell>{t('templates.fields.category')}</TableCell>
+                <TableCell>{t('templates.fields.ruleSource')}</TableCell>
+                <TableCell>{t('templates.fields.createdAt')}</TableCell>
+                <TableCell align="right">{t('templates.fields.actions')}</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -374,8 +1706,8 @@ export default function TemplateList() {
                   <TableCell>
                     <Chip
                       label={template.category === 'surge' ? 'Surge' : 'Clash'}
-                      color={template.category === 'surge' ? 'secondary' : 'primary'}
                       size="small"
+                      sx={getCategoryChipSx(template.category)}
                     />
                   </TableCell>
                   <TableCell>
@@ -403,7 +1735,7 @@ export default function TemplateList() {
         page={page}
         pageSize={rowsPerPage}
         totalItems={totalItems}
-        onPageChange={(e, newPage) => {
+        onPageChange={(_, newPage) => {
           setPage(newPage);
           fetchTemplates(newPage, rowsPerPage);
         }}
@@ -417,274 +1749,280 @@ export default function TemplateList() {
         pageSizeOptions={[10, 20, 50, 100]}
       />
 
-      {/* 添加/编辑对话框 */}
-      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="lg" fullWidth>
-        <DialogTitle>{isEdit ? '编辑模板' : '添加模板'}</DialogTitle>
-        <DialogContent>
-          <Stack spacing={2} sx={{ mt: 1 }}>
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-              <TextField
-                fullWidth
-                label="文件名"
-                value={formData.filename}
-                onChange={(e) => setFormData({ ...formData, filename: e.target.value })}
-                placeholder="例如: clash.yaml"
-              />
-              <FormControl sx={{ minWidth: 120 }}>
-                <InputLabel>类别</InputLabel>
-                <Select value={formData.category} label="类别" onChange={(e) => setFormData({ ...formData, category: e.target.value })}>
-                  <MenuItem value="clash">Clash</MenuItem>
-                  <MenuItem value="surge">Surge</MenuItem>
-                </Select>
-              </FormControl>
+      <Dialog
+        open={dialogOpen}
+        onClose={handleCloseDialog}
+        maxWidth={editorFullscreen ? false : 'lg'}
+        fullWidth
+        fullScreen={editorFullscreen}
+        slotProps={{
+          paper: {
+            sx: editorFullscreen
+              ? {
+                  display: 'flex',
+                  flexDirection: 'column',
+                  overflow: 'hidden',
+                  height: '100vh',
+                  maxHeight: '100vh',
+                  m: 0
+                }
+              : undefined
+          }
+        }}
+      >
+        <DialogTitle
+          sx={
+            editorFullscreen
+              ? {
+                  flexShrink: 0,
+                  pb: 1,
+                  display: 'flex',
+                  flexDirection: { xs: 'column', md: 'row' },
+                  alignItems: { xs: 'stretch', md: 'center' },
+                  justifyContent: 'space-between',
+                  gap: 1.5
+                }
+              : undefined
+          }
+        >
+          <Stack spacing={0.5}>
+            <Typography variant="h4">{isEdit ? t('templates.dialog.editTitle') : t('templates.dialog.addTitle')}</Typography>
+          </Stack>
+          {editorFullscreen && (
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap justifyContent="flex-end" alignItems="center">
+              {renderAIControlPanel({ compact: true })}
+              <Button variant="outlined" size="small" startIcon={<FullscreenExitIcon />} onClick={() => setEditorFullscreen(false)}>
+                {t('templates.actions.exitFullscreen')}
+              </Button>
             </Stack>
-            <Autocomplete
-              freeSolo
-              options={aclPresets}
-              getOptionLabel={(option) => {
-                if (typeof option === 'string') return option;
-                return option.label || option.url || '';
-              }}
-              isOptionEqualToValue={(option, value) => {
-                // 如果 value 是字符串，比较 URL
-                if (typeof value === 'string') {
-                  return option.url === value;
+          )}
+        </DialogTitle>
+        <DialogContent
+          sx={
+            editorFullscreen
+              ? {
+                  display: 'flex',
+                  flexDirection: 'column',
+                  flex: 1,
+                  minHeight: 0,
+                  overflow: 'hidden',
+                  overflowX: 'hidden',
+                  pt: 1,
+                  pb: 1.5
                 }
-                // 如果 value 是对象，比较 URL
-                return option.url === value?.url;
-              }}
-              value={
-                // 如果 ruleSource 匹配某个预设的 URL，返回该预设对象
-                aclPresets.find((preset) => preset.url === formData.ruleSource) || formData.ruleSource
-              }
-              onChange={(event, newValue) => {
-                if (typeof newValue === 'string') {
-                  setFormData({ ...formData, ruleSource: newValue });
-                } else if (newValue && newValue.url) {
-                  setFormData({ ...formData, ruleSource: newValue.url });
-                } else {
-                  setFormData({ ...formData, ruleSource: '' });
-                }
-              }}
-              onInputChange={(event, newInputValue) => {
-                setFormData({ ...formData, ruleSource: newInputValue });
-              }}
-              renderInput={(params) => (
-                <TextField
-                  {...params}
-                  label="远程规则地址"
-                  placeholder="输入 URL 或选择 ACL4SSR 预设"
-                  helperText="可填写远程 ACL 规则配置地址，生成订阅时会动态加载规则"
-                />
-              )}
-              renderOption={(props, option) => (
-                <li {...props} key={option.name}>
-                  <Stack>
-                    <Typography variant="body2">{option.label}</Typography>
-                    <Typography variant="caption" color="textSecondary" sx={{ fontSize: '0.7rem' }}>
-                      {option.url}
-                    </Typography>
-                  </Stack>
-                </li>
-              )}
-            />
-            <FormControlLabel
-              control={
-                <Switch
-                  checked={useProxy}
-                  onChange={(e) => {
-                    const checked = e.target.checked;
-                    setUseProxy(checked);
-                    if (checked) {
-                      fetchProxyNodes();
+              : undefined
+          }
+        >
+          <Stack
+            spacing={1.5}
+            sx={
+              editorFullscreen
+                ? {
+                    flex: 1,
+                    minHeight: 0
+                  }
+                : { mt: 0.5 }
+            }
+          >
+            {!editorFullscreen && (
+              <>
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+                  <TextField
+                    fullWidth
+                    label={t('templates.fields.filename')}
+                    value={formData.filename}
+                    onChange={(e) => setFormData({ ...formData, filename: e.target.value })}
+                    placeholder={t('templates.placeholders.filename')}
+                    sx={outlinedLabelFixSx}
+                  />
+                  <FormControl sx={{ minWidth: 120, ...outlinedLabelFixSx }}>
+                    <InputLabel>{t('templates.fields.category')}</InputLabel>
+                    <Select
+                      value={formData.category}
+                      label={t('templates.fields.category')}
+                      onChange={(e) => setFormData({ ...formData, category: e.target.value })}
+                    >
+                      <MenuItem value="clash">Clash</MenuItem>
+                      <MenuItem value="surge">Surge</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Stack>
+                <Autocomplete
+                  freeSolo
+                  options={aclPresets}
+                  sx={outlinedLabelFixSx}
+                  getOptionLabel={(option) => {
+                    if (typeof option === 'string') return option;
+                    return option.label || option.url || '';
+                  }}
+                  isOptionEqualToValue={(option, value) => {
+                    if (typeof value === 'string') {
+                      return option.url === value;
+                    }
+                    return option.url === value?.url;
+                  }}
+                  value={aclPresets.find((preset) => preset.url === formData.ruleSource) || formData.ruleSource}
+                  onChange={(_, newValue) => {
+                    if (typeof newValue === 'string') {
+                      setFormData({ ...formData, ruleSource: newValue });
+                    } else if (newValue && newValue.url) {
+                      setFormData({ ...formData, ruleSource: newValue.url });
+                    } else {
+                      setFormData({ ...formData, ruleSource: '' });
                     }
                   }}
+                  onInputChange={(_, newInputValue) => {
+                    setFormData({ ...formData, ruleSource: newInputValue });
+                  }}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label={t('templates.fields.remoteRuleSource')}
+                      placeholder={t('templates.placeholders.ruleSource')}
+                      helperText={t('templates.helpers.ruleSource')}
+                    />
+                  )}
+                  renderOption={(props, option) => (
+                    <li {...props} key={option.name}>
+                      <Stack>
+                        <Typography variant="body2">{option.label}</Typography>
+                        <Typography variant="caption" color="textSecondary" sx={{ fontSize: '0.7rem' }}>
+                          {option.url}
+                        </Typography>
+                      </Stack>
+                    </li>
+                  )}
                 />
-              }
-              label="使用代理下载远程规则"
-            />
-            {useProxy && (
-              <Box>
-                <SearchableNodeSelect
-                  nodes={proxyNodeOptions}
-                  loading={loadingProxyNodes}
-                  value={proxyNodeOptions.find((n) => n.Link === proxyLink) || (proxyLink ? { Link: proxyLink, Name: '', ID: 0 } : null)}
-                  onChange={(newValue) => setProxyLink(newValue?.Link || '')}
-                  displayField="Name"
-                  valueField="Link"
-                  label="选择代理节点"
-                  placeholder="留空则自动选择最佳节点"
-                  helperText="如果未选择具体代理，系统将自动选择延迟最低且速度最快的节点"
-                  freeSolo={true}
-                  limit={50}
-                />
-              </Box>
-            )}
-            <FormControlLabel
-              control={
-                <Switch
-                  checked={formData.enableIncludeAll}
-                  onChange={(e) => setFormData({ ...formData, enableIncludeAll: e.target.checked })}
-                />
-              }
-              label="使用 Include-All 模式"
-            />
-            <Typography variant="caption" color="textSecondary" component="div" sx={{ ml: 6, mt: -0.5, lineHeight: 1.6 }}>
-              • 开启：配置更精简，使用客户端 include-all 自动匹配节点，不遵循系统排序
-            </Typography>
-            <Typography variant="caption" color="textSecondary" component="div" sx={{ ml: 6, lineHeight: 1.6 }}>
-              • 关闭（推荐）：由系统按顺序插入节点，遵循系统排序和过滤规则
-            </Typography>
-            <Stack direction="row" spacing={1}>
-              <Button
-                variant="outlined"
-                startIcon={converting ? <CircularProgress size={18} /> : <TransformIcon />}
-                disabled={!formData.ruleSource || converting}
-                onClick={async () => {
-                  setConverting(true);
-                  try {
-                    const res = await convertRules({
-                      ruleSource: formData.ruleSource,
-                      category: formData.category,
-                      expand: false,
-                      template: formData.text,
-                      useProxy: useProxy,
-                      proxyLink: proxyLink,
-                      enableIncludeAll: formData.enableIncludeAll
-                    });
-                    if (res.code === 200 && res.data && res.data.content) {
-                      setFormData({ ...formData, text: res.data.content });
-                      showMessage('规则生成/转换成功');
-                    } else {
-                      setErrorDialog({
-                        open: true,
-                        title: '规则生成/转换失败',
-                        message: res.msg || '生成/转换过程中发生错误'
-                      });
-                    }
-                  } catch (error) {
-                    console.error(error);
-                    const errorMsg = error.response?.data?.msg || error.message || '规则生成/转换失败';
-                    setErrorDialog({
-                      open: true,
-                      title: '规则生成/转换失败',
-                      message: errorMsg
-                    });
-                  } finally {
-                    setConverting(false);
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={useProxy}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setUseProxy(checked);
+                        if (checked) {
+                          fetchProxyNodes();
+                        }
+                      }}
+                    />
                   }
-                }}
-              >
-                规则生成/转换
-              </Button>
-              <Button
-                variant="outlined"
-                startIcon={converting ? <CircularProgress size={18} /> : <UnfoldMoreIcon />}
-                disabled={!formData.ruleSource || converting}
-                onClick={async () => {
-                  setConverting(true);
-                  try {
-                    const res = await convertRules({
-                      ruleSource: formData.ruleSource,
-                      category: formData.category,
-                      expand: true,
-                      template: formData.text,
-                      useProxy: useProxy,
-                      proxyLink: proxyLink,
-                      enableIncludeAll: formData.enableIncludeAll
-                    });
-                    if (res.code === 200 && res.data && res.data.content) {
-                      setFormData({ ...formData, text: res.data.content });
-                      showMessage('规则生成/转换并展开成功');
-                    } else {
-                      setErrorDialog({
-                        open: true,
-                        title: '规则生成/转换失败',
-                        message: res.msg || '转换过程中发生错误'
-                      });
-                    }
-                  } catch (error) {
-                    console.error(error);
-                    const errorMsg = error.response?.data?.msg || error.message || '规则生成/转换失败';
-                    setErrorDialog({
-                      open: true,
-                      title: '规则生成/转换失败',
-                      message: errorMsg
-                    });
-                  } finally {
-                    setConverting(false);
+                  label={t('templates.fields.useProxy')}
+                />
+                {useProxy && (
+                  <Box>
+                    <SearchableNodeSelect
+                      nodes={proxyNodeOptions}
+                      loading={loadingProxyNodes}
+                      value={
+                        proxyNodeOptions.find((n) => n.Link === proxyLink) || (proxyLink ? { Link: proxyLink, Name: '', ID: 0 } : null)
+                      }
+                      onChange={(newValue) => setProxyLink(typeof newValue === 'string' ? newValue : newValue?.Link || '')}
+                      displayField="Name"
+                      valueField="Link"
+                      label={t('templates.fields.proxyNode')}
+                      placeholder={t('templates.placeholders.proxyNode')}
+                      helperText={t('templates.helpers.proxyNode')}
+                      freeSolo={true}
+                      limit={50}
+                    />
+                  </Box>
+                )}
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={formData.enableIncludeAll}
+                      onChange={(e) => setFormData({ ...formData, enableIncludeAll: e.target.checked })}
+                    />
                   }
-                }}
-              >
-                规则生成/转换（远程规则展开模式）
-              </Button>
-              <Button
-                variant="outlined"
-                color="error"
-                disabled={!formData.text || converting}
-                onClick={() => {
-                  openConfirm('清空内容', '确定要清空编辑器中的所有内容吗？', () => {
-                    setFormData({ ...formData, text: '' });
-                    showMessage('已清空内容');
-                  });
-                }}
-              >
-                清空内容
-              </Button>
-            </Stack>
-            <Box sx={{ position: 'relative' }}>
-              {converting && (
+                  label={t('templates.fields.includeAll')}
+                />
+                <Typography variant="caption" color="textSecondary" component="div" sx={{ ml: 6, mt: -0.5, lineHeight: 1.6 }}>
+                  {t('templates.helpers.includeAllOn')}
+                </Typography>
+                <Typography variant="caption" color="textSecondary" component="div" sx={{ ml: 6, lineHeight: 1.6 }}>
+                  {t('templates.helpers.includeAllOff')}
+                </Typography>
+                <Stack direction="row" spacing={1}>
+                  <Button
+                    variant="outlined"
+                    startIcon={converting ? <CircularProgress size={18} /> : <TransformIcon />}
+                    disabled={!formData.ruleSource || converting}
+                    onClick={() => handleConvertTemplate(false)}
+                  >
+                    {t('templates.actions.convertRules')}
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    startIcon={converting ? <CircularProgress size={18} /> : <UnfoldMoreIcon />}
+                    disabled={!formData.ruleSource || converting}
+                    onClick={() => handleConvertTemplate(true)}
+                  >
+                    {t('templates.actions.convertRulesExpand')}
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    color="error"
+                    disabled={!formData.text || converting}
+                    onClick={() => {
+                      openConfirm(t('templates.confirm.clearTitle'), t('templates.confirm.clearContent'), () => {
+                        setFormData({ ...formData, text: '' });
+                        showMessage(t('templates.messages.cleared'));
+                      });
+                    }}
+                  >
+                    {t('templates.actions.clearContent')}
+                  </Button>
+                </Stack>
                 <Box
                   sx={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    bgcolor: 'rgba(0,0,0,0.5)',
+                    ...aiWorkspacePanelSx,
+                    p: { xs: 1, md: 1.25 },
                     display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    zIndex: 10,
-                    borderRadius: 1
+                    flexDirection: { xs: 'column', sm: 'row' },
+                    alignItems: { xs: 'stretch', sm: 'center' },
+                    justifyContent: 'flex-end',
+                    gap: 1.5
                   }}
                 >
-                  <Stack alignItems="center" spacing={1}>
-                    <CircularProgress />
-                    <Typography color="white">正在转换规则...</Typography>
-                  </Stack>
+                  {renderAIControlPanel({ minimal: true })}
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    startIcon={editorFullscreen ? <FullscreenExitIcon /> : <FullscreenIcon />}
+                    onClick={() => setEditorFullscreen((prev) => !prev)}
+                    sx={{ flexShrink: 0 }}
+                  >
+                    {editorFullscreen ? t('templates.actions.exitFullscreen') : t('templates.actions.fullscreen')}
+                  </Button>
                 </Box>
-              )}
-              <Editor
-                height="350px"
-                language={formData.category === 'surge' ? 'ini' : 'yaml'}
-                value={formData.text}
-                onChange={(value) => setFormData({ ...formData, text: value || '' })}
-                theme="vs-dark"
-                options={{
-                  minimap: { enabled: !matchDownMd },
-                  fontSize: matchDownMd ? 12 : 14,
-                  readOnly: converting,
-                  wordWrap: 'on',
-                  contextmenu: true,
-                  selectOnLineNumbers: true,
-                  automaticLayout: true,
-                  scrollBeyondLastLine: false,
-                  lineNumbers: matchDownMd ? 'off' : 'on'
-                }}
-              />
+              </>
+            )}
+            <Box
+              sx={
+                editorFullscreen
+                  ? {
+                      flex: 1,
+                      minHeight: 0,
+                      display: 'flex',
+                      flexDirection: 'column'
+                    }
+                  : undefined
+              }
+            >
+              {renderTemplateEditor({ fullscreen: editorFullscreen })}
             </Box>
           </Stack>
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setDialogOpen(false)}>取消</Button>
-          <Button variant="contained" onClick={handleSubmit}>
-            确定
-          </Button>
-        </DialogActions>
+        {!editorFullscreen && (
+          <DialogActions>
+            <Button onClick={handleCloseDialog}>{t('common.cancel')}</Button>
+            <Button variant="contained" disabled={templateEditorMode === 'diff'} onClick={handleSubmit}>
+              {t('common.confirm')}
+            </Button>
+          </DialogActions>
+        )}
       </Dialog>
 
-      {/* 提示消息 */}
       <Snackbar
         open={snackbar.open}
         autoHideDuration={3000}
@@ -694,7 +2032,6 @@ export default function TemplateList() {
         <Alert severity={snackbar.severity}>{snackbar.message}</Alert>
       </Snackbar>
 
-      {/* 确认对话框 */}
       <Dialog
         open={confirmOpen}
         onClose={handleConfirmClose}
@@ -703,17 +2040,18 @@ export default function TemplateList() {
       >
         <DialogTitle id="alert-dialog-title">{confirmInfo.title}</DialogTitle>
         <DialogContent>
-          <DialogContentText id="alert-dialog-description">{confirmInfo.content}</DialogContentText>
+          <DialogContentText id="alert-dialog-description" sx={{ color: 'text.primary' }}>
+            {confirmInfo.content}
+          </DialogContentText>
         </DialogContent>
         <DialogActions>
-          <Button onClick={handleConfirmClose}>取消</Button>
-          <Button onClick={handleConfirmAction} color="primary" autoFocus>
-            确定
+          <Button onClick={handleConfirmClose}>{t('common.cancel')}</Button>
+          <Button onClick={handleConfirmAction} variant="contained" color="error" autoFocus>
+            {t('common.confirm')}
           </Button>
         </DialogActions>
       </Dialog>
 
-      {/* 错误提示对话框 */}
       <Dialog
         open={errorDialog.open}
         onClose={() => setErrorDialog({ ...errorDialog, open: false })}
@@ -731,17 +2069,79 @@ export default function TemplateList() {
         </DialogContent>
         <DialogActions>
           <Button variant="contained" onClick={() => setErrorDialog({ ...errorDialog, open: false })} autoFocus>
-            知道了
+            {t('common.close')}
           </Button>
         </DialogActions>
       </Dialog>
 
-      {/* 基础模板编辑对话框 */}
+      <Dialog
+        open={usageDialog.open}
+        onClose={() => setUsageDialog({ ...usageDialog, open: false })}
+        aria-labelledby="template-usage-dialog-title"
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle id="template-usage-dialog-title">⚠️ {usageDialog.title}</DialogTitle>
+        <DialogContent>
+          <Alert
+            severity="warning"
+            variant="outlined"
+            sx={{
+              mt: 1,
+              alignItems: 'flex-start',
+              backgroundColor: alpha(theme.palette.warning.main, 0.08),
+              borderColor: alpha(theme.palette.warning.main, 0.28),
+              color: 'text.primary',
+              '& .MuiAlert-icon': {
+                color: 'warning.dark',
+                mt: '2px'
+              },
+              '& .MuiAlert-message': {
+                width: '100%'
+              }
+            }}
+          >
+            {usageDialog.message}
+          </Alert>
+          {usageDialog.subscriptions?.length > 0 && (
+            <Box sx={{ mt: 2 }}>
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                {t('templates.usage.usedSubscriptions')}
+              </Typography>
+              <Stack spacing={1}>
+                {usageDialog.subscriptions.map((subscriptionName) => (
+                  <Chip key={subscriptionName} label={subscriptionName} color="warning" variant="outlined" sx={{ width: 'fit-content' }} />
+                ))}
+              </Stack>
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setUsageDialog({ ...usageDialog, open: false, subscriptions: [], action: null })}>
+            {t('common.cancel')}
+          </Button>
+          <Button
+            variant="contained"
+            color="error"
+            onClick={async () => {
+              const action = usageDialog.action;
+              setUsageDialog({ open: false, title: '', message: '', subscriptions: [], action: null });
+              if (action) {
+                await action();
+              }
+            }}
+            autoFocus
+          >
+            {t('templates.actions.continueDelete')}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={baseTemplateDialogOpen} onClose={() => setBaseTemplateDialogOpen(false)} maxWidth="lg" fullWidth>
-        <DialogTitle>{baseTemplateCategory === 'clash' ? 'Clash' : 'Surge'} 基础模板配置</DialogTitle>
+        <DialogTitle>{t('templates.baseTemplate.title', { category: baseTemplateCategory === 'clash' ? 'Clash' : 'Surge' })}</DialogTitle>
         <DialogContent>
           <Typography variant="body2" color="textSecondary" sx={{ mb: 2 }}>
-            基础模板用于规则转换时，当模板内容为空时自动填充的默认配置。修改后将影响所有使用默认模板的规则转换操作。
+            {t('templates.baseTemplate.description')}
           </Typography>
           {baseTemplateLoading ? (
             <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 400 }}>
@@ -769,14 +2169,14 @@ export default function TemplateList() {
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setBaseTemplateDialogOpen(false)}>取消</Button>
+          <Button onClick={() => setBaseTemplateDialogOpen(false)}>{t('common.cancel')}</Button>
           <Button
             variant="contained"
             onClick={handleSaveBaseTemplate}
             disabled={baseTemplateLoading || baseTemplateSaving}
             startIcon={baseTemplateSaving ? <CircularProgress size={18} /> : null}
           >
-            保存
+            {t('common.save')}
           </Button>
         </DialogActions>
       </Dialog>

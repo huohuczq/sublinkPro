@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,7 +31,7 @@ type IPInfo struct {
 	AS          string    `json:"as"`                            // AS号
 	RawResponse string    `gorm:"type:text" json:"-"`            // 原始JSON响应
 	Provider    string    `json:"provider"`                      // 数据提供商
-	CreatedAt   time.Time `gorm:"autoCreateTime" json:"createdAt"`
+	CreatedAt   time.Time `gorm:"autoCreateTime;<-:create" json:"createdAt"`
 	UpdatedAt   time.Time `gorm:"autoUpdateTime" json:"updatedAt"`
 }
 
@@ -119,8 +120,13 @@ func GetIPInfo(ip string) (*IPInfo, error) {
 	// 3. 请求去重：防止多个并发请求同时查询同一个IP
 	lockChan := make(chan struct{})
 	if actual, loaded := ipInfoRequestLock.LoadOrStore(ip, lockChan); loaded {
+		done, ok := actual.(chan struct{})
+		if !ok {
+			ipInfoRequestLock.Delete(ip)
+			return nil, fmt.Errorf("IP信息请求锁状态异常")
+		}
 		// 已有其他请求在处理，等待完成
-		<-actual.(chan struct{})
+		<-done
 		// 再次检查缓存
 		if info, ok := ipInfoCache.Get(ip); ok {
 			return &info, nil
@@ -142,7 +148,26 @@ func GetIPInfo(ip string) (*IPInfo, error) {
 	if dbInfo.ID > 0 {
 		// 更新现有记录
 		info.ID = dbInfo.ID
-		if err := database.DB.Save(info).Error; err != nil {
+		info.CreatedAt = dbInfo.CreatedAt
+		info.UpdatedAt = time.Now()
+		if err := database.DB.Model(&IPInfo{}).Where("id = ?", dbInfo.ID).Updates(map[string]any{
+			"ip":           info.IP,
+			"country":      info.Country,
+			"country_code": info.CountryCode,
+			"region":       info.Region,
+			"region_name":  info.RegionName,
+			"city":         info.City,
+			"zip":          info.Zip,
+			"lat":          info.Lat,
+			"lon":          info.Lon,
+			"timezone":     info.Timezone,
+			"isp":          info.ISP,
+			"org":          info.Org,
+			"as":           info.AS,
+			"raw_response": info.RawResponse,
+			"provider":     info.Provider,
+			"updated_at":   info.UpdatedAt,
+		}).Error; err != nil {
 			utils.Error("更新IP信息失败: %v", err)
 		}
 	} else {
@@ -186,11 +211,16 @@ func fetchIPInfoFromAPI(ip string) (*IPInfo, error) {
 		Timeout: 10 * time.Second,
 	}
 
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("创建IP信息API请求失败: %w", err)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("请求IP信息API失败: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

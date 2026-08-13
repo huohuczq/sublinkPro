@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { useTheme } from '@mui/material/styles';
+import { useTranslation } from 'react-i18next';
+import { alpha, useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
 
 // material-ui
@@ -57,6 +58,8 @@ import {
   triggerTagRule,
   getTagGroups
 } from 'api/tags';
+import { getNodeCheckMeta } from 'api/nodeCheck';
+import { setUnlockMeta } from 'views/nodes/utils';
 
 // components
 import TagDialog from './component/TagDialog';
@@ -66,6 +69,7 @@ import RuleDialog from './component/RuleDialog';
 
 export default function TagManagement() {
   const theme = useTheme();
+  const { t } = useTranslation();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
 
   const [tabValue, setTabValue] = useState(0);
@@ -80,6 +84,8 @@ export default function TagManagement() {
   const [ruleDialogOpen, setRuleDialogOpen] = useState(false);
   const [editingTag, setEditingTag] = useState(null);
   const [editingRule, setEditingRule] = useState(null);
+  const palette = theme.vars?.palette || theme.palette;
+  const isDark = theme.palette.mode === 'dark';
 
   // Search/Filter states
   const [tagSearch, setTagSearch] = useState('');
@@ -96,7 +102,7 @@ export default function TagManagement() {
       // 成功（code === 200 时返回，否则被拦截器 reject）
       setTags(res.data || []);
     } catch (error) {
-      showMessage(error.message || '获取标签列表失败', 'error');
+      showMessage(error.message || t('tags.messages.loadTagsFailed'), 'error');
     } finally {
       if (showRefreshing) setRefreshing(false);
     }
@@ -109,7 +115,7 @@ export default function TagManagement() {
       // 成功（code === 200 时返回，否则被拦截器 reject）
       setRules(res.data || []);
     } catch (error) {
-      showMessage(error.message || '获取规则列表失败', 'error');
+      showMessage(error.message || t('tags.messages.loadRulesFailed'), 'error');
     } finally {
       if (showRefreshing) setRefreshing(false);
     }
@@ -125,10 +131,20 @@ export default function TagManagement() {
     }
   };
 
+  const fetchUnlockMeta = async () => {
+    try {
+      const res = await getNodeCheckMeta();
+      setUnlockMeta(res.data || {});
+    } catch {
+      console.error('加载解锁元数据失败');
+    }
+  };
+
   useEffect(() => {
     fetchTags();
     fetchRules();
     fetchGroups();
+    fetchUnlockMeta();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -146,9 +162,9 @@ export default function TagManagement() {
       } else {
         await fetchRules();
       }
-      showMessage('刷新成功');
+      showMessage(t('tags.messages.refreshSuccess'));
     } catch (error) {
-      showMessage(error.message || '刷新失败', 'error');
+      showMessage(error.message || t('tags.messages.refreshFailed'), 'error');
     } finally {
       setRefreshing(false);
     }
@@ -166,15 +182,15 @@ export default function TagManagement() {
   };
 
   const handleDeleteTag = async (tag) => {
-    if (!window.confirm(`确定删除标签 "${tag.name}" 吗？相关规则也会被删除。`)) return;
+    if (!window.confirm(t('tags.confirm.deleteTag', { name: tag.name }))) return;
     try {
       await deleteTag(tag.name);
       // 成功（code === 200 时返回，否则被拦截器 reject）
-      showMessage('删除成功');
+      showMessage(t('tags.messages.deleteSuccess'));
       fetchTags();
       fetchRules();
     } catch (error) {
-      showMessage(error.message || '删除失败', 'error');
+      showMessage(error.message || t('tags.messages.deleteFailed'), 'error');
     }
   };
 
@@ -186,11 +202,11 @@ export default function TagManagement() {
         await addTag(tagData);
       }
       // 成功（code === 200 时返回，否则被拦截器 reject）
-      showMessage(editingTag ? '更新成功' : '添加成功');
+      showMessage(editingTag ? t('tags.messages.updateSuccess') : t('tags.messages.addSuccess'));
       setTagDialogOpen(false);
       fetchTags();
     } catch (error) {
-      showMessage(error.message || '操作失败', 'error');
+      showMessage(error.message || t('tags.messages.operationFailed'), 'error');
     }
   };
 
@@ -206,14 +222,14 @@ export default function TagManagement() {
   };
 
   const handleDeleteRule = async (rule) => {
-    if (!window.confirm(`确定删除规则 "${rule.name}" 吗？`)) return;
+    if (!window.confirm(t('tags.confirm.deleteRule', { name: rule.name }))) return;
     try {
       await deleteTagRule(rule.id);
       // 成功（code === 200 时返回，否则被拦截器 reject）
-      showMessage('删除成功');
+      showMessage(t('tags.messages.deleteSuccess'));
       fetchRules();
     } catch (error) {
-      showMessage(error.message || '删除失败', 'error');
+      showMessage(error.message || t('tags.messages.deleteFailed'), 'error');
     }
   };
 
@@ -225,11 +241,11 @@ export default function TagManagement() {
         await addTagRule(ruleData);
       }
       // 成功（code === 200 时返回，否则被拦截器 reject）
-      showMessage(editingRule ? '更新成功' : '添加成功');
+      showMessage(editingRule ? t('tags.messages.updateSuccess') : t('tags.messages.addSuccess'));
       setRuleDialogOpen(false);
       fetchRules();
     } catch (error) {
-      showMessage(error.message || '操作失败', 'error');
+      showMessage(error.message || t('tags.messages.operationFailed'), 'error');
     }
   };
 
@@ -237,15 +253,35 @@ export default function TagManagement() {
     try {
       await triggerTagRule(rule.id);
       // 成功（code === 200 时返回，否则被拦截器 reject）
-      showMessage('规则已开始执行');
+      showMessage(t('tags.messages.ruleStarted'));
     } catch (error) {
-      showMessage(error.message || '执行失败', 'error');
+      showMessage(error.message || t('tags.messages.executeFailed'), 'error');
     }
   };
 
   const getTagByName = (tagName) => {
     return tags.find((t) => t.name === tagName);
   };
+
+  const getTriggerLabel = (triggerType) =>
+    triggerType === 'subscription_update' ? t('tags.trigger.subscriptionUpdate') : t('tags.trigger.speedTest');
+
+  const getStatusLabel = (enabled) => (enabled ? t('tags.status.enabled') : t('tags.status.disabled'));
+  const getStatusChipSx = (enabled) => ({
+    height: 20,
+    fontSize: isMobile ? '0.72rem' : '0.7rem',
+    fontWeight: 600,
+    color: enabled ? (isDark ? palette.success.light : palette.success.dark) : palette.text.secondary,
+    bgcolor: enabled
+      ? alpha(theme.palette.success.main, isDark ? 0.18 : 0.12)
+      : isDark
+        ? 'background.default'
+        : alpha(theme.palette.grey[500], 0.08),
+    border: `1px solid ${enabled ? alpha(theme.palette.success.main, isDark ? 0.34 : 0.18) : alpha(theme.palette.divider, isDark ? 0.56 : 0.24)}`,
+    '& .MuiChip-label': {
+      px: 1
+    }
+  });
 
   // 过滤标签
   const filteredTags = tags.filter((tag) => {
@@ -306,17 +342,17 @@ export default function TagManagement() {
                 {rule.name}
               </Typography>
               <Stack direction="row" spacing={0.5}>
-                <Tooltip title="手动执行">
+                <Tooltip title={t('tags.actions.execute')}>
                   <IconButton size="small" onClick={() => handleTriggerRule(rule)} color="primary">
                     <PlayArrowIcon fontSize="small" />
                   </IconButton>
                 </Tooltip>
-                <Tooltip title="编辑">
+                <Tooltip title={t('tags.actions.edit')}>
                   <IconButton size="small" onClick={() => handleEditRule(rule)}>
                     <EditIcon fontSize="small" />
                   </IconButton>
                 </Tooltip>
-                <Tooltip title="删除">
+                <Tooltip title={t('tags.actions.delete')}>
                   <IconButton size="small" color="error" onClick={() => handleDeleteRule(rule)}>
                     <DeleteIcon fontSize="small" />
                   </IconButton>
@@ -332,11 +368,11 @@ export default function TagManagement() {
                 <Chip label={tag.name} size="small" sx={{ backgroundColor: tag.color, color: '#fff' }} />
               ) : (
                 <Typography variant="body2" color="text.secondary">
-                  未知标签
+                  {t('tags.unknownTag')}
                 </Typography>
               )}
-              <Chip label={rule.triggerType === 'subscription_update' ? '订阅更新后' : '测速完成后'} size="small" variant="outlined" />
-              <Chip label={rule.enabled ? '启用' : '禁用'} size="small" color={rule.enabled ? 'success' : 'default'} />
+              <Chip label={getTriggerLabel(rule.triggerType)} size="small" variant="outlined" />
+              <Chip label={getStatusLabel(rule.enabled)} size="small" variant="filled" sx={getStatusChipSx(rule.enabled)} />
             </Stack>
           </Stack>
         </CardContent>
@@ -345,14 +381,14 @@ export default function TagManagement() {
   };
 
   return (
-    <MainCard title="标签管理">
+    <MainCard title={t('tags.title')}>
       <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center">
           <Tabs value={tabValue} onChange={(e, v) => setTabValue(v)}>
-            <Tab icon={<LocalOfferIcon sx={{ mr: isMobile ? 0 : 1 }} />} iconPosition="start" label={isMobile ? '' : '标签列表'} />
-            <Tab icon={<RuleIcon sx={{ mr: isMobile ? 0 : 1 }} />} iconPosition="start" label={isMobile ? '' : '自动规则'} />
+            <Tab icon={<LocalOfferIcon sx={{ mr: isMobile ? 0 : 1 }} />} iconPosition="start" label={isMobile ? '' : t('tags.tabs.tags')} />
+            <Tab icon={<RuleIcon sx={{ mr: isMobile ? 0 : 1 }} />} iconPosition="start" label={isMobile ? '' : t('tags.tabs.rules')} />
           </Tabs>
-          <Tooltip title="刷新">
+          <Tooltip title={t('tags.actions.refresh')}>
             <IconButton onClick={handleRefresh} disabled={refreshing} color="primary">
               {refreshing ? <CircularProgress size={20} /> : <RefreshIcon />}
             </IconButton>
@@ -366,7 +402,7 @@ export default function TagManagement() {
           {/* 搜索和添加按钮 */}
           <Box sx={{ mb: 2, display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
             <TextField
-              placeholder="搜索标签名称、分组、描述..."
+              placeholder={t('tags.search.tagPlaceholder')}
               value={tagSearch}
               onChange={(e) => setTagSearch(e.target.value)}
               size="small"
@@ -387,14 +423,14 @@ export default function TagManagement() {
               }}
             />
             <Button variant="contained" startIcon={<AddIcon />} onClick={handleAddTag} size={isMobile ? 'small' : 'medium'}>
-              添加标签
+              {t('tags.actions.addTag')}
             </Button>
           </Box>
 
           {/* 搜索结果统计 */}
           {tagSearch && (
             <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-              找到 {filteredTags.length} 个匹配的标签
+              {t('tags.search.tagMatched', { count: filteredTags.length })}
             </Typography>
           )}
 
@@ -443,7 +479,7 @@ export default function TagManagement() {
                     </Box>
                     {tag.groupName && (
                       <Chip
-                        label={`组: ${tag.groupName}`}
+                        label={t('tags.groupLabel', { group: tag.groupName })}
                         size="small"
                         variant="outlined"
                         sx={{ mt: 1, fontSize: isMobile ? '0.65rem' : '0.7rem', height: isMobile ? 20 : 24 }}
@@ -461,14 +497,14 @@ export default function TagManagement() {
             {filteredTags.length === 0 && tags.length > 0 && (
               <Grid item xs={12}>
                 <Typography color="text.secondary" align="center" sx={{ py: 4 }}>
-                  没有找到匹配的标签
+                  {t('tags.empty.noTagMatch')}
                 </Typography>
               </Grid>
             )}
             {tags.length === 0 && (
               <Grid item xs={12}>
                 <Typography color="text.secondary" align="center" sx={{ py: 4 }}>
-                  暂无标签，点击"添加标签"创建第一个标签
+                  {t('tags.empty.noTags')}
                 </Typography>
               </Grid>
             )}
@@ -491,7 +527,7 @@ export default function TagManagement() {
               <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ flex: 1 }} flexWrap="wrap">
                 {/* 名称搜索 */}
                 <TextField
-                  placeholder="搜索规则名称..."
+                  placeholder={t('tags.search.rulePlaceholder')}
                   value={ruleSearch}
                   onChange={(e) => setRuleSearch(e.target.value)}
                   size="small"
@@ -515,7 +551,7 @@ export default function TagManagement() {
                 {/* 标签筛选 */}
                 <FormControl size="small" sx={{ minWidth: 120 }}>
                   <Select value={ruleTagFilter} onChange={(e) => setRuleTagFilter(e.target.value)} displayEmpty>
-                    <MenuItem value="">全部标签</MenuItem>
+                    <MenuItem value="">{t('tags.filters.allTags')}</MenuItem>
                     {usedTagNames.map((tagName) => {
                       const tag = getTagByName(tagName);
                       return (
@@ -540,18 +576,18 @@ export default function TagManagement() {
                 {/* 触发时机筛选 */}
                 <FormControl size="small" sx={{ minWidth: 120 }}>
                   <Select value={ruleTriggerFilter} onChange={(e) => setRuleTriggerFilter(e.target.value)} displayEmpty>
-                    <MenuItem value="">全部时机</MenuItem>
-                    <MenuItem value="subscription_update">订阅更新后</MenuItem>
-                    <MenuItem value="speed_test">测速完成后</MenuItem>
+                    <MenuItem value="">{t('tags.filters.allTriggers')}</MenuItem>
+                    <MenuItem value="subscription_update">{t('tags.trigger.subscriptionUpdate')}</MenuItem>
+                    <MenuItem value="speed_test">{t('tags.trigger.speedTest')}</MenuItem>
                   </Select>
                 </FormControl>
 
                 {/* 状态筛选 */}
                 <FormControl size="small" sx={{ minWidth: 100 }}>
                   <Select value={ruleStatusFilter} onChange={(e) => setRuleStatusFilter(e.target.value)} displayEmpty>
-                    <MenuItem value="">全部状态</MenuItem>
-                    <MenuItem value="enabled">启用</MenuItem>
-                    <MenuItem value="disabled">禁用</MenuItem>
+                    <MenuItem value="">{t('tags.filters.allStatuses')}</MenuItem>
+                    <MenuItem value="enabled">{t('tags.status.enabled')}</MenuItem>
+                    <MenuItem value="disabled">{t('tags.status.disabled')}</MenuItem>
                   </Select>
                 </FormControl>
               </Stack>
@@ -565,21 +601,21 @@ export default function TagManagement() {
                 size={isMobile ? 'small' : 'medium'}
                 sx={{ flexShrink: 0 }}
               >
-                添加规则
+                {t('tags.actions.addRule')}
               </Button>
             </Stack>
 
             {/* 筛选结果统计 */}
             {(ruleSearch || ruleTagFilter || ruleTriggerFilter || ruleStatusFilter) && (
               <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                找到 {filteredRules.length} 条匹配的规则
+                {t('tags.search.ruleMatched', { count: filteredRules.length })}
               </Typography>
             )}
           </Box>
 
           {tags.length === 0 && (
             <Alert severity="info" sx={{ mb: 2 }}>
-              请先创建标签后再添加自动规则
+              {t('tags.empty.createTagFirst')}
             </Alert>
           )}
 
@@ -591,12 +627,12 @@ export default function TagManagement() {
               ))}
               {filteredRules.length === 0 && rules.length > 0 && (
                 <Typography color="text.secondary" align="center" sx={{ py: 4 }}>
-                  没有找到匹配的规则
+                  {t('tags.empty.noRuleMatch')}
                 </Typography>
               )}
               {rules.length === 0 && (
                 <Typography color="text.secondary" align="center" sx={{ py: 4 }}>
-                  暂无自动规则
+                  {t('tags.empty.noRules')}
                 </Typography>
               )}
             </Box>
@@ -605,11 +641,11 @@ export default function TagManagement() {
               <Table>
                 <TableHead>
                   <TableRow>
-                    <TableCell>规则名称</TableCell>
-                    <TableCell>关联标签</TableCell>
-                    <TableCell>触发时机</TableCell>
-                    <TableCell>状态</TableCell>
-                    <TableCell align="right">操作</TableCell>
+                    <TableCell>{t('tags.fields.ruleName')}</TableCell>
+                    <TableCell>{t('tags.fields.tag')}</TableCell>
+                    <TableCell>{t('tags.fields.trigger')}</TableCell>
+                    <TableCell>{t('tags.fields.status')}</TableCell>
+                    <TableCell align="right">{t('tags.fields.actions')}</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -622,18 +658,15 @@ export default function TagManagement() {
                           {tag ? (
                             <Chip label={tag.name} size="small" sx={{ backgroundColor: tag.color, color: '#fff' }} />
                           ) : (
-                            <Typography color="text.secondary">未知标签</Typography>
+                            <Typography color="text.secondary">{t('tags.unknownTag')}</Typography>
                           )}
                         </TableCell>
+                        <TableCell>{getTriggerLabel(rule.triggerType)}</TableCell>
                         <TableCell>
-                          {rule.triggerType === 'subscription_update' && '订阅更新后'}
-                          {rule.triggerType === 'speed_test' && '测速完成后'}
-                        </TableCell>
-                        <TableCell>
-                          <Chip label={rule.enabled ? '启用' : '禁用'} size="small" color={rule.enabled ? 'success' : 'default'} />
+                          <Chip label={getStatusLabel(rule.enabled)} size="small" variant="filled" sx={getStatusChipSx(rule.enabled)} />
                         </TableCell>
                         <TableCell align="right">
-                          <IconButton size="small" onClick={() => handleTriggerRule(rule)} title="手动执行">
+                          <IconButton size="small" onClick={() => handleTriggerRule(rule)} title={t('tags.actions.execute')}>
                             <PlayArrowIcon fontSize="small" />
                           </IconButton>
                           <IconButton size="small" onClick={() => handleEditRule(rule)}>
@@ -649,14 +682,14 @@ export default function TagManagement() {
                   {filteredRules.length === 0 && rules.length > 0 && (
                     <TableRow>
                       <TableCell colSpan={5} align="center" sx={{ py: 4 }}>
-                        <Typography color="text.secondary">没有找到匹配的规则</Typography>
+                        <Typography color="text.secondary">{t('tags.empty.noRuleMatch')}</Typography>
                       </TableCell>
                     </TableRow>
                   )}
                   {rules.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={5} align="center" sx={{ py: 4 }}>
-                        <Typography color="text.secondary">暂无自动规则</Typography>
+                        <Typography color="text.secondary">{t('tags.empty.noRules')}</Typography>
                       </TableCell>
                     </TableRow>
                   )}

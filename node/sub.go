@@ -11,12 +11,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sublink/models"
 	"sublink/node/protocol"
 	"sublink/services/mihomo"
-	"sublink/services/sse"
+	"sublink/services/notifications"
 	"sublink/utils"
 	"time"
 
@@ -30,9 +31,9 @@ type TaskReporter interface {
 	// UpdateTotal 更新任务总数（在解析完订阅后调用）
 	UpdateTotal(total int)
 	// ReportProgress 报告任务进度
-	ReportProgress(current int, currentItem string, result interface{})
+	ReportProgress(current int, currentItem string, result any)
 	// ReportComplete 报告任务完成
-	ReportComplete(message string, result interface{})
+	ReportComplete(message string, result any)
 	// ReportFail 报告任务失败
 	ReportFail(errMsg string)
 }
@@ -40,10 +41,17 @@ type TaskReporter interface {
 // NoOpTaskReporter 空实现，当没有传入reporter时使用
 type NoOpTaskReporter struct{}
 
-func (n *NoOpTaskReporter) UpdateTotal(total int)                                              {}
-func (n *NoOpTaskReporter) ReportProgress(current int, currentItem string, result interface{}) {}
-func (n *NoOpTaskReporter) ReportComplete(message string, result interface{})                  {}
-func (n *NoOpTaskReporter) ReportFail(errMsg string)                                           {}
+func (n *NoOpTaskReporter) UpdateTotal(total int)                                      {}
+func (n *NoOpTaskReporter) ReportProgress(current int, currentItem string, result any) {}
+func (n *NoOpTaskReporter) ReportComplete(message string, result any)                  {}
+func (n *NoOpTaskReporter) ReportFail(errMsg string)                                   {}
+
+const (
+	// providerResponseSizeLimit 限制单个 provider 响应体大小，兼顾大型机场节点列表与内存上界。
+	providerResponseSizeLimit int64 = 16 << 20
+	// selectedProviderCountLimit 限制单次订阅展开的 provider 数量，避免异常配置触发无界外部请求。
+	selectedProviderCountLimit = 64
+)
 
 // UsageInfo 订阅用量信息（从 subscription-userinfo header 解析）
 type UsageInfo struct {
@@ -116,7 +124,73 @@ func FailedUsageInfo() *UsageInfo {
 }
 
 type ClashConfig struct {
+	Proxies            []protocol.Proxy              `yaml:"proxies"`
+	ProxyProviders     map[string]ClashProxyProvider `yaml:"proxy-providers"`
+	ProxyProviderOrder []string                      `yaml:"-"`
+	ProxyGroups        []ClashProxyGroup             `yaml:"proxy-groups"`
+}
+
+type ClashProxyProvider struct {
+	Type    string           `yaml:"type"`
+	URL     string           `yaml:"url"`
 	Proxies []protocol.Proxy `yaml:"proxies"`
+}
+
+type ClashProxyGroup struct {
+	Use                 []string `yaml:"use"`
+	IncludeAll          bool     `yaml:"include-all"`
+	IncludeAllProviders bool     `yaml:"include-all-providers"`
+}
+
+type namedClashProxyProvider struct {
+	Name     string
+	Provider ClashProxyProvider
+}
+
+func (c *ClashConfig) UnmarshalYAML(value *yaml.Node) error {
+	type rawClashConfig struct {
+		Proxies        []protocol.Proxy              `yaml:"proxies"`
+		ProxyProviders map[string]ClashProxyProvider `yaml:"proxy-providers"`
+		ProxyGroups    []ClashProxyGroup             `yaml:"proxy-groups"`
+	}
+
+	var raw rawClashConfig
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+
+	c.Proxies = raw.Proxies
+	c.ProxyProviders = raw.ProxyProviders
+	c.ProxyGroups = raw.ProxyGroups
+	c.ProxyProviderOrder = orderedClashProxyProviderNames(value)
+	return nil
+}
+
+func orderedClashProxyProviderNames(value *yaml.Node) []string {
+	if value.Kind == yaml.DocumentNode && len(value.Content) > 0 {
+		value = value.Content[0]
+	}
+	if value.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		if value.Content[i].Value != "proxy-providers" {
+			continue
+		}
+		providersNode := value.Content[i+1]
+		if providersNode.Kind != yaml.MappingNode {
+			return nil
+		}
+
+		providerNames := make([]string, 0, len(providersNode.Content)/2)
+		for j := 0; j+1 < len(providersNode.Content); j += 2 {
+			providerNames = append(providerNames, strings.TrimSpace(providersNode.Content[j].Value))
+		}
+		return providerNames
+	}
+
+	return nil
 }
 
 // isTLSError 检测是否为 TLS 证书相关错误
@@ -140,14 +214,306 @@ func isTLSError(err error) bool {
 // proxyLink: 代理链接 (可选)
 // userAgent: 请求的 User-Agent (可选，默认 Clash)
 func LoadClashConfigFromURL(id int, urlStr string, subName string, downloadWithProxy bool, proxyLink string, userAgent string) (*UsageInfo, error) {
-	return LoadClashConfigFromURLWithReporter(id, urlStr, subName, downloadWithProxy, proxyLink, userAgent, nil, false, true)
+	_, usageInfo, err := LoadClashConfigFromURLWithReporter(context.TODO(), id, urlStr, subName, downloadWithProxy, proxyLink, userAgent, nil, nil, false, true)
+	return usageInfo, err
+}
+
+func applyRequestHeaders(req *http.Request, userAgent string, requestHeaders models.AirportRequestHeaders) {
+	resolvedUserAgent := strings.TrimSpace(userAgent)
+	if resolvedUserAgent == "" {
+		resolvedUserAgent = "clash.meta"
+	}
+	req.Header.Set("User-Agent", resolvedUserAgent)
+
+	for _, header := range requestHeaders {
+		if header.Key == "" || strings.EqualFold(header.Key, "User-Agent") {
+			continue
+		}
+		req.Header.Add(header.Key, header.Value)
+	}
+}
+
+func expandClashProxyProviders(ctx context.Context, client *http.Client, rootSubscriptionURL string, config *ClashConfig, userAgent string, requestHeaders models.AirportRequestHeaders) error {
+	providers := selectClashProxyProviders(config)
+	if len(providers) == 0 {
+		return nil
+	}
+	if len(providers) > selectedProviderCountLimit {
+		return fmt.Errorf("proxy-providers 数量过多: %d，最多允许 %d 个", len(providers), selectedProviderCountLimit)
+	}
+
+	rootHost := normalizedURLHost(rootSubscriptionURL)
+	initialProxyCount := len(config.Proxies)
+	providerErrors := make([]string, 0)
+	for _, item := range providers {
+		if len(item.Provider.Proxies) > 0 {
+			config.Proxies = append(config.Proxies, item.Provider.Proxies...)
+			continue
+		}
+
+		// 机场订阅导入只展开远端 http provider，不实现本地 file、缓存或 health-check 等 mihomo 运行时语义。
+		if !strings.EqualFold(strings.TrimSpace(item.Provider.Type), "http") {
+			continue
+		}
+
+		providerURL := strings.TrimSpace(item.Provider.URL)
+		if providerURL == "" {
+			continue
+		}
+
+		providerProxies, err := fetchClashProxyProvider(ctx, client, item.Name, providerURL, rootHost, userAgent, requestHeaders)
+		if err != nil {
+			utils.Warn("proxy-provider【%s】获取或解析失败: %v", item.Name, err)
+			providerErrors = append(providerErrors, fmt.Sprintf("%s: %v", item.Name, err))
+			continue
+		}
+		config.Proxies = append(config.Proxies, providerProxies...)
+	}
+
+	if len(config.Proxies) == initialProxyCount && len(providerErrors) > 0 {
+		return fmt.Errorf("proxy-providers 解析失败: %s", strings.Join(providerErrors, "; "))
+	}
+	return nil
+}
+
+func selectClashProxyProviders(config *ClashConfig) []namedClashProxyProvider {
+	if config == nil || len(config.ProxyProviders) == 0 {
+		return nil
+	}
+
+	includeAllProviders := false
+	referencedNames := make([]string, 0)
+	for _, group := range config.ProxyGroups {
+		if group.IncludeAll || group.IncludeAllProviders {
+			includeAllProviders = true
+		}
+		for _, providerName := range group.Use {
+			providerName = strings.TrimSpace(providerName)
+			if providerName != "" {
+				referencedNames = append(referencedNames, providerName)
+			}
+		}
+	}
+
+	if includeAllProviders || len(referencedNames) == 0 {
+		referencedNames = orderedClashProviderNames(config)
+	}
+
+	providers := make([]namedClashProxyProvider, 0, len(referencedNames))
+	seenNames := make(map[string]bool, len(referencedNames))
+	seenURLs := make(map[string]bool, len(referencedNames))
+	for _, providerName := range referencedNames {
+		provider, ok := config.ProxyProviders[providerName]
+		if !ok {
+			continue
+		}
+
+		providerURL := strings.TrimSpace(provider.URL)
+		// 同一 URL 的 provider 只拉取一次，保留首次声明，避免重复外呼和重复节点。
+		if seenNames[providerName] || (providerURL != "" && seenURLs[providerURL]) {
+			continue
+		}
+		seenNames[providerName] = true
+		if providerURL != "" {
+			seenURLs[providerURL] = true
+		}
+
+		providers = append(providers, namedClashProxyProvider{Name: providerName, Provider: provider})
+	}
+
+	return providers
+}
+
+func orderedClashProviderNames(config *ClashConfig) []string {
+	providerNames := make([]string, 0, len(config.ProxyProviders))
+	seen := make(map[string]bool, len(config.ProxyProviders))
+	for _, providerName := range config.ProxyProviderOrder {
+		if _, ok := config.ProxyProviders[providerName]; ok && !seen[providerName] {
+			providerNames = append(providerNames, providerName)
+			seen[providerName] = true
+		}
+	}
+
+	remainingNames := make([]string, 0)
+	for providerName := range config.ProxyProviders {
+		if !seen[providerName] {
+			remainingNames = append(remainingNames, providerName)
+		}
+	}
+	sort.Strings(remainingNames)
+	providerNames = append(providerNames, remainingNames...)
+	return providerNames
+}
+
+func fetchClashProxyProvider(ctx context.Context, client *http.Client, providerName string, providerURL string, rootSubscriptionHost string, userAgent string, requestHeaders models.AirportRequestHeaders) ([]protocol.Proxy, error) {
+	parsedProviderURL, err := validateClashProviderURL(providerURL)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, providerURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if rootSubscriptionHost != "" && strings.EqualFold(parsedProviderURL.Host, rootSubscriptionHost) {
+		applyRequestHeaders(req, userAgent, requestHeaders)
+	} else {
+		applyRequestHeaders(req, userAgent, nil)
+	}
+
+	providerClient := newClashProviderHTTPClient(client, rootSubscriptionHost, userAgent, requestHeaders)
+	resp, err := providerClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("HTTP 状态码 %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, providerResponseSizeLimit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > providerResponseSizeLimit {
+		return nil, fmt.Errorf("provider 响应超过大小限制 %d bytes", providerResponseSizeLimit)
+	}
+
+	proxies, err := parseClashProviderPayload(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(proxies) == 0 {
+		return nil, fmt.Errorf("未找到节点")
+	}
+
+	utils.Info("proxy-provider【%s】导入节点数量：%d", providerName, len(proxies))
+	return proxies, nil
+}
+
+func validateClashProviderURL(providerURL string) (*url.URL, error) {
+	parsedProviderURL, err := url.Parse(providerURL)
+	if err != nil {
+		return nil, err
+	}
+	if parsedProviderURL.Host == "" {
+		return nil, fmt.Errorf("provider URL 缺少 host")
+	}
+	if parsedProviderURL.Scheme != "http" && parsedProviderURL.Scheme != "https" {
+		return nil, fmt.Errorf("provider URL scheme %q 不受支持", parsedProviderURL.Scheme)
+	}
+	return parsedProviderURL, nil
+}
+
+func normalizedURLHost(rawURL string) string {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(parsedURL.Host)
+}
+
+func newClashProviderHTTPClient(client *http.Client, rootSubscriptionHost string, userAgent string, requestHeaders models.AirportRequestHeaders) *http.Client {
+	providerClient := *client
+	providerClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+			return fmt.Errorf("provider URL scheme %q 不受支持", req.URL.Scheme)
+		}
+		applyRequestHeaders(req, userAgent, nil)
+		if rootSubscriptionHost == "" || !strings.EqualFold(req.URL.Host, rootSubscriptionHost) {
+			removeCustomAirportHeaders(req, requestHeaders)
+		}
+		return nil
+	}
+	return &providerClient
+}
+
+func removeCustomAirportHeaders(req *http.Request, requestHeaders models.AirportRequestHeaders) {
+	for _, header := range requestHeaders {
+		if header.Key == "" || strings.EqualFold(header.Key, "User-Agent") {
+			continue
+		}
+		req.Header.Del(header.Key)
+	}
+}
+
+func parseClashProviderPayload(data []byte) ([]protocol.Proxy, error) {
+	var config ClashConfig
+	errYaml := yaml.Unmarshal(data, &config)
+	if errYaml == nil && len(config.Proxies) > 0 {
+		return config.Proxies, nil
+	}
+
+	proxies := parseSubscriptionLinkProxies(data)
+	if len(proxies) > 0 {
+		return proxies, nil
+	}
+
+	if errYaml != nil {
+		return nil, fmt.Errorf("YAML 解析失败且链接 fallback 未找到节点: %w", errYaml)
+	}
+	return nil, fmt.Errorf("未找到节点")
+}
+
+func parseSubscriptionLinkProxies(data []byte) []protocol.Proxy {
+	decodedBytes, errB64 := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
+	if errB64 != nil {
+		decodedBytes, errB64 = base64.RawStdEncoding.DecodeString(strings.TrimSpace(string(data)))
+	}
+	if errB64 == nil {
+		if proxies := parsePlainSubscriptionLinkProxies(decodedBytes); len(proxies) > 0 {
+			return proxies
+		}
+	}
+	return parsePlainSubscriptionLinkProxies(data)
+}
+
+func parsePlainSubscriptionLinkProxies(data []byte) []protocol.Proxy {
+	proxies := make([]protocol.Proxy, 0)
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		proxy, errP := protocol.LinkToProxy(protocol.Urls{Url: line}, protocol.OutputConfig{})
+		if errP == nil {
+			proxies = append(proxies, proxy)
+		}
+	}
+	return proxies
+}
+
+func parseClashConfigData(ctx context.Context, client *http.Client, rootSubscriptionURL string, data []byte, userAgent string, requestHeaders models.AirportRequestHeaders) (ClashConfig, error, error) {
+	var config ClashConfig
+	// 尝试解析 YAML
+	errYaml := yaml.Unmarshal(data, &config)
+	var providerErr error
+	if errYaml == nil && len(config.Proxies) == 0 && len(config.ProxyProviders) > 0 {
+		providerErr = expandClashProxyProviders(ctx, client, rootSubscriptionURL, &config, userAgent, requestHeaders)
+	}
+
+	// 如果 YAML 解析失败或没有代理节点，尝试 Base64/明文链接解析，兼容 V2Ray 订阅。
+	if errYaml != nil || len(config.Proxies) == 0 {
+		config.Proxies = append(config.Proxies, parseSubscriptionLinkProxies(data)...)
+	}
+
+	return config, errYaml, providerErr
 }
 
 // LoadClashConfigFromURLWithReporter 从指定 URL 加载 Clash 配置（带任务报告器）
 // reporter: 任务进度报告器，用于TaskManager集成
 // fetchUsageInfo: 是否获取用量信息
 // skipTLSVerify: 是否跳过TLS证书验证
-func LoadClashConfigFromURLWithReporter(id int, urlStr string, subName string, downloadWithProxy bool, proxyLink string, userAgent string, reporter TaskReporter, fetchUsageInfo bool, skipTLSVerify bool) (*UsageInfo, error) {
+func LoadClashConfigFromURLWithReporter(ctx context.Context, id int, urlStr string, subName string, downloadWithProxy bool, proxyLink string, userAgent string, requestHeaders models.AirportRequestHeaders, reporter TaskReporter, fetchUsageInfo bool, skipTLSVerify bool) ([]int, *UsageInfo, error) {
+	// 检查任务是否已被取消
+	select {
+	case <-ctx.Done():
+		return nil, nil, fmt.Errorf("任务已取消")
+	default:
+	}
+
 	// 创建 HTTP 客户端，配置 TLS
 	client := &http.Client{
 		Timeout: 30 * time.Second,
@@ -188,20 +554,15 @@ func LoadClashConfigFromURLWithReporter(id int, urlStr string, subName string, d
 							return nil, fmt.Errorf("split host port error: %v", splitErr)
 						}
 
-						portInt, atoiErr := strconv.Atoi(portStr)
-						if atoiErr != nil {
-							return nil, fmt.Errorf("invalid port: %v", atoiErr)
-						}
-
-						// 验证端口范围
-						if portInt < 0 || portInt > 65535 {
-							return nil, fmt.Errorf("port out of range: %d", portInt)
+						portUint, parseErr := strconv.ParseUint(portStr, 10, 16)
+						if parseErr != nil {
+							return nil, fmt.Errorf("invalid port: %v", parseErr)
 						}
 
 						// 创建 mihomo metadata
 						metadata := &constant.Metadata{
 							Host:    host,
-							DstPort: uint16(portInt),
+							DstPort: uint16(portUint),
 							Type:    constant.HTTP,
 						}
 
@@ -216,17 +577,14 @@ func LoadClashConfigFromURLWithReporter(id int, urlStr string, subName string, d
 		}
 	}
 
-	// 创建请求并设置 User-Agent
-	req, err := http.NewRequest("GET", urlStr, nil)
+	// 创建请求并设置 User-Agent（使用传入的 context）
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
 		utils.Error("URL %s，创建请求失败:  %v", urlStr, err)
-		return nil, err
+		return nil, nil, err
 	}
 
-	// 设置 User-Agent
-	if userAgent != "" {
-		req.Header.Set("User-Agent", userAgent)
-	}
+	applyRequestHeaders(req, userAgent, requestHeaders)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -245,21 +603,20 @@ func LoadClashConfigFromURLWithReporter(id int, urlStr string, subName string, d
 			message = fmt.Sprintf("❌订阅【%s】请求失败: %v", subName, err)
 		}
 		// 发送请求失败通知
-		sse.GetSSEBroker().BroadcastEvent("sub_update", sse.NotificationPayload{
-			Event:   "sub_update",
+		notifications.Publish("subscription.sync_failed", notifications.Payload{
 			Title:   title,
 			Message: message,
-			Data: map[string]interface{}{
+			Data: map[string]any{
 				"id":       id,
 				"name":     subName,
-				"status":   "failed",
+				"status":   "error",
 				"error":    err.Error(),
 				"tlsError": isTLSError(err),
 			},
 		})
-		return nil, err
+		return nil, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// 解析用量信息（仅当开启获取用量信息时）
 	var usageInfo *UsageInfo
@@ -286,96 +643,69 @@ func LoadClashConfigFromURLWithReporter(id int, urlStr string, subName string, d
 	if err != nil {
 		utils.Error("URL %s，读取Clash配置失败:  %v", urlStr, err)
 		// 发送读取失败通知
-		sse.GetSSEBroker().BroadcastEvent("sub_update", sse.NotificationPayload{
-			Event:   "sub_update",
+		notifications.Publish("subscription.sync_failed", notifications.Payload{
 			Title:   "订阅更新失败",
 			Message: fmt.Sprintf("❌订阅【%s】读取响应失败: %v", subName, err),
-			Data: map[string]interface{}{
+			Data: map[string]any{
 				"id":     id,
 				"name":   subName,
-				"status": "failed",
+				"status": "error",
 				"error":  err.Error(),
 			},
 		})
-		return nil, err
+		return nil, nil, err
 	}
-	var config ClashConfig
-	// 尝试解析 YAML
-	errYaml := yaml.Unmarshal(data, &config)
 
-	// 如果 YAML 解析失败或没有代理节点，尝试 Base64 解码 兼容base64订阅
-	if errYaml != nil || len(config.Proxies) == 0 {
-		// 尝试标准 Base64 解码
-		decodedBytes, errB64 := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
-		if errB64 != nil {
-			// 尝试 Raw Base64 (无填充) 解码
-			decodedBytes, errB64 = base64.RawStdEncoding.DecodeString(strings.TrimSpace(string(data)))
-		}
-
-		if errB64 == nil {
-			// Base64 解码成功，按行解析
-			lines := strings.Split(string(decodedBytes), "\n")
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
-				}
-				proxy, errP := protocol.LinkToProxy(protocol.Urls{Url: line}, protocol.OutputConfig{})
-				if errP == nil {
-					config.Proxies = append(config.Proxies, proxy)
-				}
-			}
-		}
-		// 兼容非base64的v2ray配置文件
-		if len(config.Proxies) == 0 {
-			// Base64 解码成功，按行解析
-			lines := strings.Split(string(data), "\n")
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
-				}
-				proxy, errP := protocol.LinkToProxy(protocol.Urls{Url: line}, protocol.OutputConfig{})
-				if errP == nil {
-					config.Proxies = append(config.Proxies, proxy)
-				}
-			}
-		}
+	// 检查任务是否在解析前被取消
+	select {
+	case <-ctx.Done():
+		return nil, nil, fmt.Errorf("任务已取消")
+	default:
 	}
+
+	config, errYaml, providerErr := parseClashConfigData(ctx, client, urlStr, data, userAgent, requestHeaders)
 
 	if len(config.Proxies) == 0 {
-		utils.Error("URL %s，解析失败或未找到节点 (YAML error: %v)", urlStr, errYaml)
+		parseErr := fmt.Errorf("解析失败 or 未找到节点")
+		errorMessage := "解析失败或未找到节点"
+		if providerErr != nil {
+			parseErr = providerErr
+			errorMessage = providerErr.Error()
+		}
+
+		utils.Error("URL %s，解析失败或未找到节点 (YAML error: %v, provider error: %v)", urlStr, errYaml, providerErr)
 		// 发送解析失败通知
-		sse.GetSSEBroker().BroadcastEvent("sub_update", sse.NotificationPayload{
-			Event:   "sub_update",
+		notifications.Publish("subscription.sync_failed", notifications.Payload{
 			Title:   "订阅更新失败",
-			Message: fmt.Sprintf("❌订阅【%s】解析失败或未找到节点", subName),
-			Data: map[string]interface{}{
+			Message: fmt.Sprintf("❌订阅【%s】%s", subName, errorMessage),
+			Data: map[string]any{
 				"id":     id,
 				"name":   subName,
-				"status": "failed",
-				"error":  "解析失败或未找到节点",
+				"status": "error",
+				"error":  errorMessage,
 			},
 		})
-		return nil, fmt.Errorf("解析失败 or 未找到节点")
+		return nil, nil, parseErr
 	}
 
-	err = scheduleClashToNodeLinks(id, config.Proxies, subName, reporter, usageInfo)
-	return usageInfo, err
+	changedNodeIDs, err := scheduleClashToNodeLinks(ctx, id, config.Proxies, subName, reporter, usageInfo)
+	return changedNodeIDs, usageInfo, err
 }
 
 // scheduleClashToNodeLinks 将 Clash 代理配置转换为节点链接并保存到数据库
+// ctx: context 用于任务取消和超时控制
 // id: 订阅ID
 // proxys: 代理节点列表
 // subName: 订阅名称
 // usageInfo: 订阅用量信息 (可选)
-func scheduleClashToNodeLinks(id int, proxys []protocol.Proxy, subName string, reporter TaskReporter, usageInfo *UsageInfo) error {
+func scheduleClashToNodeLinks(ctx context.Context, id int, proxys []protocol.Proxy, subName string, reporter TaskReporter, usageInfo *UsageInfo) ([]int, error) {
 	if reporter == nil {
 		reporter = &NoOpTaskReporter{}
 	}
 
 	addSuccessCount := 0
-	skipCount := 0 // 已存在的节点数量（跳过）
+	updateCount := 0 // 名称/链接已更新的节点数量
+	skipCount := 0   // 已存在的节点数量（跳过）
 	processedCount := 0
 	startTime := time.Now() // 记录开始时间用于计算耗时
 
@@ -393,23 +723,59 @@ func scheduleClashToNodeLinks(id int, proxys []protocol.Proxy, subName string, r
 		utils.Error("获取机场 %s 的Group失败:  %v", subName, err)
 	}
 
-	// 应用机场节点过滤和重命名规则
+	// 1. 读取全局节点处理配置
+	globalWhitelist, _ := models.GetSetting("global_node_name_whitelist")
+	globalBlacklist, _ := models.GetSetting("global_node_name_blacklist")
+	globalProtocolWhitelist, _ := models.GetSetting("global_protocol_whitelist")
+	globalProtocolBlacklist, _ := models.GetSetting("global_protocol_blacklist")
+	globalPreprocess, _ := models.GetSetting("global_node_name_preprocess")
+
+	// 2. 构造全局配置的虚拟 Airport 对象
+	globalAirport := &models.Airport{
+		NodeNameWhitelist:  globalWhitelist,
+		NodeNameBlacklist:  globalBlacklist,
+		ProtocolWhitelist:  globalProtocolWhitelist,
+		ProtocolBlacklist:  globalProtocolBlacklist,
+		NodeNamePreprocess: globalPreprocess,
+	}
+
+	// 3. 先应用全局过滤规则
+	if globalWhitelist != "" || globalBlacklist != "" ||
+		globalProtocolWhitelist != "" || globalProtocolBlacklist != "" {
+		originalCount := len(proxys)
+		proxys = applyAirportNodeFilter(globalAirport, proxys)
+		if len(proxys) < originalCount {
+			utils.Info("🌐全局过滤后节点数量：%d（原始：%d，过滤掉：%d）",
+				len(proxys), originalCount, originalCount-len(proxys))
+		}
+	}
+
+	// 4. 再应用机场特定过滤规则
 	if airport != nil {
 		originalCount := len(proxys)
 		proxys = applyAirportNodeFilter(airport, proxys)
 		if len(proxys) < originalCount {
-			utils.Info("📦订阅【%s】过滤后节点数量：%d（原始：%d，过滤掉：%d）", subName, len(proxys), originalCount, originalCount-len(proxys))
+			utils.Info("📦机场【%s】过滤后节点数量：%d（原始：%d，过滤掉：%d）", subName, len(proxys), originalCount, originalCount-len(proxys))
 		}
 		// 应用高级去重规则
 		beforeDedup := len(proxys)
 		proxys = applyAirportDeduplication(airport, proxys)
 		if len(proxys) < beforeDedup {
-			utils.Info("🔄订阅【%s】去重后节点数量：%d（去重前：%d，去重掉：%d）", subName, len(proxys), beforeDedup, beforeDedup-len(proxys))
+			utils.Info("🔄机场【%s】去重后节点数量：%d（去重前：%d，去重掉：%d）", subName, len(proxys), beforeDedup, beforeDedup-len(proxys))
 		}
-		//节点重命名
+	}
+
+	// 5. 先应用全局重命名规则
+	if globalPreprocess != "" {
+		proxys = applyAirportNodeRename(globalAirport, proxys)
+		utils.Info("🌐应用全局节点名称预处理规则")
+	}
+
+	// 6. 再应用机场特定重命名规则
+	if airport != nil {
 		proxys = applyAirportNodeRename(airport, proxys)
-		// 节点名称唯一化（添加机场标识前缀，防止多机场节点重名）
-		proxys = applyAirportNodeUniquify(airport, proxys)
+		// 节点名称唯一化（先添加机场标识前缀，机场内编号在后续去重判断完成后再应用）
+		proxys = applyAirportNodeNamePrefix(airport, proxys)
 	}
 
 	// 1. 获取该订阅当前在数据库中的所有节点
@@ -425,10 +791,88 @@ func scheduleClashToNodeLinks(id int, proxys []protocol.Proxy, subName string, r
 		existingNodeByID[node.ID] = node
 	}
 
-	// 获取全库的 ContentHash 集合（用于全库去重）
-	allNodeHashes := models.GetAllNodeContentHashes()
+	// 预扫描：统计本次拉取中每个 ContentHash 对应的名称集合（trim 后）
+	// 用于识别同 hash 多名称的信息节点（如"到期时间"、"剩余流量"），这类节点应放行入库且需要按名称粒度清理
+	currentNamesByHash := make(map[string]map[string]bool)
+	for _, p := range proxys {
+		name := strings.TrimSpace(p.Name)
+		p.Server = utils.WrapIPv6Host(p.Server)
+		ch := protocol.GenerateProxyContentHash(p)
+		if ch == "" {
+			continue
+		}
+		if currentNamesByHash[ch] == nil {
+			currentNamesByHash[ch] = make(map[string]bool)
+		}
+		currentNamesByHash[ch][name] = true
+	}
 
-	utils.Info("📄订阅【%s】获取到订阅数量【%d】，现有节点数量【%d】，全库哈希数量【%d】", subName, len(proxys), len(existingNodes), len(allNodeHashes))
+	// 统计数据库中本机场已有节点的 hash→原始名称集合
+	// 解决“历史上是信息节点，但本次拉取只剩一个名称”时无法识别的问题（否则会导致残留无法清理/误更新）。
+	existingNamesByHash := make(map[string]map[string]bool)
+	for _, node := range existingNodes {
+		if node.ContentHash == "" {
+			continue
+		}
+		name := strings.TrimSpace(node.LinkName)
+		if name == "" {
+			name = strings.TrimSpace(node.Name)
+		}
+		if existingNamesByHash[node.ContentHash] == nil {
+			existingNamesByHash[node.ContentHash] = make(map[string]bool)
+		}
+		existingNamesByHash[node.ContentHash][name] = true
+	}
+
+	// 信息节点 hash 集合：本次拉取或数据库历史中，同一 hash 对应多个不同名称
+	infoNodeHashes := make(map[string]bool)
+	for ch, names := range currentNamesByHash {
+		if len(names) > 1 {
+			infoNodeHashes[ch] = true
+		}
+	}
+	for ch, names := range existingNamesByHash {
+		if len(names) > 1 {
+			infoNodeHashes[ch] = true
+		}
+	}
+
+	// 在基于原始名称完成同 hash 分类后，再对同机场内重名节点追加顺序编号，避免影响内容哈希去重语义。
+	proxys = applyAirportIntraNodeUniquify(airport, proxys)
+
+	// 创建现有节点的映射表（以 ContentHash 为键，用于同机场去重判断与更新）
+	existingNodeByContentHash := make(map[string]models.Node)
+	// 对信息节点 hash，按原始名称记录本机场已有节点（用户备注不会影响重新拉取匹配）
+	existingInfoNodeNames := make(map[string]map[string]models.Node)
+	for _, node := range existingNodes {
+		if node.ContentHash != "" {
+			existingNodeByContentHash[node.ContentHash] = node
+			// 如果该 hash 是信息节点，按名称建立索引
+			if infoNodeHashes[node.ContentHash] {
+				if existingInfoNodeNames[node.ContentHash] == nil {
+					existingInfoNodeNames[node.ContentHash] = make(map[string]models.Node)
+				}
+				name := strings.TrimSpace(node.LinkName)
+				if name == "" {
+					name = strings.TrimSpace(node.Name)
+				}
+				existingInfoNodeNames[node.ContentHash][name] = node
+			}
+		}
+	}
+
+	// 读取全局配置：是否启用跨机场去重（默认启用）
+	crossAirportDedupVal, _ := models.GetSetting("cross_airport_dedup_enabled")
+	enableCrossDedup := crossAirportDedupVal != "false"
+
+	var allNodeHashes map[string]bool
+	if enableCrossDedup {
+		allNodeHashes = models.GetAllNodeContentHashes()
+	} else {
+		allNodeHashes = models.GetNodeContentHashesBySourceID(id)
+	}
+
+	utils.Info("📄订阅【%s】获取到订阅数量【%d】，现有节点数量【%d】，哈希数量【%d】，跨机场去重【%v】", subName, len(proxys), len(existingNodes), len(allNodeHashes), enableCrossDedup)
 
 	// 更新任务总数（此时已知道需要处理的节点数量）
 	reporter.UpdateTotal(len(proxys))
@@ -439,8 +883,38 @@ func scheduleClashToNodeLinks(id int, proxys []protocol.Proxy, subName string, r
 	// 批量收集：新增节点列表（稍后批量写入）
 	nodesToAdd := make([]models.Node, 0)
 
+	// 批量收集：需要更新名称/链接的节点列表
+	nodesToUpdate := make([]models.NodeInfoUpdate, 0)
+	countryBackfilledNodeIDs := make([]int, 0)
+
+	backfillExistingNodeCountry := func(existingNode models.Node, nodeName string) bool {
+		if airport == nil || !airport.BackfillExistingCountry || existingNode.LinkCountry != "" {
+			return false
+		}
+		country := models.ParseCountryFromNodeName(nodeName)
+		if country == "" {
+			return false
+		}
+		if err := models.UpdateNodeFields(existingNode.ID, map[string]any{"link_country": country}); err != nil {
+			utils.Warn("回填节点【%s】国家失败: %v", nodeName, err)
+			return false
+		}
+		countryBackfilledNodeIDs = append(countryBackfilledNodeIDs, existingNode.ID)
+		utils.Debug("🌍 现存节点【%s】回填国家: %s", nodeName, country)
+		return true
+	}
+
 	// 2. 遍历新获取的节点，插入或更新
-	for _, proxy := range proxys {
+	for proxyIndex, proxy := range proxys {
+		// 定期检查任务是否已取消或超时（每处理一个节点检查一次）
+		select {
+		case <-ctx.Done():
+			utils.Warn("任务在处理节点时被取消或超时，已处理 %d/%d 个节点", processedCount, len(proxys))
+			reporter.ReportFail("任务执行超时或被取消")
+			return nil, fmt.Errorf("任务已取消或超时")
+		default:
+		}
+
 		utils.Info("💾准备存储节点【%s】", proxy.Name)
 		var Node models.Node
 
@@ -456,7 +930,7 @@ func scheduleClashToNodeLinks(id int, proxys []protocol.Proxy, subName string, r
 		}
 
 		// 使用公共函数生成节点链接
-		link := generateProxyLink(proxy)
+		link := GenerateProxyLink(proxy)
 		if link == "" {
 			utils.Warn("节点【%s】生成链接失败，跳过", proxy.Name)
 			continue
@@ -465,14 +939,26 @@ func scheduleClashToNodeLinks(id int, proxys []protocol.Proxy, subName string, r
 		Node.Link = link
 		Node.Name = proxy.Name
 		Node.LinkName = proxy.Name
+		Node.NameMode = models.NodeNameModeLink
 		Node.LinkAddress = proxy.Server + ":" + strconv.Itoa(int(proxy.Port))
 		Node.LinkHost = proxy.Server
 		Node.LinkPort = strconv.Itoa(int(proxy.Port))
 		Node.Source = subName
 		Node.SourceID = id
-		Node.Group = airport.Group
-		Node.Protocol = proxy.Type
+		Node.SourceSort = proxyIndex + 1
+		if airport != nil {
+			Node.Group = airport.Group
+		}
+		Node.Protocol = protocol.GetProtocolFromLink(link)
 		Node.ContentHash = contentHash
+
+		// 国家自动填充（新节点）
+		if airport != nil && airport.AutoFillCountry && Node.LinkCountry == "" {
+			if country := models.ParseCountryFromNodeName(proxy.Name); country != "" {
+				Node.LinkCountry = country
+				utils.Debug("🌍 新节点【%s】自动填充国家: %s", proxy.Name, country)
+			}
+		}
 
 		// 记录本次获取到的节点 ContentHash
 		currentHashes[contentHash] = true
@@ -482,27 +968,90 @@ func scheduleClashToNodeLinks(id int, proxys []protocol.Proxy, subName string, r
 		if allNodeHashes[contentHash] {
 			skipCount++
 			nodeStatus = "skipped"
-			// 节点内容已存在，跳过 - 输出详细日志便于排查
-			if existingNode, exists := models.GetNodeByContentHash(contentHash); exists {
-				// 判断是本机场重复还是跨机场重复
-				if existingNode.SourceID == id {
-					// 检查是否名称相同
-					if existingNode.Name == proxy.Name {
-						utils.Debug("⏭️ 节点【%s】在本机场已存在，跳过", proxy.Name)
+			// 节点内容已存在 - 优先判断是否为本机场已存在节点
+			if _, ok := existingNodeByContentHash[contentHash]; ok {
+				// 属于本机场
+				if infoNodeHashes[contentHash] {
+					// 信息节点：用名称精确匹配（同 hash 对应多个已有节点）
+					if existingByName, nameExists := existingInfoNodeNames[contentHash][proxy.Name]; nameExists {
+						backfilledCountry := backfillExistingNodeCountry(existingByName, proxy.Name)
+						// 该名称的信息节点已存在，检查链接或顺序是否变化
+						if existingByName.LinkName != proxy.Name || existingByName.Link != link || existingByName.SourceSort != Node.SourceSort {
+							nodesToUpdate = append(nodesToUpdate, models.BuildNodeInfoUpdate(existingByName, proxy.Name, link, Node.SourceSort))
+							updateCount++
+							nodeStatus = "updated"
+							utils.Info("✏️ 信息节点【%s】链接/顺序已变更，将更新", proxy.Name)
+						} else if backfilledCountry {
+							nodeStatus = "updated"
+						} else {
+							utils.Debug("⏭️ 信息节点【%s】在本机场已存在，跳过", proxy.Name)
+						}
 					} else {
-						// 名称不同但配置相同，输出规范化JSON便于排查
-						hashData := protocol.NormalizeProxyForHash(proxy)
-						jsonBytes, _ := json.Marshal(hashData)
-						utils.Warn("🔀 节点【%s】与已有节点【%s】配置相同，跳过\n    HashData: %s", proxy.Name, existingNode.Name, string(jsonBytes))
+						// 该名称的信息节点不存在（上游新增了一个信息节点），入库
+						nodesToAdd = append(nodesToAdd, Node)
+						skipCount--
+						addSuccessCount++
+						nodeStatus = "added"
+						utils.Info("📌 信息节点【%s】为新名称，允许入库", proxy.Name)
 					}
 				} else {
-					utils.Warn("⚠️ 节点【%s】与其他机场重复，跳过 [现有节点: %s] [来源: %s] [分组: %s] [SourceID: %d]", proxy.Name, existingNode.Name, existingNode.Source, existingNode.Group, existingNode.SourceID)
+					// 普通节点：用 hash 匹配，检查名称或链接是否变化
+					existingNode := existingNodeByContentHash[contentHash]
+					backfilledCountry := backfillExistingNodeCountry(existingNode, proxy.Name)
+
+					if existingNode.LinkName != proxy.Name || existingNode.Link != link || existingNode.SourceSort != Node.SourceSort {
+						nodesToUpdate = append(nodesToUpdate, models.BuildNodeInfoUpdate(existingNode, proxy.Name, link, Node.SourceSort))
+						updateCount++
+						nodeStatus = "updated"
+						utils.Info("✏️ 节点【%s】原始名称/链接/顺序已变更，将更新 [旧原始名称: %s]", proxy.Name, existingNode.LinkName)
+					} else if backfilledCountry {
+						nodeStatus = "updated"
+					} else {
+						utils.Debug("⏭️ 节点【%s】在本机场已存在，跳过", proxy.Name)
+					}
+				}
+			} else if enableCrossDedup {
+				// 跨机场去重开启：若全库已存在该内容，则跳过
+				if existingNode, exists := models.GetNodeByContentHash(contentHash); exists {
+					// 检查是否为同 hash 不同名的信息节点（预扫描已确定）
+					if infoNodeHashes[contentHash] {
+						nodesToAdd = append(nodesToAdd, Node)
+						skipCount--
+						addSuccessCount++
+						nodeStatus = "added"
+						utils.Info("📌 节点【%s】与已有节点配置相同但名称不同（信息节点），允许入库 [已有: %s]", proxy.Name, existingNode.Name)
+					} else {
+						utils.Warn("⚠️ 节点【%s】与其他机场重复，跳过 [现有节点: %s] [来源: %s] [分组: %s] [SourceID: %d]", proxy.Name, existingNode.Name, existingNode.Source, existingNode.Group, existingNode.SourceID)
+					}
+				} else {
+					// hash存在于allNodeHashes但缓存中找不到，说明是本次拉取中的内部重复
+					if infoNodeHashes[contentHash] {
+						nodesToAdd = append(nodesToAdd, Node)
+						skipCount--
+						addSuccessCount++
+						nodeStatus = "added"
+						allNodeHashes[contentHash] = true
+						utils.Info("📌 节点【%s】与本次拉取中其他节点配置相同但名称不同（信息节点），允许入库", proxy.Name)
+					} else {
+						hashData := protocol.NormalizeProxyForHash(proxy)
+						jsonBytes, _ := json.Marshal(hashData)
+						utils.Warn("🔄 节点【%s】与本次拉取中的其他节点重复（相同配置），跳过\n    HashData: %s", proxy.Name, string(jsonBytes))
+					}
 				}
 			} else {
-				// hash存在于allNodeHashes但缓存中找不到，说明是本次拉取中的内部重复
-				hashData := protocol.NormalizeProxyForHash(proxy)
-				jsonBytes, _ := json.Marshal(hashData)
-				utils.Warn("🔄 节点【%s】与本次拉取中的其他节点重复（相同配置），跳过\n    HashData: %s", proxy.Name, string(jsonBytes))
+				// 跨机场去重关闭时 allNodeHashes 只包含本机场哈希；若此处找不到现有节点，说明是本次拉取内重复
+				if infoNodeHashes[contentHash] {
+					nodesToAdd = append(nodesToAdd, Node)
+					skipCount--
+					addSuccessCount++
+					nodeStatus = "added"
+					allNodeHashes[contentHash] = true
+					utils.Info("📌 节点【%s】与本次拉取中其他节点配置相同但名称不同（信息节点），允许入库", proxy.Name)
+				} else {
+					hashData := protocol.NormalizeProxyForHash(proxy)
+					jsonBytes, _ := json.Marshal(hashData)
+					utils.Warn("🔄 节点【%s】与本次拉取中的其他节点重复（相同配置），跳过\n    HashData: %s", proxy.Name, string(jsonBytes))
+				}
 			}
 		} else {
 			// 节点不存在，收集到待添加列表
@@ -515,7 +1064,7 @@ func scheduleClashToNodeLinks(id int, proxys []protocol.Proxy, subName string, r
 
 		// 更新进度（通过 reporter 报告）
 		processedCount++
-		reporter.ReportProgress(processedCount, proxy.Name, map[string]interface{}{
+		reporter.ReportProgress(processedCount, proxy.Name, map[string]any{
 			"status":  nodeStatus,
 			"added":   addSuccessCount,
 			"skipped": skipCount,
@@ -528,18 +1077,51 @@ func scheduleClashToNodeLinks(id int, proxys []protocol.Proxy, subName string, r
 		// 使用 ContentHash 判断节点是否在本次拉取中
 		if !currentHashes[node.ContentHash] {
 			nodeIDsToDelete = append(nodeIDsToDelete, nodeID)
+			continue
+		}
+
+		// 信息节点：hash 仍在，但需要按名称精细判断，避免名称变化/部分移除导致垃圾节点残留（数据膨胀）
+		if infoNodeHashes[node.ContentHash] {
+			currentNames := currentNamesByHash[node.ContentHash]
+			name := strings.TrimSpace(node.LinkName)
+			if name == "" {
+				name = strings.TrimSpace(node.Name)
+			}
+			if len(currentNames) == 0 || !currentNames[name] {
+				nodeIDsToDelete = append(nodeIDsToDelete, nodeID)
+			}
 		}
 	}
 
 	// 4. 批量写入数据库（一次性操作，减少数据库I/O）
 	// 批量添加新节点
 	if len(nodesToAdd) > 0 {
+		// 检查任务是否已取消或超时（批量操作前检查）
+		select {
+		case <-ctx.Done():
+			utils.Warn("任务在批量添加节点前被取消或超时")
+			reporter.ReportFail("任务执行超时或被取消")
+			return nil, fmt.Errorf("任务已取消或超时")
+		default:
+		}
+
 		if err := models.BatchAddNodes(nodesToAdd); err != nil {
 			utils.Error("❌批量添加节点失败：%v", err)
 			// 重置计数，因为添加失败
 			addSuccessCount = 0
 		} else {
 			utils.Info("✅批量添加 %d 个节点成功", len(nodesToAdd))
+		}
+	}
+
+	// 批量更新名称/链接已变更的节点
+	actualUpdateCount := 0
+	if len(nodesToUpdate) > 0 {
+		if cnt, err := models.BatchUpdateNodeInfo(nodesToUpdate); err != nil {
+			utils.Error("❌批量更新节点信息失败：%v", err)
+		} else {
+			actualUpdateCount = cnt
+			utils.Info("✏️批量更新 %d 个节点的名称/链接", actualUpdateCount)
 		}
 	}
 
@@ -554,24 +1136,39 @@ func scheduleClashToNodeLinks(id int, proxys []protocol.Proxy, subName string, r
 		}
 	}
 
-	utils.Info("✅订阅【%s】节点同步完成，总节点【%d】个，成功处理【%d】个，新增节点【%d】个，已存在节点【%d】个，删除失效【%d】个", subName, len(proxys), addSuccessCount+skipCount, addSuccessCount, skipCount, deleteCount)
+	utils.Info("✅订阅【%s】节点同步完成，总节点【%d】个，成功处理【%d】个，新增节点【%d】个，更新节点【%d】个，已存在节点【%d】个，删除失效【%d】个", subName, len(proxys), addSuccessCount+skipCount, addSuccessCount, actualUpdateCount, skipCount, deleteCount)
+
+	// 收集变更和新增的节点ID（用于更新后仅检测变化节点的功能）
+	changedNodeIDs := make([]int, 0, addSuccessCount+actualUpdateCount)
+	for _, n := range nodesToAdd {
+		if n.ID > 0 {
+			changedNodeIDs = append(changedNodeIDs, n.ID)
+		}
+	}
+	for _, u := range nodesToUpdate {
+		if u.ID > 0 {
+			changedNodeIDs = append(changedNodeIDs, u.ID)
+		}
+	}
+	changedNodeIDs = append(changedNodeIDs, countryBackfilledNodeIDs...)
+
 	// 重新查找机场以获取最新信息并更新成功次数
 	airport, err = models.GetAirportByID(id)
 	if err != nil {
 		utils.Error("获取机场 %s 失败:  %v", subName, err)
-		return err
+		return nil, err
 	}
 	airport.SuccessCount = addSuccessCount + skipCount
 	// 当前时间
-	now := time.Now()
-	airport.LastRunTime = &now
+	airport.LastRunTime = new(time.Now())
 	err1 := airport.Update()
 	if err1 != nil {
-		return err1
+		return nil, err1
 	}
 	// 通过 reporter 报告任务完成
-	reporter.ReportComplete(fmt.Sprintf("订阅更新完成 (新增: %d, 已存在: %d, 删除: %d)", addSuccessCount, skipCount, deleteCount), map[string]interface{}{
+	reporter.ReportComplete(fmt.Sprintf("订阅更新完成 (新增: %d, 更新: %d, 已存在: %d, 删除: %d)", addSuccessCount, actualUpdateCount, skipCount, deleteCount), map[string]any{
 		"added":   addSuccessCount,
+		"updated": actualUpdateCount,
 		"skipped": skipCount,
 		"deleted": deleteCount,
 	})
@@ -582,7 +1179,7 @@ func scheduleClashToNodeLinks(id int, proxys []protocol.Proxy, subName string, r
 
 	// 构建用量信息文本
 	var usageText string
-	usageData := make(map[string]interface{})
+	usageData := make(map[string]any)
 	if usageInfo != nil {
 		if usageInfo.Total != -1 {
 			usageText = fmt.Sprintf("\n📊 用量信息\n⬆️ 上传: %s\n⬇️ 下载: %s\n📦 总量: %s\n⏳ 过期: %s",
@@ -597,7 +1194,7 @@ func scheduleClashToNodeLinks(id int, proxys []protocol.Proxy, subName string, r
 		}
 	}
 
-	nData := map[string]interface{}{
+	nData := map[string]any{
 		"id":       id,
 		"name":     subName,
 		"status":   "success",
@@ -608,13 +1205,12 @@ func scheduleClashToNodeLinks(id int, proxys []protocol.Proxy, subName string, r
 		nData["usage"] = usageData
 	}
 
-	sse.GetSSEBroker().BroadcastEvent("sub_update", sse.NotificationPayload{
-		Event:   "sub_update",
+	notifications.Publish("subscription.sync_succeeded", notifications.Payload{
 		Title:   "订阅更新完成",
-		Message: fmt.Sprintf("✅订阅【%s】节点同步完成，耗时 %s，总节点【%d】个，成功处理【%d】个，新增节点【%d】个，已存在节点【%d】个，删除失效【%d】个%s", subName, durationStr, len(proxys), addSuccessCount+skipCount, addSuccessCount, skipCount, deleteCount, usageText),
+		Message: fmt.Sprintf("✅订阅【%s】节点同步完成，耗时 %s，总节点【%d】个，成功处理【%d】个，新增节点【%d】个，更新节点【%d】个，已存在节点【%d】个，删除失效【%d】个%s", subName, durationStr, len(proxys), addSuccessCount+skipCount, addSuccessCount, actualUpdateCount, skipCount, deleteCount, usageText),
 		Data:    nData,
 	})
-	return nil
+	return changedNodeIDs, nil
 
 }
 
@@ -672,7 +1268,7 @@ func applyAirportNodeFilter(airport *models.Airport, proxys []protocol.Proxy) []
 	result := make([]protocol.Proxy, 0, len(proxys))
 	for _, proxy := range proxys {
 		nodeName := strings.TrimSpace(proxy.Name)
-		nodeProto := strings.ToLower(proxy.Type)
+		nodeProto := proxyProtocolName(proxy)
 
 		// 1. 名称黑名单检查（优先级最高）
 		if hasNameBlacklist && utils.MatchesNodeNameFilter(airport.NodeNameBlacklist, nodeName) {
@@ -698,6 +1294,14 @@ func applyAirportNodeFilter(airport *models.Airport, proxys []protocol.Proxy) []
 	}
 
 	return result
+}
+
+func proxyProtocolName(proxy protocol.Proxy) string {
+	proxyType := strings.ToLower(strings.TrimSpace(proxy.Type))
+	if proxyType == "http" && proxy.Tls {
+		return "https"
+	}
+	return proxyType
 }
 
 // applyAirportNodeRename 应用机场节点重命名规则
@@ -743,7 +1347,7 @@ func applyAirportDeduplication(airport *models.Airport, proxys []protocol.Proxy)
 	var result []protocol.Proxy
 
 	for _, proxy := range proxys {
-		protoType := strings.ToLower(proxy.Type)
+		protoType := proxyProtocolName(proxy)
 		fields, exists := config.ProtocolRules[protoType]
 		if !exists || len(fields) == 0 {
 			// 该协议未配置去重规则，保留节点
@@ -773,7 +1377,7 @@ func applyAirportDeduplication(airport *models.Airport, proxys []protocol.Proxy)
 // 需要先生成节点链接，再解析获取完整协议结构体，才能正确提取嵌套字段
 func generateProxyDeduplicationKey(proxy protocol.Proxy, protoType string, fields []string) string {
 	// 生成节点链接
-	link := generateProxyLink(proxy)
+	link := GenerateProxyLink(proxy)
 	if link == "" {
 		return ""
 	}
@@ -793,329 +1397,54 @@ func generateProxyDeduplicationKey(proxy protocol.Proxy, protoType string, field
 	return strings.Join(parts, "|")
 }
 
-// generateProxyLink 从 Proxy 结构体生成节点链接
-func generateProxyLink(proxy protocol.Proxy) string {
+const defaultImportedECHResolver = "https://dns.alidns.com/dns-query"
+
+// GenerateProxyLink 从 Proxy 结构体生成节点链接
+func GenerateProxyLink(proxy protocol.Proxy) string {
+	if strings.EqualFold(proxy.Type, "vless") {
+		vless := protocol.ConvertProxyToVless(proxy)
+		if strings.TrimSpace(vless.Query.Ech) == "" {
+			enabled := true
+			if rawEnabled, ok := proxy.ECH_opts["enable"].(bool); ok {
+				enabled = rawEnabled
+			}
+			if enabled {
+				if queryServerName, ok := proxy.ECH_opts["query-server-name"].(string); ok {
+					queryServerName = strings.TrimSpace(queryServerName)
+					if queryServerName != "" {
+						vless.Query.Ech = queryServerName + "+" + defaultImportedECHResolver
+					}
+				}
+			}
+		}
+
+		if strings.TrimSpace(vless.Query.Ech) != "" {
+			vless.Name = strings.TrimSpace(vless.Name)
+			vless.Server = utils.WrapIPv6Host(vless.Server)
+			return protocol.EncodeVLESSURL(vless)
+		}
+	}
+
 	proxy.Name = strings.TrimSpace(proxy.Name)
 	proxy.Server = utils.WrapIPv6Host(proxy.Server)
-
-	switch strings.ToLower(proxy.Type) {
-	case "ss":
-		method := proxy.Cipher
-		password := proxy.Password
-		server := proxy.Server
-		port := int(proxy.Port)
-		name := proxy.Name
-		encoded := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", method, password)))
-		return fmt.Sprintf("ss://%s@%s:%d#%s", encoded, server, port, name)
-
-	case "ssr":
-		server := proxy.Server
-		port := int(proxy.Port)
-		proxyProtocol := proxy.Protocol
-		method := proxy.Cipher
-		obfs := proxy.Obfs
-		password := base64.StdEncoding.EncodeToString([]byte(proxy.Password))
-		remarks := base64.StdEncoding.EncodeToString([]byte(proxy.Name))
-		obfsparam := ""
-		if proxy.Obfs_password != "" {
-			obfsparam = base64.StdEncoding.EncodeToString([]byte(proxy.Obfs_password))
-		}
-		params := fmt.Sprintf("remarks=%s", remarks)
-		if obfsparam != "" {
-			params += fmt.Sprintf("&obfsparam=%s", obfsparam)
-		}
-		data := fmt.Sprintf("%s:%d:%s:%s:%s:%s/?%s", server, port, proxyProtocol, method, obfs, password, params)
-		return fmt.Sprintf("ssr://%s", base64.StdEncoding.EncodeToString([]byte(data)))
-
-	case "trojan":
-		password := proxy.Password
-		server := proxy.Server
-		port := int(proxy.Port)
-		name := proxy.Name
-		query := url.Values{}
-		if proxy.Sni != "" {
-			query.Set("sni", proxy.Sni)
-		}
-		if proxy.Peer != "" {
-			query.Set("peer", proxy.Peer)
-		}
-		if proxy.Skip_cert_verify {
-			query.Set("allowInsecure", "1")
-		}
-		if proxy.Network != "" {
-			query.Set("type", proxy.Network)
-		}
-		if proxy.Client_fingerprint != "" {
-			query.Set("fp", proxy.Client_fingerprint)
-		}
-		if len(proxy.Alpn) > 0 {
-			query.Set("alpn", strings.Join(proxy.Alpn, ","))
-		}
-		if proxy.Flow != "" {
-			query.Set("flow", proxy.Flow)
-		}
-		if len(proxy.Ws_opts) > 0 {
-			if path, ok := proxy.Ws_opts["path"].(string); ok && path != "" {
-				query.Set("path", path)
-			}
-			if headers, ok := proxy.Ws_opts["headers"].(map[string]interface{}); ok {
-				if host, ok := headers["Host"].(string); ok && host != "" {
-					query.Set("host", host)
-				}
-			}
-		}
-		if len(proxy.Reality_opts) > 0 {
-			if publicKey, ok := proxy.Reality_opts["public-key"].(string); ok && publicKey != "" {
-				query.Set("pbk", publicKey)
-			}
-			if shortId, ok := proxy.Reality_opts["short-id"].(string); ok && shortId != "" {
-				query.Set("sid", shortId)
-			}
-		}
-		queryStr := query.Encode()
-		if queryStr != "" {
-			return fmt.Sprintf("trojan://%s@%s:%d?%s#%s", password, server, port, queryStr, name)
-		}
-		return fmt.Sprintf("trojan://%s@%s:%d#%s", password, server, port, name)
-
-	case "vmess":
-		vmessObj := map[string]interface{}{
-			"v":    "2",
-			"ps":   proxy.Name,
-			"add":  proxy.Server,
-			"port": proxy.Port,
-			"id":   proxy.Uuid,
-			"scy":  proxy.Cipher,
-		}
-		if proxy.AlterId != "" {
-			aid, _ := strconv.Atoi(proxy.AlterId)
-			vmessObj["aid"] = aid
-		} else {
-			vmessObj["aid"] = 0
-		}
-		vmessObj["net"] = proxy.Network
-		if proxy.Tls {
-			vmessObj["tls"] = "tls"
-		} else {
-			vmessObj["tls"] = "none"
-		}
-		if len(proxy.Ws_opts) > 0 {
-			if path, ok := proxy.Ws_opts["path"].(string); ok {
-				vmessObj["path"] = path
-			}
-			if headers, ok := proxy.Ws_opts["headers"].(map[string]interface{}); ok {
-				if host, ok := headers["Host"].(string); ok {
-					vmessObj["host"] = host
-				}
-			}
-		}
-		jsonData, _ := json.Marshal(vmessObj)
-		return fmt.Sprintf("vmess://%s", base64.StdEncoding.EncodeToString(jsonData))
-
-	case "vless":
-		uuid := proxy.Uuid
-		server := proxy.Server
-		port := int(proxy.Port)
-		name := proxy.Name
-		query := url.Values{}
-		if proxy.Network != "" {
-			query.Set("type", proxy.Network)
-		}
-		if proxy.Tls {
-			query.Set("security", "tls")
-		} else {
-			query.Set("security", "none")
-		}
-		if proxy.Servername != "" {
-			query.Set("sni", proxy.Servername)
-		}
-		if proxy.Client_fingerprint != "" {
-			query.Set("fp", proxy.Client_fingerprint)
-		}
-		if proxy.Flow != "" {
-			query.Set("flow", proxy.Flow)
-		}
-		if proxy.Skip_cert_verify {
-			query.Set("allowInsecure", "1")
-		}
-		if len(proxy.Alpn) > 0 {
-			query.Set("alpn", strings.Join(proxy.Alpn, ","))
-		}
-		if len(proxy.Ws_opts) > 0 {
-			if path, ok := proxy.Ws_opts["path"].(string); ok && path != "" {
-				query.Set("path", path)
-			}
-			if headers, ok := proxy.Ws_opts["headers"].(map[string]interface{}); ok {
-				if host, ok := headers["Host"].(string); ok && host != "" {
-					query.Set("host", host)
-				}
-			}
-		}
-		if len(proxy.Reality_opts) > 0 {
-			if pbk, ok := proxy.Reality_opts["public-key"].(string); ok && pbk != "" {
-				query.Set("pbk", pbk)
-			}
-			if sid, ok := proxy.Reality_opts["short-id"].(string); ok && sid != "" {
-				query.Set("sid", sid)
-			}
-		}
-		if len(proxy.Grpc_opts) > 0 {
-			query.Set("security", "reality")
-			if sn, ok := proxy.Grpc_opts["grpc-service-name"].(string); ok && sn != "" {
-				query.Set("serviceName", sn)
-			}
-			if mode, ok := proxy.Grpc_opts["grpc-mode"].(string); ok && mode == "multi" {
-				query.Set("mode", "multi")
-			}
-		}
-		queryStr := query.Encode()
-		if queryStr != "" {
-			return fmt.Sprintf("vless://%s@%s:%d?%s#%s", uuid, server, port, queryStr, name)
-		}
-		return fmt.Sprintf("vless://%s@%s:%d#%s", uuid, server, port, name)
-
-	case "hysteria":
-		server := proxy.Server
-		port := int(proxy.Port)
-		name := proxy.Name
-		query := url.Values{}
-		query.Set("protocol", "udp")
-		if proxy.Auth_str != "" {
-			query.Set("auth", proxy.Auth_str)
-		}
-		if proxy.Peer != "" {
-			query.Set("peer", proxy.Peer)
-		}
-		if proxy.Skip_cert_verify {
-			query.Set("insecure", "1")
-		}
-		if proxy.Up > 0 {
-			query.Set("upmbps", strconv.Itoa(proxy.Up))
-		}
-		if proxy.Down > 0 {
-			query.Set("downmbps", strconv.Itoa(proxy.Down))
-		}
-		if len(proxy.Alpn) > 0 {
-			query.Set("alpn", strings.Join(proxy.Alpn, ","))
-		}
-		return fmt.Sprintf("hysteria://%s:%d?%s#%s", server, port, query.Encode(), name)
-
-	case "hysteria2":
-		server := proxy.Server
-		port := int(proxy.Port)
-		auth := proxy.Password
-		name := proxy.Name
-		query := url.Values{}
-		if proxy.Sni != "" {
-			query.Set("sni", proxy.Sni)
-		} else if proxy.Servername != "" {
-			query.Set("sni", proxy.Servername)
-		}
-		if proxy.Skip_cert_verify {
-			query.Set("insecure", "1")
-		}
-		if proxy.Obfs != "" {
-			query.Set("obfs", proxy.Obfs)
-		}
-		if proxy.Obfs_password != "" {
-			query.Set("obfs-password", proxy.Obfs_password)
-		}
-		if len(proxy.Alpn) > 0 {
-			query.Set("alpn", strings.Join(proxy.Alpn, ","))
-		}
-		if proxy.Ports != "" {
-			query.Set("mport", proxy.Ports)
-		}
-		if proxy.Up > 0 {
-			query.Set("upmbps", strconv.Itoa(proxy.Up))
-		}
-		if proxy.Down > 0 {
-			query.Set("downmbps", strconv.Itoa(proxy.Down))
-		}
-		if proxy.Client_fingerprint != "" {
-			query.Set("fp", proxy.Client_fingerprint)
-		}
-		return fmt.Sprintf("hysteria2://%s@%s:%d?%s#%s", auth, server, port, query.Encode(), name)
-
-	case "tuic":
-		uuid := proxy.Uuid
-		password := proxy.Password
-		server := proxy.Server
-		port := int(proxy.Port)
-		name := proxy.Name
-		query := url.Values{}
-		if proxy.Sni != "" {
-			query.Set("sni", proxy.Sni)
-		} else if proxy.Servername != "" {
-			query.Set("sni", proxy.Servername)
-		}
-		if proxy.Congestion_controller != "" {
-			query.Set("congestion_control", proxy.Congestion_controller)
-		}
-		if len(proxy.Alpn) > 0 {
-			query.Set("alpn", strings.Join(proxy.Alpn, ","))
-		}
-		if proxy.Udp_relay_mode != "" {
-			query.Set("udp_relay_mode", proxy.Udp_relay_mode)
-		}
-		if proxy.Disable_sni {
-			query.Set("disable_sni", "1")
-		}
-		// 处理TLS和客户端指纹
-		if proxy.Tls {
-			query.Set("security", "tls")
-		}
-		if proxy.Client_fingerprint != "" {
-			query.Set("fp", proxy.Client_fingerprint)
-		}
-		return fmt.Sprintf("tuic://%s:%s@%s:%d?%s#%s", uuid, password, server, port, query.Encode(), name)
-
-	case "anytls":
-		password := proxy.Password
-		server := proxy.Server
-		port := int(proxy.Port)
-		name := proxy.Name
-		query := url.Values{}
-		if proxy.Sni != "" {
-			query.Set("sni", proxy.Sni)
-		}
-		if proxy.Skip_cert_verify {
-			query.Set("insecure", "1")
-		}
-		if proxy.Client_fingerprint != "" {
-			query.Set("fp", proxy.Client_fingerprint)
-		}
-		return fmt.Sprintf("anytls://%s@%s:%d?%s#%s", password, server, port, query.Encode(), name)
-
-	case "socks5":
-		username := proxy.Username
-		password := proxy.Password
-		server := proxy.Server
-		port := int(proxy.Port)
-		name := proxy.Name
-		if username != "" && password != "" {
-			return fmt.Sprintf("socks5://%s:%s@%s:%d#%s", username, password, server, port, name)
-		}
-		return fmt.Sprintf("socks5://%s:%d#%s", server, port, name)
-
-	default:
+	link, err := protocol.EncodeProxyLink(proxy)
+	if err != nil {
 		return ""
 	}
+	return link
 }
 
-// applyAirportNodeUniquify 应用机场节点名称唯一化
+// applyAirportNodeNamePrefix 应用机场节点名称前缀唯一化
 // 在节点名称前添加机场标识前缀，防止多机场间节点名称重复
 // 同一机场同一节点每次生成的名字保持一致（使用机场ID生成稳定前缀）
-func applyAirportNodeUniquify(airport *models.Airport, proxys []protocol.Proxy) []protocol.Proxy {
+func applyAirportNodeNamePrefix(airport *models.Airport, proxys []protocol.Proxy) []protocol.Proxy {
 	if airport == nil || !airport.NodeNameUniquify {
 		return proxys
 	}
 
 	// 生成前缀: 使用用户自定义前缀 或 默认的 [A{id}] 格式
-	var prefix string
-	if airport.NodeNamePrefix != "" {
-		prefix = airport.NodeNamePrefix
-	} else {
+	prefix := strings.TrimSpace(airport.NodeNamePrefix)
+	if prefix == "" {
 		prefix = fmt.Sprintf("[A%d]", airport.ID)
 	}
 
@@ -1127,30 +1456,40 @@ func applyAirportNodeUniquify(airport *models.Airport, proxys []protocol.Proxy) 
 	return proxys
 }
 
+// applyAirportIntraNodeUniquify 应用机场内节点名称唯一化
+// 对同一机场拉取结果中重复的节点名称追加顺序编号，避免同机场内出现重名节点
+func applyAirportIntraNodeUniquify(airport *models.Airport, proxys []protocol.Proxy) []protocol.Proxy {
+	if airport == nil || !airport.NodeNameIntraUniquify {
+		return proxys
+	}
+
+	nameTotals := make(map[string]int, len(proxys))
+	for _, proxy := range proxys {
+		nameTotals[proxy.Name]++
+	}
+
+	nameIndexes := make(map[string]int, len(nameTotals))
+	for i := range proxys {
+		name := proxys[i].Name
+		if nameTotals[name] <= 1 {
+			continue
+		}
+
+		nameIndexes[name]++
+		proxys[i].Name = fmt.Sprintf("%s-%d", name, nameIndexes[name])
+	}
+
+	return proxys
+}
+
 // parseProtoFromLink 根据协议类型解析链接获取结构体
-func parseProtoFromLink(link string, protoType string) (interface{}, error) {
-	switch protoType {
-	case "vmess":
-		return protocol.DecodeVMESSURL(link)
-	case "vless":
-		return protocol.DecodeVLESSURL(link)
-	case "trojan":
-		return protocol.DecodeTrojanURL(link)
-	case "ss":
-		return protocol.DecodeSSURL(link)
-	case "ssr":
-		return protocol.DecodeSSRURL(link)
-	case "hysteria":
-		return protocol.DecodeHYURL(link)
-	case "hysteria2":
-		return protocol.DecodeHY2URL(link)
-	case "tuic":
-		return protocol.DecodeTuicURL(link)
-	case "anytls":
-		return protocol.DecodeAnyTLSURL(link)
-	case "socks5":
-		return protocol.DecodeSocks5URL(link)
-	default:
+func parseProtoFromLink(link string, protoType string) (any, error) {
+	protoObj, detectedProto, err := protocol.DecodeProtocolObject(link)
+	if err != nil {
+		return nil, err
+	}
+	if detectedProto != protoType {
 		return nil, fmt.Errorf("unsupported protocol: %s", protoType)
 	}
+	return protoObj, nil
 }

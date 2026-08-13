@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 
 // material-ui
-import { useTheme, alpha } from '@mui/material/styles';
+import { useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
 import Avatar from '@mui/material/Avatar';
 import Badge from '@mui/material/Badge';
@@ -25,6 +26,10 @@ import Tooltip from '@mui/material/Tooltip';
 import MainCard from 'ui-component/cards/MainCard';
 import Transitions from 'ui-component/extended/Transitions';
 import { useAuth } from 'contexts/AuthContext';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
+import { getHeaderPopoverTokens, getHeaderTriggerTokens } from '../headerPopoverTokens';
+import { withAlpha } from 'utils/colorUtils';
+import { formatDateTime } from 'i18n/locales';
 
 // assets
 import { IconBell, IconCheck, IconTrash, IconCircleCheck, IconCircleX, IconInfoCircle } from '@tabler/icons-react';
@@ -47,8 +52,30 @@ const getNotificationIcon = (type) => {
 
 export default function NotificationSection() {
   const theme = useTheme();
+  const { t, i18n } = useTranslation();
   const downMD = useMediaQuery(theme.breakpoints.down('md'));
   const { notifications, clearAllNotifications } = useAuth();
+  const { isDark } = useResolvedColorScheme();
+  const bellAccent = theme.palette.primary.main;
+  const {
+    popoverSurface,
+    popoverSurfaceAccent,
+    popoverBorder,
+    popoverInsetShadow,
+    mutedText,
+    listItemHover,
+    selectedSurface,
+    selectedHoverSurface
+  } = getHeaderPopoverTokens(theme, isDark);
+  const { triggerColor, triggerSurface, triggerBorder, activeColor, activeSurface, activeBorder } = getHeaderTriggerTokens(
+    theme,
+    isDark,
+    bellAccent,
+    {
+      lightSurfaceAlpha: 0.14,
+      lightHoverAlpha: 0.22
+    }
+  );
 
   const [open, setOpen] = useState(false);
   // 从 localStorage 初始化已读状态
@@ -137,8 +164,8 @@ export default function NotificationSection() {
 
   return (
     <>
-      <Box sx={{ ml: 2 }}>
-        <Tooltip title="通知">
+      <Box sx={{ ml: { xs: 1, md: 2 } }}>
+        <Tooltip title={t('notifications.title')}>
           <Badge badgeContent={unreadCount} color="error" max={99}>
             <Avatar
               variant="rounded"
@@ -146,12 +173,15 @@ export default function NotificationSection() {
                 ...theme.typography.commonAvatar,
                 ...theme.typography.mediumAvatar,
                 transition: 'all .2s ease-in-out',
-                color: theme.palette.warning.dark,
-                background: theme.palette.warning.light,
+                color: triggerColor,
+                background: triggerSurface,
+                border: '1px solid',
+                borderColor: triggerBorder,
                 position: 'relative',
                 '&:hover, &[aria-controls="menu-list-grow"]': {
-                  color: theme.palette.warning.light,
-                  background: theme.palette.warning.dark
+                  color: activeColor,
+                  background: activeSurface,
+                  borderColor: activeBorder
                 }
               }}
               ref={anchorRef}
@@ -176,28 +206,47 @@ export default function NotificationSection() {
         {({ TransitionProps }) => (
           <ClickAwayListener onClickAway={handleClose}>
             <Transitions position={downMD ? 'top' : 'top-right'} in={open} {...TransitionProps}>
-              <Paper>
+              <Paper sx={{ bgcolor: 'transparent' }}>
                 {open && (
                   <MainCard
                     border={false}
-                    elevation={16}
+                    elevation={0}
                     content={false}
                     boxShadow
-                    shadow={theme.shadows[16]}
-                    sx={{ minWidth: 330, maxWidth: 400 }}
+                    shadow={isDark ? 'none' : theme.shadows[12]}
+                    sx={{
+                      minWidth: 330,
+                      maxWidth: 400,
+                      bgcolor: popoverSurface,
+                      backgroundImage: popoverSurfaceAccent,
+                      border: '1px solid',
+                      borderColor: popoverBorder,
+                      boxShadow: popoverInsetShadow
+                    }}
                   >
-                    <Stack sx={{ gap: 2 }}>
-                      <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', pt: 2, px: 2 }}>
+                    <Stack>
+                      <Stack
+                        direction="row"
+                        sx={{
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          pt: 2,
+                          pb: 1.5,
+                          px: 2
+                        }}
+                      >
                         <Stack direction="row" sx={{ gap: 1, alignItems: 'center' }}>
-                          <Typography variant="subtitle1">通知消息</Typography>
+                          <Typography variant="subtitle1">{t('notifications.messages')}</Typography>
                           {unreadCount > 0 && (
                             <Chip
                               size="small"
                               label={unreadCount}
                               variant="filled"
                               sx={{
-                                color: 'background.default',
-                                bgcolor: 'warning.dark',
+                                color: isDark ? 'warning.main' : 'background.default',
+                                bgcolor: isDark ? withAlpha(theme.palette.warning.main, 0.14) : 'warning.dark',
+                                border: '1px solid',
+                                borderColor: withAlpha(theme.palette.warning.main, isDark ? 0.28 : 0),
                                 height: 20,
                                 fontSize: '0.75rem'
                               }}
@@ -211,24 +260,37 @@ export default function NotificationSection() {
                             onClick={handleMarkAllRead}
                             sx={{ textTransform: 'none' }}
                           >
-                            全部已读
+                            {t('notifications.markAllRead')}
                           </Button>
                         )}
                       </Stack>
-                      <Divider />
+                      <Divider sx={{ borderColor: popoverBorder, opacity: 0.5 }} />
                       <Box
                         sx={{
                           height: 'auto',
                           maxHeight: 'calc(100vh - 250px)',
                           overflowY: 'auto',
                           overflowX: 'hidden',
-                          '&::-webkit-scrollbar': { width: 5 }
+                          '&::-webkit-scrollbar': {
+                            width: 6
+                          },
+                          '&::-webkit-scrollbar-track': {
+                            bgcolor: 'transparent'
+                          },
+                          '&::-webkit-scrollbar-thumb': {
+                            bgcolor: withAlpha(theme.palette.text.primary, isDark ? 0.2 : 0.15),
+                            borderRadius: '3px',
+                            '&:hover': {
+                              bgcolor: withAlpha(theme.palette.text.primary, isDark ? 0.3 : 0.25)
+                            }
+                          }
                         }}
                       >
                         {notifications.length > 0 ? (
                           <List sx={{ py: 0 }}>
-                            {notifications.map((notification) => {
+                            {notifications.map((notification, index) => {
                               const isRead = readIds.has(notification.id);
+                              const isLast = index === notifications.length - 1;
                               return (
                                 <ListItem
                                   key={notification.id}
@@ -236,12 +298,13 @@ export default function NotificationSection() {
                                   sx={{
                                     py: 1.5,
                                     px: 2,
-                                    bgcolor: isRead ? 'transparent' : alpha(theme.palette.primary.light, 0.15),
-                                    borderBottom: `1px solid ${theme.palette.divider}`,
+                                    bgcolor: isRead ? 'transparent' : selectedSurface,
+                                    borderBottom: isLast ? 'none' : `1px solid ${withAlpha(popoverBorder, 0.5)}`,
                                     cursor: 'pointer',
-                                    transition: 'background-color 0.2s',
+                                    transition: 'all 0.2s ease-in-out',
                                     '&:hover': {
-                                      bgcolor: alpha(theme.palette.primary.light, 0.08)
+                                      bgcolor: isRead ? listItemHover : selectedHoverSurface,
+                                      transform: 'translateX(2px)'
                                     }
                                   }}
                                   onClick={() => handleMarkAsRead(notification.id)}
@@ -284,7 +347,7 @@ export default function NotificationSection() {
                                       <>
                                         <Typography
                                           variant="body2"
-                                          color="textSecondary"
+                                          color={mutedText}
                                           sx={{
                                             ...(expandedIds.has(notification.id)
                                               ? { whiteSpace: 'pre-wrap', wordBreak: 'break-word' }
@@ -299,9 +362,21 @@ export default function NotificationSection() {
                                         >
                                           {notification.message}
                                         </Typography>
+                                        {(notification.eventName || notification.categoryName) && (
+                                          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mb: 0.75 }}>
+                                            {notification.categoryName && (
+                                              <Chip size="small" variant="outlined" label={notification.categoryName} />
+                                            )}
+                                            {notification.eventName && (
+                                              <Chip size="small" color="primary" variant="outlined" label={notification.eventName} />
+                                            )}
+                                          </Stack>
+                                        )}
                                         <Stack direction="row" justifyContent="space-between" alignItems="center">
-                                          <Typography variant="caption" color="textSecondary">
-                                            {notification.timestamp?.toLocaleString('zh-CN') || '刚刚'}
+                                          <Typography variant="caption" sx={{ color: mutedText }}>
+                                            {notification.timestamp
+                                              ? formatDateTime(notification.timestamp, i18n.resolvedLanguage || i18n.language)
+                                              : t('notifications.justNow')}
                                           </Typography>
                                           {notification.message && notification.message.length > 50 && (
                                             <Typography
@@ -310,7 +385,7 @@ export default function NotificationSection() {
                                               sx={{ cursor: 'pointer', '&:hover': { textDecoration: 'underline' } }}
                                               onClick={(e) => handleToggleExpand(notification.id, e)}
                                             >
-                                              {expandedIds.has(notification.id) ? '收起' : '展开'}
+                                              {expandedIds.has(notification.id) ? t('notifications.collapse') : t('notifications.expand')}
                                             </Typography>
                                           )}
                                         </Stack>
@@ -323,23 +398,35 @@ export default function NotificationSection() {
                           </List>
                         ) : (
                           <Box sx={{ py: 4, textAlign: 'center' }}>
-                            <Typography variant="body2" color="textSecondary">
-                              暂无通知消息
+                            <Typography variant="body2" sx={{ color: mutedText }}>
+                              {t('notifications.empty')}
                             </Typography>
                           </Box>
                         )}
                       </Box>
                     </Stack>
                     {notifications.length > 0 && (
-                      <CardActions sx={{ p: 1.25, justifyContent: 'center', borderTop: `1px solid ${theme.palette.divider}` }}>
+                      <CardActions
+                        sx={{
+                          p: 1.25,
+                          justifyContent: 'center',
+                          borderTop: `1px solid ${withAlpha(popoverBorder, 0.5)}`
+                        }}
+                      >
                         <Button
                           size="small"
                           color="error"
                           startIcon={<IconTrash size={16} />}
                           onClick={handleClearAll}
-                          sx={{ textTransform: 'none' }}
+                          sx={{
+                            textTransform: 'none',
+                            transition: 'all 0.2s ease-in-out',
+                            '&:hover': {
+                              transform: 'scale(1.05)'
+                            }
+                          }}
                         >
-                          清空所有通知
+                          {t('notifications.clearAll')}
                         </Button>
                       </CardActions>
                     )}

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import PropTypes from 'prop-types';
 import {
   Box,
@@ -23,8 +24,10 @@ import {
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import FilterAltIcon from '@mui/icons-material/FilterAlt';
-import { useTheme } from '@mui/material/styles';
+import { alpha, useTheme } from '@mui/material/styles';
 import { getProtocolMeta } from 'api/subscriptions';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
+import { withAlpha } from 'utils/colorUtils';
 
 /**
  * 机场去重规则配置组件
@@ -35,6 +38,22 @@ import { getProtocolMeta } from 'api/subscriptions';
  */
 function AirportDeduplicationConfig({ value, onChange }) {
   const theme = useTheme();
+  const { t } = useTranslation();
+  const { isDark } = useResolvedColorScheme();
+  const palette = theme.vars?.palette || theme.palette;
+  const darkText = palette.text?.dark || theme.palette.common.white;
+  const primaryTextColor = isDark ? withAlpha(darkText, 0.92) : palette.text.primary;
+  const secondaryTextColor = isDark ? withAlpha(darkText, 0.78) : palette.text.secondary;
+  const panelBorder = isDark ? withAlpha(palette.divider, 0.82) : withAlpha(palette.divider, 0.9);
+  const headerSurface = palette.background.default;
+  const headerHoverSurface = isDark ? withAlpha(palette.background.paper, 0.64) : theme.palette.action.hover;
+  const headerExpandedSurface = isDark ? withAlpha(palette.background.paper, 0.56) : palette.background.default;
+  const neutralChipSurface = isDark ? withAlpha(palette.background.paper, 0.52) : withAlpha(palette.background.paper, 0.96);
+  const activeChipSurface = isDark ? withAlpha(palette.primary.main, 0.18) : withAlpha(palette.primary.main, 0.08);
+  const accordionSurface = isDark ? withAlpha(palette.background.default, 0.72) : palette.background.default;
+  const accordionSummarySurface = isDark ? withAlpha(palette.background.paper, 0.34) : palette.background.default;
+  const accordionSummaryExpandedSurface = isDark ? withAlpha(palette.background.paper, 0.5) : palette.background.paper;
+  const accordionDetailsSurface = isDark ? withAlpha(palette.background.paper, 0.2) : palette.background.paper;
   // 元数据状态
   const [protocolMeta, setProtocolMeta] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -56,14 +75,14 @@ function AirportDeduplicationConfig({ value, onChange }) {
         setProtocolMeta(protoRes.data || []);
         setError(null);
       } catch (err) {
-        setError('加载协议元数据失败');
+        setError(t('airports.dedup.messages.loadMetaFailed'));
         console.error('加载去重元数据失败:', err);
       } finally {
         setLoading(false);
       }
     };
     fetchMeta();
-  }, []);
+  }, [t]);
 
   // 解析初始值
   useEffect(() => {
@@ -130,21 +149,22 @@ function AirportDeduplicationConfig({ value, onChange }) {
   // 获取配置状态描述
   const getConfigStatus = () => {
     if (config.mode === 'none') {
-      return '内容哈希全库去重';
+      return t('airports.dedup.status.contentHash');
     }
     const count = getTotalSelectedCount();
     if (count === 0) {
-      return '按协议去重（未配置字段）';
+      return t('airports.dedup.status.protocolNoFields');
     }
-    return `按协议去重（${count} 个字段）`;
+    return t('airports.dedup.status.protocolFields', { count });
   };
 
   return (
     <Paper
       elevation={0}
       sx={{
+        bgcolor: 'background.paper',
         border: '1px solid',
-        borderColor: 'divider',
+        borderColor: panelBorder,
         borderRadius: 2,
         overflow: 'hidden'
       }}
@@ -156,27 +176,35 @@ function AirportDeduplicationConfig({ value, onChange }) {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          background: `linear-gradient(145deg, ${theme.palette.mode === 'dark' ? '#1a2027' : '#f5f5f5'} 0%, ${theme.palette.mode === 'dark' ? '#121417' : '#fafafa'} 100%)`,
+          bgcolor: expanded ? headerExpandedSurface : headerSurface,
+          borderBottom: '1px solid',
+          borderColor: panelBorder,
           cursor: 'pointer',
+          transition: 'background-color 0.2s ease, border-color 0.2s ease',
           '&:hover': {
-            bgcolor: 'action.hover'
+            bgcolor: expanded ? headerExpandedSurface : headerHoverSurface
           }
         }}
         onClick={() => setExpanded(!expanded)}
       >
         <Stack direction="row" alignItems="center" spacing={1}>
           <FilterAltIcon color="primary" fontSize="small" />
-          <Typography variant="subtitle2" fontWeight={600}>
-            节点入库去重
+          <Typography variant="subtitle2" fontWeight={600} sx={{ color: primaryTextColor }}>
+            {t('airports.dedup.title')}
           </Typography>
           <Chip
             size="small"
             label={getConfigStatus()}
             color={config.mode === 'none' ? 'default' : 'primary'}
-            variant={config.mode === 'none' ? 'outlined' : 'filled'}
+            variant="outlined"
+            sx={{
+              bgcolor: config.mode === 'none' ? neutralChipSurface : activeChipSurface,
+              color: config.mode === 'none' ? secondaryTextColor : theme.palette.primary.main,
+              borderColor: config.mode === 'none' ? panelBorder : alpha(theme.palette.primary.main, isDark ? 0.32 : 0.22)
+            }}
           />
         </Stack>
-        <Stack direction="row" alignItems="center" spacing={0.5}>
+        <Stack direction="row" alignItems="center" spacing={0.5} sx={{ color: secondaryTextColor }}>
           {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
         </Stack>
       </Box>
@@ -186,7 +214,7 @@ function AirportDeduplicationConfig({ value, onChange }) {
           {loading ? (
             <Box sx={{ display: 'flex', justifyContent: 'center', p: 2 }}>
               <CircularProgress size={24} />
-              <Typography sx={{ ml: 1 }}>加载配置...</Typography>
+              <Typography sx={{ ml: 1 }}>{t('airports.dedup.loading')}</Typography>
             </Box>
           ) : error ? (
             <Alert severity="error">{error}</Alert>
@@ -194,10 +222,10 @@ function AirportDeduplicationConfig({ value, onChange }) {
             <>
               {/* 模式选择 */}
               <FormControl component="fieldset" sx={{ mb: 2 }}>
-                <FormLabel component="legend">去重模式</FormLabel>
+                <FormLabel component="legend">{t('airports.dedup.modeLabel')}</FormLabel>
                 <RadioGroup row value={config.mode} onChange={handleModeChange}>
-                  <FormControlLabel value="none" control={<Radio size="small" />} label="默认（内容哈希全库去重）" />
-                  <FormControlLabel value="protocol" control={<Radio size="small" />} label="按协议字段去重（仅本次拉取）" />
+                  <FormControlLabel value="none" control={<Radio size="small" />} label={t('airports.dedup.modes.none')} />
+                  <FormControlLabel value="protocol" control={<Radio size="small" />} label={t('airports.dedup.modes.protocol')} />
                 </RadioGroup>
               </FormControl>
 
@@ -205,14 +233,62 @@ function AirportDeduplicationConfig({ value, onChange }) {
               {config.mode === 'protocol' && (
                 <Box>
                   <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                    为每个协议配置去重字段（当多个节点的选定字段值完全相同时，仅保留第一个）：
+                    {t('airports.dedup.fieldDescription')}
                   </Typography>
                   {protocolMeta.map((proto) => (
-                    <Accordion key={proto.name} sx={{ mb: 1 }} defaultExpanded={getProtocolSelectedCount(proto.name) > 0}>
+                    <Accordion
+                      key={proto.name}
+                      sx={{
+                        mb: 1,
+                        bgcolor: accordionSurface,
+                        border: '1px solid',
+                        borderColor: panelBorder,
+                        borderRadius: 1.5,
+                        overflow: 'hidden',
+                        boxShadow: 'none',
+                        '&:before': { display: 'none' },
+                        '& .MuiAccordionSummary-root': {
+                          bgcolor: accordionSummarySurface,
+                          minHeight: 48,
+                          color: secondaryTextColor,
+                          transition: 'background-color 0.2s ease, border-color 0.2s ease',
+                          '&:hover': {
+                            bgcolor: isDark ? withAlpha(palette.background.paper, 0.42) : theme.palette.action.hover
+                          },
+                          '&.Mui-expanded': {
+                            minHeight: 48,
+                            bgcolor: accordionSummaryExpandedSurface,
+                            borderBottom: '1px solid',
+                            borderColor: panelBorder
+                          }
+                        },
+                        '& .MuiAccordionSummary-content': {
+                          alignItems: 'center'
+                        },
+                        '& .MuiAccordionSummary-expandIconWrapper': {
+                          color: secondaryTextColor
+                        },
+                        '& .MuiAccordionDetails-root': {
+                          bgcolor: accordionDetailsSurface
+                        }
+                      }}
+                      defaultExpanded={getProtocolSelectedCount(proto.name) > 0}
+                    >
                       <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                        <Typography sx={{ fontWeight: 500 }}>{proto.label}</Typography>
+                        <Typography sx={{ fontWeight: 500, color: primaryTextColor }}>{proto.label}</Typography>
                         {getProtocolSelectedCount(proto.name) > 0 && (
-                          <Chip size="small" label={`已选 ${getProtocolSelectedCount(proto.name)} 个`} color="primary" sx={{ ml: 1 }} />
+                          <Chip
+                            size="small"
+                            label={t('airports.dedup.selectedCount', { count: getProtocolSelectedCount(proto.name) })}
+                            color="primary"
+                            variant="outlined"
+                            sx={{
+                              ml: 1,
+                              bgcolor: activeChipSurface,
+                              color: theme.palette.primary.main,
+                              borderColor: alpha(theme.palette.primary.main, isDark ? 0.32 : 0.2)
+                            }}
+                          />
                         )}
                       </AccordionSummary>
                       <AccordionDetails>
@@ -241,15 +317,9 @@ function AirportDeduplicationConfig({ value, onChange }) {
               <Alert variant="standard" severity={config.mode === 'none' ? 'info' : 'warning'} sx={{ mt: 2 }}>
                 <Typography variant="body2">
                   {config.mode === 'none' ? (
-                    <>
-                      使用<strong>节点内容哈希进行全库去重</strong>，确保数据库中不会存储内容完全相同的节点。
-                      此方式不受链接参数顺序影响，不同机场间的重复节点也会被过滤。
-                    </>
+                    <Trans i18nKey="airports.dedup.alerts.none" components={{ strong: <strong /> }} />
                   ) : (
-                    <>
-                      按协议字段去重<strong>仅在本次拉取的节点内部生效</strong>， 不会与数据库中已有的其他节点进行比较。
-                      未配置字段的协议将继续使用默认的内容哈希全库去重。
-                    </>
+                    <Trans i18nKey="airports.dedup.alerts.protocol" components={{ strong: <strong /> }} />
                   )}
                 </Typography>
               </Alert>

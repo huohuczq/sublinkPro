@@ -1,31 +1,33 @@
-# 脚本执行环境支持
+English | [简体中文](script_support.zh-CN.md)
 
-脚本执行环境基于 [Goja](https://github.com/dop251/goja)，这是一个纯 Go 语言实现的 ECMAScript 5.1 引擎，包含许多 ES6+ 特性。
+# Script Runtime Support
 
-为了确保广泛的兼容性，我们为常见的 ES6+ 函数注入了 polyfill。
+The script runtime is based on [Goja](https://github.com/dop251/goja), a pure Go ECMAScript 5.1 engine with many ES6+ features.
 
-## 支持的功能
+To improve compatibility, common ES6+ functions are injected as polyfills.
 
-### ES6+ 特性 (原生支持)
+## Supported Features
 
-Goja 原生支持许多现代 JavaScript 特性，包括但不限于：
+### ES6+ features, natively supported
 
-- **Let / Const**: 块级作用域变量声明。
-- **Arrow Functions**: `(x) => x * 2`。
-- **Classes**: `class MyClass { ... }`。
-- **Map / Set**: 集合类型。
-- **WeakMap / WeakSet**: 弱引用集合。
-- **Promise**: 异步编程（注意：脚本执行通常是同步的，但在某些场景下可用）。
-- **Symbol**: 唯一标识符。
-- **Proxy / Reflect**: 元编程能力。
-- **Template Literals**: 模板字符串 \`Hello ${name}\`。
-- **Destructuring**: 解构赋值 `const { a, b } = obj`。
-- **Default Parameters**: 默认参数 `function(a = 1) { ... }`。
-- **Rest / Spread**: 剩余参数和扩展运算符 `...args`。
+Goja supports many modern JavaScript features, including but not limited to:
 
-### 标准库扩展 (Polyfills)
+- **Let / Const**: block scoped variable declarations.
+- **Arrow Functions**: `(x) => x * 2`.
+- **Classes**: `class MyClass { ... }`.
+- **Map / Set**: collection types.
+- **WeakMap / WeakSet**: weak reference collections.
+- **Promise**: asynchronous programming. Script execution is usually synchronous, but this is available in some scenarios.
+- **Symbol**: unique identifiers.
+- **Proxy / Reflect**: metaprogramming capabilities.
+- **Template Literals**: template strings, `Hello ${name}`.
+- **Destructuring**: `const { a, b } = obj`.
+- **Default Parameters**: `function(a = 1) { ... }`.
+- **Rest / Spread**: rest parameters and spread operator, `...args`.
 
-为了方便使用，我们注入了以下 Polyfills：
+### Standard library extensions, polyfills
+
+The following polyfills are injected for convenience:
 
 #### String
 
@@ -34,7 +36,7 @@ Goja 原生支持许多现代 JavaScript 特性，包括但不限于：
 - `String.prototype.endsWith(searchString, position)`
 - `String.prototype.padStart(targetLength, padString)`
 - `String.prototype.padEnd(targetLength, padString)`
-- ...以及标准 ES5 方法。
+- Standard ES5 methods are also available.
 
 #### Array
 
@@ -42,67 +44,67 @@ Goja 原生支持许多现代 JavaScript 特性，包括但不限于：
 - `Array.prototype.find(callback)`
 - `Array.prototype.findIndex(callback)`
 - `Array.prototype.includes(searchElement, fromIndex)`
-- ...以及标准 ES5 方法。
+- Standard ES5 methods are also available.
 
 #### Object
 
 - `Object.assign(target, ...sources)`
 - `Object.values(obj)`
 - `Object.entries(obj)`
-- ...以及标准 ES5 方法。
+- Standard ES5 methods are also available.
 
-### 注入的对象
+### Injected objects
 
 #### console
 
-我们提供了一个 `console` 对象用于日志记录，输出到服务器日志。
+A `console` object is provided for logging to server logs.
 
 - `console.log(message)`
 - `console.info(message)`
 - `console.warn(message)`
 - `console.error(message)`
 
-## 脚本示例
+## Script Examples
 
-### 使用 Set 去重
+### Deduplicate with Set
 
 ```javascript
 function subMod(input, clientType) {
-    // 假设 input 是一个逗号分隔的列表
+    // Assume input is a comma separated list
     let items = input.split(',');
     
-    // 使用 Set 去重
+    // Deduplicate with Set
     let uniqueItems = new Set(items);
     
-    // 转回数组并连接
+    // Convert back to array and join
     return Array.from(uniqueItems).join(',');
 }
 ```
 
-### 根据 LinkAddress 去重
+### Deduplicate by LinkAddress
 
 ```javascript
 function filterNode(nodes, clientType) {
-    // 使用 Set 存储已存在的 LinkAddress
+    // Store seen LinkAddress values in Set
     const seen = new Set();
     
     return nodes.filter(node => {
-        // 如果 LinkAddress 已经存在，则过滤掉
+        // Filter out duplicated LinkAddress
         if (seen.has(node.LinkAddress)) {
             return false;
         }
-        // 否则添加到 Set 中并保留
+        // Otherwise add it and keep the node
         seen.add(node.LinkAddress);
         return true;
     });
 }
 ```
 
-### 使用 Map 存储键值对
+### Use Map for key value storage
 
 ```javascript
 function filterNode(nodes, clientType) {
-    // nodes: 节点列表数据结构如下
+    // nodes: node list data structure is shown below
     // [
     //     {
     //         "ID": 1,
@@ -138,7 +140,7 @@ function filterNode(nodes, clientType) {
     //         "SpeedCheckAt": "2025-11-26 23:50:20"
     //     }
     // ]
-    // 使用 Map 统计每个组的节点数量
+    // Use Map to count nodes in each group
     let groupCounts = new Map();
     
     nodes.forEach(node => {
@@ -146,7 +148,7 @@ function filterNode(nodes, clientType) {
         groupCounts.set(node.Group, count + 1);
     });
     
-    // 打印统计信息
+    // Print statistics
     for (let [group, count] of groupCounts) {
         console.log(`Group ${group}: ${count} nodes`);
     }
@@ -155,26 +157,26 @@ function filterNode(nodes, clientType) {
 }
 ```
 
-### 使用 RegExp 正则匹配
+### Match with RegExp
 
 ```javascript
 function filterNode(nodes, clientType) {
-    // 过滤掉名字中包含 "测试" 或 "过期" 的节点（忽略大小写）
+    // Filter nodes whose names contain "测试" or "过期", case insensitive
     const regex = /(测试|过期)/i;
     
     return nodes.filter(node => !regex.test(node.Name));
 }
 ```
 
-### 使用 Object.entries 遍历对象
+### Iterate objects with Object.entries
 
 ```javascript
 function subMod(input, clientType) {
-    // 假设 input 是 JSON 字符串
+    // Assume input is a JSON string
     try {
         let config = JSON.parse(input);
         
-        // 遍历配置项并修改
+        // Iterate and modify config entries
         for (let [key, value] of Object.entries(config)) {
             if (typeof value === 'string' && value.includes('old-domain.com')) {
                 config[key] = value.replace('old-domain.com', 'new-domain.com');
@@ -189,46 +191,46 @@ function subMod(input, clientType) {
 }
 ```
 
-## 脚本入口点
+## Script Entry Points
 
-### 订阅处理脚本
+### Subscription processing script
 
-用于修改最终的订阅内容。
+Used to modify the final subscription content.
 
 ```javascript
 /**
- * @param {string} input - 原始订阅内容（base64 解码或原始内容）。
- * @param {string} clientType - 客户端类型（例如："v2ray"、"clash"、"surge"）。
- * @returns {string} - 修改后的内容。
+ * @param {string} input - Original subscription content, base64 decoded or raw content.
+ * @param {string} clientType - Client type, such as "v2ray", "clash", or "surge".
+ * @returns {string} - Modified content.
  */
 function subMod(input, clientType) {
-    // 你的逻辑在这里
+    // Your logic here
     return input;
 }
 ```
 
-### 节点过滤脚本
+### Node filtering script
 
-用于在生成订阅之前过滤节点列表。
+Used to filter the node list before subscription generation.
 
 ```javascript
 /**
- * @param {Array} nodes - 节点对象数组。
- * @param {string} clientType - 客户端类型。
- * @returns {Array} - 过滤后的节点数组。
+ * @param {Array} nodes - Array of node objects.
+ * @param {string} clientType - Client type.
+ * @returns {Array} - Filtered node array.
  */
 function filterNode(nodes, clientType) {
-    // 你的逻辑在这里
+    // Your logic here
     return nodes.filter(node => node.remarks.includes("US"));
 }
 ```
 
-## 故障排除
+## Troubleshooting
 
 ### "TypeError: Cannot read property 'indexOf' of undefined or null"
 
-此错误通常发生在你试图对一个为 `null` 或 `undefined` 的变量调用方法时。
-在访问属性之前检查你的数据：
+This usually happens when you call a method on a variable that is `null` or `undefined`.
+Check data before accessing properties:
 
 ```javascript
 if (str && str.indexOf("something") !== -1) {

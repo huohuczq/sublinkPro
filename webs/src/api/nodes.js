@@ -12,6 +12,29 @@ export function getNodes(params = {}) {
   });
 }
 
+export function getNodeSelector(params = {}) {
+  return request({
+    url: '/v1/nodes/selector',
+    method: 'get',
+    params
+  });
+}
+
+export function getNodeSelectorByIds(params = {}) {
+  return request({
+    url: '/v1/nodes/selector/by-ids',
+    method: 'get',
+    params
+  });
+}
+
+export function getNodeGroupStats() {
+  return request({
+    url: '/v1/nodes/group-stats',
+    method: 'get'
+  });
+}
+
 // 获取符合过滤条件的所有节点ID（用于全选操作）
 export function getNodeIds(params = {}) {
   return request({
@@ -143,6 +166,15 @@ export function batchUpdateNodeSource(ids, source) {
     url: '/v1/nodes/batch-update-source',
     method: 'post',
     data: { ids, source }
+  });
+}
+
+// 批量更新节点国家代码
+export function batchUpdateNodeCountry(ids, country) {
+  return request({
+    url: '/v1/nodes/batch-update-country',
+    method: 'post',
+    data: { ids, country }
   });
 }
 

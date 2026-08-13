@@ -1,15 +1,221 @@
 package api
 
 import (
-	"net/url"
+	"errors"
 	"strconv"
 	"strings"
+	"sublink/database"
 	"sublink/models"
+	"sublink/node"
 	"sublink/node/protocol"
+	"sublink/services/unlock"
 	"sublink/utils"
 
 	"github.com/gin-gonic/gin"
+	"gopkg.in/yaml.v3"
 )
+
+func normalizeResidentialType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "residential", "datacenter", "untested":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
+	}
+}
+
+func normalizeQualityStatus(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case models.QualityStatusUntested, models.QualityStatusSuccess, models.QualityStatusPartial, models.QualityStatusFailed, models.QualityStatusDisabled:
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
+	}
+}
+
+func normalizeIPType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "native", "broadcast", "untested":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
+	}
+}
+
+func normalizeUnlockStatus(value string) string {
+	return unlock.NormalizeUnlockStatus(value)
+}
+
+func failNodeNameConflict(c *gin.Context, err error) bool {
+	if errors.Is(err, models.ErrNodeNameExists) {
+		utils.FailWithMsg(c, "节点备注名称已存在，请换一个备注")
+		return true
+	}
+	return false
+}
+
+func parseUnlockRulesFromQuery(c *gin.Context) []models.UnlockFilterRule {
+	rawRules := strings.TrimSpace(c.Query("unlockRules"))
+	rules := models.ParseUnlockFilterRules(rawRules)
+	if len(rules) > 0 {
+		return rules
+	}
+
+	providers := c.QueryArray("unlockRules[][provider]")
+	statuses := c.QueryArray("unlockRules[][status]")
+	keywords := c.QueryArray("unlockRules[][keyword]")
+	maxLen := len(providers)
+	if len(statuses) > maxLen {
+		maxLen = len(statuses)
+	}
+	if len(keywords) > maxLen {
+		maxLen = len(keywords)
+	}
+	if maxLen > 0 {
+		ruleList := make([]models.UnlockFilterRule, 0, maxLen)
+		for i := 0; i < maxLen; i++ {
+			rule := models.UnlockFilterRule{}
+			if i < len(providers) {
+				rule.Provider = models.NormalizeUnlockProvider(providers[i])
+			}
+			if i < len(statuses) {
+				rule.Status = normalizeUnlockStatus(statuses[i])
+			}
+			if i < len(keywords) {
+				rule.Keyword = strings.TrimSpace(keywords[i])
+			}
+			ruleList = append(ruleList, rule)
+		}
+		return models.NormalizeUnlockFilterRules(ruleList)
+	}
+
+	legacyProvider := models.NormalizeUnlockProvider(c.Query("unlockProvider"))
+	legacyStatus := normalizeUnlockStatus(c.Query("unlockStatus"))
+	legacyKeyword := strings.TrimSpace(c.Query("unlockKeyword"))
+	if legacyProvider != "" || legacyStatus != "" || legacyKeyword != "" {
+		return []models.UnlockFilterRule{{Provider: legacyProvider, Status: legacyStatus, Keyword: legacyKeyword}}
+	}
+	return nil
+}
+
+func parseExcludeIDs(c *gin.Context) []int {
+	return parseIntList(c, []string{"excludeIds[]", "excludeIds"})
+}
+
+func parseSelectedIDs(c *gin.Context) []int {
+	return parseIntList(c, []string{"ids[]", "ids", "id"})
+}
+
+func parseIntList(c *gin.Context, keys []string) []int {
+	values := make([]string, 0)
+	for _, key := range keys {
+		values = append(values, c.QueryArray(key)...)
+	}
+	ids := make([]int, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		for _, part := range strings.Split(trimmed, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if id, err := strconv.Atoi(part); err == nil && id > 0 {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
+func buildNodeFilterFromQuery(c *gin.Context) models.NodeFilter {
+	filter := models.NodeFilter{
+		Search:      c.Query("search"),
+		Group:       c.Query("group"),
+		Source:      c.Query("source"),
+		Protocol:    c.Query("protocol"),
+		SpeedStatus: c.Query("speedStatus"),
+		DelayStatus: c.Query("delayStatus"),
+		SortBy:      c.Query("sortBy"),
+		SortOrder:   c.Query("sortOrder"),
+	}
+
+	if maxDelayStr := c.Query("maxDelay"); maxDelayStr != "" {
+		if maxDelay, err := strconv.Atoi(maxDelayStr); err == nil && maxDelay > 0 {
+			filter.MaxDelay = maxDelay
+		}
+	}
+
+	if minSpeedStr := c.Query("minSpeed"); minSpeedStr != "" {
+		if minSpeed, err := strconv.ParseFloat(minSpeedStr, 64); err == nil && minSpeed > 0 {
+			filter.MinSpeed = minSpeed
+		}
+	}
+
+	if maxFraudScoreStr := c.Query("maxFraudScore"); maxFraudScoreStr != "" {
+		if maxFraudScore, err := strconv.Atoi(maxFraudScoreStr); err == nil && maxFraudScore > 0 {
+			filter.MaxFraudScore = maxFraudScore
+		}
+	}
+
+	filter.Countries = c.QueryArray("countries[]")
+	filter.Tags = c.QueryArray("tags[]")
+	filter.ResidentialType = normalizeResidentialType(c.Query("residentialType"))
+	filter.IPType = normalizeIPType(c.Query("ipType"))
+	filter.QualityStatus = normalizeQualityStatus(c.Query("qualityStatus"))
+	filter.UnlockRuleMode = models.NormalizeUnlockRuleMode(c.Query("unlockRuleMode"))
+	filter.UnlockRules = parseUnlockRulesFromQuery(c)
+	filter.ExcludeIDs = parseExcludeIDs(c)
+	if len(filter.UnlockRules) == 0 {
+		filter.UnlockProvider = models.NormalizeUnlockProvider(c.Query("unlockProvider"))
+		filter.UnlockStatus = normalizeUnlockStatus(c.Query("unlockStatus"))
+		filter.UnlockKeyword = strings.TrimSpace(c.Query("unlockKeyword"))
+	}
+	if filter.ResidentialType == "" && c.Query("onlyResidential") == "true" {
+		filter.ResidentialType = "residential"
+	}
+	if filter.IPType == "" && c.Query("onlyNative") == "true" {
+		filter.IPType = "native"
+	}
+
+	// 验证排序字段
+	validSortFields := map[string]bool{
+		"delay":    true,
+		"speed":    true,
+		"name":     true,
+		"protocol": true,
+		"group":    true,
+		"source":   true,
+		"country":  true,
+	}
+	if filter.SortBy != "" && !validSortFields[filter.SortBy] {
+		filter.SortBy = ""
+	}
+
+	if filter.SortOrder != "" && filter.SortOrder != "asc" && filter.SortOrder != "desc" {
+		filter.SortOrder = "asc"
+	}
+
+	return filter
+}
+
+func parsePagination(c *gin.Context) (int, int) {
+	page := 0
+	pageSize := 0
+	if pageStr := c.Query("page"); pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+	if pageSizeStr := c.Query("pageSize"); pageSizeStr != "" {
+		if ps, err := strconv.Atoi(pageSizeStr); err == nil && ps > 0 {
+			pageSize = ps
+		}
+	}
+	return page, pageSize
+}
 
 func NodeUpdadte(c *gin.Context) {
 	var Node models.Node
@@ -17,12 +223,17 @@ func NodeUpdadte(c *gin.Context) {
 	oldname := c.PostForm("oldname")
 	oldlink := c.PostForm("oldlink")
 	link := c.PostForm("link")
+	nameMode, hasNameMode := c.GetPostForm("nameMode")
+	if !hasNameMode {
+		nameMode, hasNameMode = c.GetPostForm("NameMode")
+	}
 	dialerProxyName := c.PostForm("dialerProxyName")
 	group := c.PostForm("group")
-	if name == "" || link == "" {
-		utils.FailWithMsg(c, "节点名称 or 备注不能为空")
+	if link == "" {
+		utils.FailWithMsg(c, "节点链接不能为空")
 		return
 	}
+	userProvidedName := strings.TrimSpace(name) != ""
 	// 查找旧节点
 	Node.Name = oldname
 	Node.Link = oldlink
@@ -31,7 +242,12 @@ func NodeUpdadte(c *gin.Context) {
 		utils.FailWithMsg(c, err.Error())
 		return
 	}
-	Node.Name = name
+	oldContentHash := Node.ContentHash
+	if hasNameMode {
+		Node.NameMode = models.NormalizeNodeNameMode(nameMode)
+	} else {
+		Node.NameMode = models.NormalizeNodeNameMode(Node.NameMode)
+	}
 
 	//更新构造节点元数据
 	// 检测是否为 WireGuard 配置文件格式，如果是则转换为 URL 格式
@@ -44,145 +260,29 @@ func NodeUpdadte(c *gin.Context) {
 		// 转换为 URL 格式
 		link = protocol.EncodeWireGuardURL(wg)
 	}
-	u, err := url.Parse(link)
+	identity, err := protocol.ExtractLinkIdentity(link)
 	if err != nil {
 		utils.Error("解析节点链接失败: %v", err)
 		return
 	}
-	switch {
-	case u.Scheme == "ss":
-		ss, err := protocol.DecodeSSURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-		if Node.Name == "" {
-			Node.Name = ss.Name
-		}
-		Node.LinkName = ss.Name
-		Node.LinkAddress = ss.Server + ":" + utils.GetPortString(ss.Port)
-		Node.LinkHost = ss.Server
-		Node.LinkPort = utils.GetPortString(ss.Port)
-	case u.Scheme == "ssr":
-		ssr, err := protocol.DecodeSSRURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-		if Node.Name == "" {
-			Node.Name = ssr.Qurey.Remarks
-		}
-		Node.LinkName = ssr.Qurey.Remarks
-		Node.LinkAddress = ssr.Server + ":" + utils.GetPortString(ssr.Port)
-		Node.LinkHost = ssr.Server
-		Node.LinkPort = utils.GetPortString(ssr.Port)
-	case u.Scheme == "trojan":
-		trojan, err := protocol.DecodeTrojanURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-
-		if Node.Name == "" {
-			Node.Name = trojan.Name
-		}
-		Node.LinkName = trojan.Name
-		Node.LinkAddress = trojan.Hostname + ":" + utils.GetPortString(trojan.Port)
-		Node.LinkHost = trojan.Hostname
-		Node.LinkPort = utils.GetPortString(trojan.Port)
-	case u.Scheme == "vmess":
-		vmess, err := protocol.DecodeVMESSURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-		if Node.Name == "" {
-			Node.Name = vmess.Ps
-		}
-		Node.LinkName = vmess.Ps
-		prot := utils.GetPortString(vmess.Port)
-		Node.LinkAddress = vmess.Add + ":" + prot
-		Node.LinkHost = vmess.Host
-		Node.LinkPort = prot
-	case u.Scheme == "vless":
-		vless, err := protocol.DecodeVLESSURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-		if Node.Name == "" {
-			Node.Name = vless.Name
-		}
-		Node.LinkName = vless.Name
-		Node.LinkAddress = vless.Server + ":" + utils.GetPortString(vless.Port)
-		Node.LinkHost = vless.Server
-		Node.LinkPort = utils.GetPortString(vless.Port)
-	case u.Scheme == "hy" || u.Scheme == "hysteria":
-		hy, err := protocol.DecodeHYURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-		if Node.Name == "" {
-			Node.Name = hy.Name
-		}
-		Node.LinkName = hy.Name
-		Node.LinkAddress = hy.Host + ":" + utils.GetPortString(hy.Port)
-		Node.LinkHost = hy.Host
-		Node.LinkPort = utils.GetPortString(hy.Port)
-	case u.Scheme == "hy2" || u.Scheme == "hysteria2":
-		hy2, err := protocol.DecodeHY2URL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-		if Node.Name == "" {
-			Node.Name = hy2.Name
-		}
-		Node.LinkName = hy2.Name
-		Node.LinkAddress = hy2.Host + ":" + utils.GetPortString(hy2.Port)
-		Node.LinkHost = hy2.Host
-		Node.LinkPort = utils.GetPortString(hy2.Port)
-	case u.Scheme == "tuic":
-		tuic, err := protocol.DecodeTuicURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-		if Node.Name == "" {
-			Node.Name = tuic.Name
-		}
-		Node.LinkName = tuic.Name
-		Node.LinkAddress = tuic.Host + ":" + utils.GetPortString(tuic.Port)
-		Node.LinkHost = tuic.Host
-		Node.LinkPort = utils.GetPortString(tuic.Port)
-	case u.Scheme == "socks5":
-		socks5, err := protocol.DecodeSocks5URL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-		if Node.Name == "" {
-			Node.Name = socks5.Name
-		}
-		Node.LinkName = socks5.Name
-		Node.LinkAddress = socks5.Server + ":" + utils.GetPortString(socks5.Port)
-		Node.LinkHost = socks5.Server
-		Node.LinkPort = utils.GetPortString(socks5.Port)
-	case u.Scheme == "wg" || u.Scheme == "wireguard":
-		wg, err := protocol.DecodeWireGuardURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-		if Node.Name == "" {
-			Node.Name = wg.Name
-		}
-		Node.LinkName = wg.Name
-		Node.LinkAddress = wg.Server + ":" + utils.GetPortString(wg.Port)
-		Node.LinkHost = wg.Server
-		Node.LinkPort = utils.GetPortString(wg.Port)
+	Node.Name = name
+	if strings.TrimSpace(Node.Name) == "" {
+		Node.Name = identity.Name
 	}
+	if userProvidedName {
+		if err := models.EnsureNodeNameAvailable(Node.Name, Node.ID); err != nil {
+			if !failNodeNameConflict(c, err) {
+				utils.FailWithMsg(c, "检查节点备注名称失败")
+			}
+			return
+		}
+	} else {
+		Node.Name = models.GenerateUniqueNodeNameWithSource(Node.Name, Node.Source, Node.ID, nil)
+	}
+	Node.LinkName = identity.Name
+	Node.LinkAddress = identity.Address
+	Node.LinkHost = identity.Host
+	Node.LinkPort = identity.Port
 
 	Node.Link = link
 	Node.DialerProxyName = dialerProxyName
@@ -195,25 +295,42 @@ func NodeUpdadte(c *gin.Context) {
 		contentHash := protocol.GenerateProxyContentHash(proxy)
 		if contentHash != "" {
 			Node.ContentHash = contentHash
-			// 检查是否与其他节点重复（排除自身）
-			if existingNode, exists := models.GetNodeByContentHash(contentHash); exists && existingNode.ID != Node.ID {
-				// 构建详细的重复信息
-				source := existingNode.Source
-				if source == "" || source == "manual" {
-					source = "手动添加"
+			// 内容未变化时无需重复校验（避免历史数据存在重复时无法正常改名/改分组）
+			if contentHash != oldContentHash {
+				// 读取全局配置：是否启用跨机场去重（默认启用）
+				crossAirportDedupVal, _ := models.GetSetting("cross_airport_dedup_enabled")
+				enableCrossDedup := crossAirportDedupVal != "false"
+
+				// 检查是否与其他节点重复（排除自身）
+				var dupNode *models.Node
+				var exists bool
+				if enableCrossDedup {
+					dupNode, exists = models.GetOtherNodeByContentHash(contentHash, Node.ID)
+				} else {
+					dupNode, exists = models.GetOtherNodeByContentHashAndSourceID(contentHash, Node.SourceID, Node.ID)
 				}
-				group := existingNode.Group
-				if group == "" {
-					group = "未分组"
+				if exists && dupNode != nil {
+					// 构建详细的重复信息
+					source := dupNode.Source
+					if source == "" || source == "manual" {
+						source = "手动添加"
+					}
+					group := dupNode.Group
+					if group == "" {
+						group = "未分组"
+					}
+					utils.FailWithMsg(c, "节点内容已存在，与以下节点重复：[来源: "+source+"] [分组: "+group+"] [名称: "+dupNode.Name+"]")
+					return
 				}
-				utils.FailWithMsg(c, "节点内容已存在，与以下节点重复：[来源: "+source+"] [分组: "+group+"] [名称: "+existingNode.Name+"]")
-				return
 			}
 		}
 	}
 
 	err = Node.Update()
 	if err != nil {
+		if failNodeNameConflict(c, err) {
+			return
+		}
 		utils.FailWithMsg(c, "更新失败")
 		return
 	}
@@ -242,61 +359,8 @@ func NodeUpdadte(c *gin.Context) {
 // 获取节点列表
 func NodeGet(c *gin.Context) {
 	var Node models.Node
-
-	// 解析过滤参数
-	filter := models.NodeFilter{
-		Search:      c.Query("search"),
-		Group:       c.Query("group"),
-		Source:      c.Query("source"),
-		Protocol:    c.Query("protocol"),
-		SpeedStatus: c.Query("speedStatus"),
-		DelayStatus: c.Query("delayStatus"),
-		SortBy:      c.Query("sortBy"),
-		SortOrder:   c.Query("sortOrder"),
-	}
-
-	// 安全解析数值参数
-	if maxDelayStr := c.Query("maxDelay"); maxDelayStr != "" {
-		if maxDelay, err := strconv.Atoi(maxDelayStr); err == nil && maxDelay > 0 {
-			filter.MaxDelay = maxDelay
-		}
-	}
-
-	if minSpeedStr := c.Query("minSpeed"); minSpeedStr != "" {
-		if minSpeed, err := strconv.ParseFloat(minSpeedStr, 64); err == nil && minSpeed > 0 {
-			filter.MinSpeed = minSpeed
-		}
-	}
-
-	// 解析国家代码数组
-	filter.Countries = c.QueryArray("countries[]")
-
-	// 解析标签数组
-	filter.Tags = c.QueryArray("tags[]")
-
-	// 验证排序字段（白名单）
-	if filter.SortBy != "" && filter.SortBy != "delay" && filter.SortBy != "speed" {
-		filter.SortBy = "" // 无效排序字段，忽略
-	}
-
-	// 验证排序顺序
-	if filter.SortOrder != "" && filter.SortOrder != "asc" && filter.SortOrder != "desc" {
-		filter.SortOrder = "asc" // 默认升序
-	}
-
-	// 解析分页参数
-	page := 0
-	pageSize := 0
-	if pageStr := c.Query("page"); pageStr != "" {
-		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
-			page = p
-		}
-	}
-	if pageSizeStr := c.Query("pageSize"); pageSizeStr != "" {
-		if ps, err := strconv.Atoi(pageSizeStr); err == nil && ps > 0 {
-			pageSize = ps
-		}
-	}
+	filter := buildNodeFilterFromQuery(c)
+	page, pageSize := parsePagination(c)
 
 	// 如果提供了分页参数，返回分页响应
 	if page > 0 && pageSize > 0 {
@@ -328,40 +392,64 @@ func NodeGet(c *gin.Context) {
 	utils.OkDetailed(c, "node get", nodes)
 }
 
+func NodeSelector(c *gin.Context) {
+	var node models.Node
+	filter := buildNodeFilterFromQuery(c)
+	page, pageSize := parsePagination(c)
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 100
+	}
+
+	nodes, total, err := node.ListWithFiltersPaginated(filter, page, pageSize)
+	if err != nil {
+		utils.FailWithMsg(c, "node selector list error")
+		return
+	}
+	totalPages := 0
+	if pageSize > 0 {
+		totalPages = int((total + int64(pageSize) - 1) / int64(pageSize))
+	}
+	utils.OkDetailed(c, "node selector get", gin.H{
+		"items":      models.ToNodeSelectorItems(nodes),
+		"total":      total,
+		"page":       page,
+		"pageSize":   pageSize,
+		"totalPages": totalPages,
+	})
+}
+
+func NodeSelectorByIDs(c *gin.Context) {
+	ids := parseSelectedIDs(c)
+	if len(ids) == 0 {
+		utils.OkDetailed(c, "node selector get by ids", []models.NodeSelectorItem{})
+		return
+	}
+	nodes, err := models.GetNodesByIDs(ids)
+	if err != nil {
+		utils.FailWithMsg(c, "node selector get by ids error")
+		return
+	}
+	items := models.ToNodeSelectorItems(nodes)
+	sorted := make([]models.NodeSelectorItem, 0, len(items))
+	indexMap := make(map[int]models.NodeSelectorItem, len(items))
+	for _, item := range items {
+		indexMap[item.ID] = item
+	}
+	for _, id := range ids {
+		if item, ok := indexMap[id]; ok {
+			sorted = append(sorted, item)
+		}
+	}
+	utils.OkDetailed(c, "node selector get by ids", sorted)
+}
+
 // NodeGetIDs 获取符合过滤条件的所有节点ID（用于全选操作）
 func NodeGetIDs(c *gin.Context) {
 	var Node models.Node
-
-	// 解析过滤参数
-	filter := models.NodeFilter{
-		Search:      c.Query("search"),
-		Group:       c.Query("group"),
-		Source:      c.Query("source"),
-		Protocol:    c.Query("protocol"),
-		SpeedStatus: c.Query("speedStatus"),
-		DelayStatus: c.Query("delayStatus"),
-		SortBy:      c.Query("sortBy"),
-		SortOrder:   c.Query("sortOrder"),
-	}
-
-	// 安全解析数值参数
-	if maxDelayStr := c.Query("maxDelay"); maxDelayStr != "" {
-		if maxDelay, err := strconv.Atoi(maxDelayStr); err == nil && maxDelay > 0 {
-			filter.MaxDelay = maxDelay
-		}
-	}
-
-	if minSpeedStr := c.Query("minSpeed"); minSpeedStr != "" {
-		if minSpeed, err := strconv.ParseFloat(minSpeedStr, 64); err == nil && minSpeed > 0 {
-			filter.MinSpeed = minSpeed
-		}
-	}
-
-	// 解析国家代码数组
-	filter.Countries = c.QueryArray("countries[]")
-
-	// 解析标签数组
-	filter.Tags = c.QueryArray("tags[]")
+	filter := buildNodeFilterFromQuery(c)
 
 	ids, err := Node.GetFilteredNodeIDs(filter)
 	if err != nil {
@@ -376,12 +464,22 @@ func NodeAdd(c *gin.Context) {
 	var Node models.Node
 	link := c.PostForm("link")
 	name := c.PostForm("name")
+	nameModeInput := c.PostForm("nameMode")
+	if nameModeInput == "" {
+		nameModeInput = c.PostForm("NameMode")
+	}
+	nameMode := models.NormalizeNodeNameMode(nameModeInput)
 	dialerProxyName := c.PostForm("dialerProxyName")
 	group := c.PostForm("group")
 	if link == "" {
 		utils.FailWithMsg(c, "link  不能为空")
 		return
 	}
+	userProvidedName := strings.TrimSpace(name) != ""
+
+	// 读取全局配置：是否启用跨机场去重（默认启用）
+	crossAirportDedupVal, _ := models.GetSetting("cross_airport_dedup_enabled")
+	enableCrossDedup := crossAirportDedupVal != "false"
 	// 检测是否为 WireGuard 配置文件格式，如果是则转换为 URL 格式
 	if protocol.IsWireGuardConfig(link) {
 		wg, err := protocol.ParseWireGuardConfig(link)
@@ -392,169 +490,93 @@ func NodeAdd(c *gin.Context) {
 		// 转换为 URL 格式
 		link = protocol.EncodeWireGuardURL(wg)
 	}
+
+	// 检测是否为 Clash YAML 配置格式
+	if strings.Contains(link, "proxies:") {
+		var clashConfig node.ClashConfig
+		if err := yaml.Unmarshal([]byte(link), &clashConfig); err == nil && len(clashConfig.Proxies) > 0 {
+			// 成功解析为 Clash YAML 格式，处理每个代理节点
+			var addedCount, failedCount int
+			for _, proxy := range clashConfig.Proxies {
+				proxyLink := node.GenerateProxyLink(proxy)
+				if proxyLink == "" {
+					failedCount++
+					continue
+				}
+				// 创建节点并添加；Clash YAML 中的备注由系统生成，重复时自动追加编号。
+				var n models.Node
+				n.Name = models.GenerateUniqueNodeName(proxy.Name, 0, nil)
+				n.NameMode = models.NodeNameModeLink
+				n.Link = proxyLink
+				n.LinkName = proxy.Name
+				n.LinkHost = proxy.Server
+				n.LinkPort = strconv.Itoa(proxy.Port.Int())
+				n.LinkAddress = proxy.Server + ":" + n.LinkPort
+				n.DialerProxyName = dialerProxyName
+				n.Group = group
+				n.Protocol = protocol.GetProtocolFromLink(proxyLink)
+
+				// 生成 ContentHash
+				contentHash := protocol.GenerateProxyContentHash(proxy)
+				if contentHash != "" {
+					n.ContentHash = contentHash
+					// 检查是否已存在相同内容的节点（跨机场去重关闭时仅校验同来源）
+					if enableCrossDedup {
+						if _, exists := models.GetNodeByContentHash(contentHash); exists {
+							failedCount++
+							continue
+						}
+					} else if _, exists := models.GetNodeByContentHashAndSourceID(contentHash, 0); exists {
+						failedCount++
+						continue
+					}
+				}
+
+				if err := n.Add(); err != nil {
+					failedCount++
+					continue
+				}
+				addedCount++
+			}
+
+			if addedCount == 0 {
+				utils.FailWithMsg(c, "Clash YAML 解析成功但无法添加任何节点（可能全部重复或格式不支持）")
+				return
+			}
+			utils.OkWithMsg(c, "Clash YAML 导入完成，成功添加 "+strconv.Itoa(addedCount)+" 个节点")
+			return
+		}
+	}
+
 	if !strings.Contains(link, "://") {
-		utils.FailWithMsg(c, "link 必须包含 :// 或者是有效的 WireGuard 配置文件")
+		utils.FailWithMsg(c, "link 必须包含 :// 或者是有效的 WireGuard/Clash YAML 配置文件")
 		return
 	}
 	Node.Name = name
-	u, err := url.Parse(link)
+	Node.NameMode = nameMode
+	identity, err := protocol.ExtractLinkIdentity(link)
 	if err != nil {
 		utils.Error("解析节点链接失败: %v", err)
 		return
 	}
-	switch {
-	case u.Scheme == "ss":
-		ss, err := protocol.DecodeSSURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-		if Node.Name == "" {
-			Node.Name = ss.Name
-		}
-		Node.LinkName = ss.Name
-		Node.LinkAddress = ss.Server + ":" + utils.GetPortString(ss.Port)
-		Node.LinkHost = ss.Server
-		Node.LinkPort = utils.GetPortString(ss.Port)
-	case u.Scheme == "ssr":
-		ssr, err := protocol.DecodeSSRURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-		if name == "" {
-			Node.Name = ssr.Qurey.Remarks
-		}
-		Node.LinkName = ssr.Qurey.Remarks
-		Node.LinkAddress = ssr.Server + ":" + utils.GetPortString(ssr.Port)
-		Node.LinkHost = ssr.Server
-		Node.LinkPort = utils.GetPortString(ssr.Port)
-	case u.Scheme == "trojan":
-		trojan, err := protocol.DecodeTrojanURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-		if name == "" {
-			Node.Name = trojan.Name
-		}
-		Node.LinkName = trojan.Name
-		Node.LinkAddress = trojan.Hostname + ":" + utils.GetPortString(trojan.Port)
-		Node.LinkHost = trojan.Hostname
-		Node.LinkPort = utils.GetPortString(trojan.Port)
-	case u.Scheme == "vmess":
-		vmess, err := protocol.DecodeVMESSURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-		if name == "" {
-			Node.Name = vmess.Ps
-		}
-		Node.LinkName = vmess.Ps
-		port := utils.GetPortString(vmess.Port)
-		Node.LinkAddress = vmess.Add + ":" + port
-		Node.LinkHost = vmess.Host
-		Node.LinkPort = port
-	case u.Scheme == "vless":
-		vless, err := protocol.DecodeVLESSURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-
-		if name == "" {
-			Node.Name = vless.Name
-		}
-		Node.LinkName = vless.Name
-		Node.LinkAddress = vless.Server + ":" + utils.GetPortString(vless.Port)
-		Node.LinkHost = vless.Server
-		Node.LinkPort = utils.GetPortString(vless.Port)
-	case u.Scheme == "hy" || u.Scheme == "hysteria":
-		hy, err := protocol.DecodeHYURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-
-		if name == "" {
-			Node.Name = hy.Name
-		}
-		Node.LinkName = hy.Name
-		Node.LinkAddress = hy.Host + ":" + utils.GetPortString(hy.Port)
-		Node.LinkHost = hy.Host
-		Node.LinkPort = utils.GetPortString(hy.Port)
-	case u.Scheme == "hy2" || u.Scheme == "hysteria2":
-		hy2, err := protocol.DecodeHY2URL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-
-		if name == "" {
-			Node.Name = hy2.Name
-		}
-		Node.LinkName = hy2.Name
-		Node.LinkAddress = hy2.Host + ":" + utils.GetPortString(hy2.Port)
-		Node.LinkHost = hy2.Host
-		Node.LinkPort = utils.GetPortString(hy2.Port)
-	case u.Scheme == "tuic":
-		tuic, err := protocol.DecodeTuicURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-
-		if name == "" {
-			Node.Name = tuic.Name
-		}
-		Node.LinkName = tuic.Name
-		Node.LinkAddress = tuic.Host + ":" + utils.GetPortString(tuic.Port)
-		Node.LinkHost = tuic.Host
-		Node.LinkPort = utils.GetPortString(tuic.Port)
-	case u.Scheme == "socks5":
-		socks5, err := protocol.DecodeSocks5URL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-
-		if name == "" {
-			Node.Name = socks5.Name
-		}
-		Node.LinkName = socks5.Name
-		Node.LinkAddress = socks5.Server + ":" + utils.GetPortString(socks5.Port)
-		Node.LinkHost = socks5.Server
-		Node.LinkPort = utils.GetPortString(socks5.Port)
-	case u.Scheme == "anytls":
-		anytls, err := protocol.DecodeAnyTLSURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-
-		if name == "" {
-			Node.Name = anytls.Name
-		}
-		Node.LinkName = anytls.Name
-		Node.LinkAddress = anytls.Server + ":" + utils.GetPortString(anytls.Port)
-		Node.LinkHost = anytls.Server
-		Node.LinkPort = utils.GetPortString(anytls.Port)
-	case u.Scheme == "wg" || u.Scheme == "wireguard":
-		wg, err := protocol.DecodeWireGuardURL(link)
-		if err != nil {
-			utils.Error("解析节点链接失败: %v", err)
-			return
-		}
-
-		if name == "" {
-			Node.Name = wg.Name
-		}
-		Node.LinkName = wg.Name
-		Node.LinkAddress = wg.Server + ":" + utils.GetPortString(wg.Port)
-		Node.LinkHost = wg.Server
-		Node.LinkPort = utils.GetPortString(wg.Port)
+	if strings.TrimSpace(Node.Name) == "" {
+		Node.Name = identity.Name
 	}
+	if userProvidedName {
+		if err := models.EnsureNodeNameAvailable(Node.Name, 0); err != nil {
+			if !failNodeNameConflict(c, err) {
+				utils.FailWithMsg(c, "检查节点备注名称失败")
+			}
+			return
+		}
+	} else {
+		Node.Name = models.GenerateUniqueNodeName(Node.Name, 0, nil)
+	}
+	Node.LinkName = identity.Name
+	Node.LinkAddress = identity.Address
+	Node.LinkHost = identity.Host
+	Node.LinkPort = identity.Port
+
 	Node.Link = link
 	Node.DialerProxyName = dialerProxyName
 	Node.Group = group
@@ -566,18 +588,33 @@ func NodeAdd(c *gin.Context) {
 		contentHash := protocol.GenerateProxyContentHash(proxy)
 		if contentHash != "" {
 			Node.ContentHash = contentHash
-			// 检查是否已存在相同内容的节点
-			if existingNode, exists := models.GetNodeByContentHash(contentHash); exists {
-				// 构建详细的重复信息
-				source := existingNode.Source
-				if source == "" || source == "manual" {
-					source = "手动添加"
+			// 检查是否已存在相同内容的节点（跨机场去重关闭时仅校验同来源）
+			var existingNode *models.Node
+			var exists bool
+			if enableCrossDedup {
+				existingNode, exists = models.GetNodeByContentHash(contentHash)
+			} else {
+				existingNode, exists = models.GetNodeByContentHashAndSourceID(contentHash, 0)
+			}
+			if exists && existingNode != nil {
+				// 重复节点：返回成功响应 + 跳过标记，不终止添加流程
+				dupSource := existingNode.Source
+				if dupSource == "" || dupSource == "manual" {
+					dupSource = "手动添加"
 				}
-				group := existingNode.Group
-				if group == "" {
-					group = "未分组"
+				dupGroup := existingNode.Group
+				if dupGroup == "" {
+					dupGroup = "未分组"
 				}
-				utils.FailWithMsg(c, "节点内容已存在，与以下节点重复：[来源: "+source+"] [分组: "+group+"] [名称: "+existingNode.Name+"]")
+				utils.OkDetailed(c, "节点重复已跳过", gin.H{
+					"skipped": true,
+					"duplicateInfo": gin.H{
+						"name":         Node.Name,
+						"source":       dupSource,
+						"group":        dupGroup,
+						"existingName": existingNode.Name,
+					},
+				})
 				return
 			}
 		}
@@ -585,6 +622,9 @@ func NodeAdd(c *gin.Context) {
 
 	err = Node.Add()
 	if err != nil {
+		if failNodeNameConflict(c, err) {
+			return
+		}
 		utils.FailWithMsg(c, "添加失败检查一下是否节点重复")
 		return
 	}
@@ -636,15 +676,25 @@ func NodesTotal(c *gin.Context) {
 
 	total := len(nodes)
 	available := 0
+	delayPassCount := 0
+	speedPassCount := 0
 	for _, n := range nodes {
+		if n.DelayStatus == "success" && n.DelayTime > 0 {
+			delayPassCount++
+		}
+		if n.SpeedStatus == "success" && n.Speed > 0 {
+			speedPassCount++
+		}
 		if n.Speed > 0 && n.DelayTime > 0 {
 			available++
 		}
 	}
 
 	utils.OkDetailed(c, "取得节点统计", gin.H{
-		"total":     total,
-		"available": available,
+		"total":          total,
+		"available":      available,
+		"delayPassCount": delayPassCount,
+		"speedPassCount": speedPassCount,
 	})
 }
 
@@ -735,6 +785,76 @@ func NodeBatchUpdateSource(c *gin.Context) {
 	utils.OkWithMsg(c, "批量更新来源成功")
 }
 
+// NodeBatchUpdateCountry 批量更新节点国家代码
+func NodeBatchUpdateCountry(c *gin.Context) {
+	var req struct {
+		IDs     []int  `json:"ids"`
+		Country string `json:"country"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.FailWithMsg(c, "参数错误")
+		return
+	}
+	if len(req.IDs) == 0 {
+		utils.FailWithMsg(c, "请选择要修改的节点")
+		return
+	}
+	// 国家代码转大写，保持一致性
+	country := strings.ToUpper(strings.TrimSpace(req.Country))
+	err := models.BatchUpdateCountry(req.IDs, country)
+	if err != nil {
+		utils.FailWithMsg(c, "批量更新国家代码失败")
+		return
+	}
+	utils.OkWithMsg(c, "批量更新国家代码成功")
+}
+
+// NodeBatchFillCountry 批量填充节点国家信息
+func NodeBatchFillCountry(c *gin.Context) {
+	var req struct {
+		AirportID int  `json:"airportId"` // 可选,指定机场
+		OnlyEmpty bool `json:"onlyEmpty"` // 只填充国家为空的节点
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.FailWithMsg(c, "参数错误")
+		return
+	}
+
+	// 构建查询条件
+	query := database.DB.Model(&models.Node{})
+	if req.AirportID > 0 {
+		query = query.Where("source_id = ?", req.AirportID)
+	}
+	if req.OnlyEmpty {
+		query = query.Where("link_country IS NULL OR link_country = ''")
+	}
+
+	var nodes []models.Node
+	if err := query.Find(&nodes).Error; err != nil {
+		utils.FailWithMsg(c, "查询节点失败")
+		return
+	}
+
+	updated := 0
+	for i := range nodes {
+		if req.OnlyEmpty && nodes[i].LinkCountry != "" {
+			continue
+		}
+		if country := models.ParseCountryFromNodeName(nodes[i].Name); country != "" {
+			nodes[i].LinkCountry = country
+			if err := database.DB.Model(&nodes[i]).Update("link_country", country).Error; err == nil {
+				updated++
+			}
+		}
+	}
+
+	utils.OkDetailed(c, "批量填充完成", gin.H{
+		"total":   len(nodes),
+		"updated": updated,
+	})
+}
+
 // 获取所有分组列表
 func GetGroups(c *gin.Context) {
 	var node models.Node
@@ -781,6 +901,11 @@ func NodeCountryStats(c *gin.Context) {
 	utils.OkDetailed(c, "获取国家统计成功", stats)
 }
 
+func DashboardCountryStats(c *gin.Context) {
+	stats := models.GetDashboardCountryStats()
+	utils.OkDetailed(c, "获取仪表盘国家统计成功", stats)
+}
+
 // NodeProtocolStats 获取按协议统计的节点数量
 func NodeProtocolStats(c *gin.Context) {
 	stats := models.GetNodeProtocolStats()
@@ -803,6 +928,16 @@ func NodeGroupStats(c *gin.Context) {
 func NodeSourceStats(c *gin.Context) {
 	stats := models.GetNodeSourceStats()
 	utils.OkDetailed(c, "获取来源统计成功", stats)
+}
+
+func DashboardGroupedStats(c *gin.Context) {
+	stats := models.GetDashboardGroupedStats()
+	utils.OkDetailed(c, "获取仪表盘分组统计成功", stats)
+}
+
+func DashboardQualityStats(c *gin.Context) {
+	stats := models.GetDashboardQualityStats()
+	utils.OkDetailed(c, "获取仪表盘质量统计成功", stats)
 }
 
 // GetIPDetails 获取IP详细信息

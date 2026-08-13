@@ -47,6 +47,18 @@ func (sm *SchedulerManager) Stop() {
 	utils.Info("定时任务管理器已停止")
 }
 
+// ReloadFromDatabase 清空内存中的定时任务并重新从数据库加载。
+func (sm *SchedulerManager) ReloadFromDatabase() error {
+	sm.mutex.Lock()
+	for jobID, entryID := range sm.jobs {
+		sm.cron.Remove(entryID)
+		delete(sm.jobs, jobID)
+	}
+	sm.mutex.Unlock()
+
+	return sm.LoadFromDatabase()
+}
+
 // LoadFromDatabase 从数据库加载所有启用的定时任务
 func (sm *SchedulerManager) LoadFromDatabase() error {
 
@@ -111,9 +123,7 @@ func (sm *SchedulerManager) AddJob(schedulerID int, cronExpr string, jobFunc fun
 
 	// 添加新任务
 	entryID, err := sm.cron.AddFunc(cleanCronExpr, func() {
-		// 记录开始执行时间
-		startTime := time.Now()
-
+		// 执行完成后记录本次运行时间
 		// 执行业务逻辑
 		jobFunc(id, url, subName)
 
@@ -121,7 +131,7 @@ func (sm *SchedulerManager) AddJob(schedulerID int, cronExpr string, jobFunc fun
 		nextTime := sm.getNextRunTime(cleanCronExpr)
 
 		// 更新数据库中的运行时间
-		sm.updateRunTime(schedulerID, &startTime, nextTime)
+		sm.updateRunTime(schedulerID, new(time.Now()), nextTime)
 	})
 
 	if err != nil {
@@ -170,16 +180,14 @@ func (sm *SchedulerManager) UpdateJob(schedulerID int, cronExpr string, enabled 
 	// 如果启用，添加新任务
 	if enabled {
 		entryID, err := sm.cron.AddFunc(cleanCronExpr, func() {
-			// 记录开始执行时间
-			startTime := time.Now()
-
+			// 执行完成后记录本次运行时间
 			ExecuteSubscriptionTask(schedulerID, url, subName)
 
 			// 计算下次运行时间
 			nextTime := sm.getNextRunTime(cleanCronExpr)
 
 			// 更新数据库中的运行时间
-			sm.updateRunTime(schedulerID, &startTime, nextTime)
+			sm.updateRunTime(schedulerID, new(time.Now()), nextTime)
 		})
 
 		if err != nil {
@@ -225,8 +233,7 @@ func (sm *SchedulerManager) getNextRunTime(cronExpr string) *time.Time {
 		return nil
 	}
 
-	nextTime := schedule.Next(time.Now())
-	return &nextTime
+	return new(schedule.Next(time.Now()))
 }
 
 // updateRunTime 更新数据库中的运行时间
@@ -274,9 +281,7 @@ func (sm *SchedulerManager) AddNodeCheckProfileJob(profileID int, cronExpr strin
 
 	// 添加新任务
 	entryID, err := sm.cron.AddFunc(cleanCronExpr, func() {
-		// 记录开始执行时间
-		startTime := time.Now()
-
+		// 执行完成后记录本次运行时间
 		// 执行节点检测（定时触发）
 		ExecuteNodeCheckWithProfile(profileID, nil, models.TaskTriggerScheduled)
 
@@ -284,7 +289,7 @@ func (sm *SchedulerManager) AddNodeCheckProfileJob(profileID int, cronExpr strin
 		nextTime := sm.getNextRunTime(cleanCronExpr)
 
 		// 更新数据库中的运行时间
-		sm.updateNodeCheckProfileRunTime(profileID, &startTime, nextTime)
+		sm.updateNodeCheckProfileRunTime(profileID, new(time.Now()), nextTime)
 	})
 
 	if err != nil {

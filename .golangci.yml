@@ -1,0 +1,226 @@
+version: "2"
+
+run:
+  timeout: 8m
+  tests: true
+  modules-download-mode: readonly
+  relative-path-mode: gomod
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - depguard
+    - errcheck
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - noctx
+    - staticcheck
+    - unconvert
+    - unused
+    - wastedassign
+
+  exclusions:
+    paths:
+      - webs/
+
+  settings:
+    depguard:
+      rules:
+        lower-layers-no-http-entry:
+          list-mode: original
+          files:
+            - "services/**/*.go"
+            - "models/**/*.go"
+            - "node/**/*.go"
+            - "utils/**/*.go"
+            - "database/**/*.go"
+            - "config/**/*.go"
+            - "settings/**/*.go"
+            - "cache/**/*.go"
+            - "dto/**/*.go"
+            - "constants/**/*.go"
+            - "middlewares/**/*.go"
+          deny:
+            - pkg: sublink/api
+              desc: "下层包不应反向依赖 HTTP handler 层"
+            - pkg: sublink/routers
+              desc: "下层包不应反向依赖路由注册层"
+        non-http-layers-no-gin:
+          list-mode: original
+          files:
+            - "services/**/*.go"
+            - "models/**/*.go"
+            - "node/**/*.go"
+            - "database/**/*.go"
+            - "config/**/*.go"
+            - "settings/**/*.go"
+            - "cache/**/*.go"
+            - "dto/**/*.go"
+            - "constants/**/*.go"
+            - "utils/**/*.go"
+            - "!utils/response.go"
+          deny:
+            - pkg: github.com/gin-gonic/gin
+              desc: "业务与数据层不应依赖 Gin Web 框架"
+        routers-only-register-routes:
+          list-mode: original
+          files:
+            - "routers/**/*.go"
+          deny:
+            - pkg: sublink/services
+              desc: "routers 只注册路由，业务处理应放在 api 层"
+            - pkg: sublink/config
+              desc: "routers 只注册路由，配置读取应放在 api 层"
+            - pkg: sublink/utils
+              desc: "routers 只注册路由，响应组装应放在 api 层"
+        api-no-gorm:
+          list-mode: original
+          files:
+            - "api/**/*.go"
+            - "!**/*_test.go"
+          deny:
+            - pkg: gorm.io/gorm
+              desc: "api 层不应直接依赖 GORM，查询语义应下沉到 models 或 services"
+        db-drivers-only-in-database:
+          list-mode: original
+          files:
+            - "**/*.go"
+            - "!**/database/*.go"
+            - "!**/database/**/*.go"
+            - "!**/internal/testutil/*.go"
+            - "!**/*_test.go"
+          deny:
+            - pkg: gorm.io/driver/mysql
+              desc: "数据库驱动应集中在 database 包初始化"
+            - pkg: gorm.io/driver/postgres
+              desc: "数据库驱动应集中在 database 包初始化"
+            - pkg: github.com/glebarez/sqlite
+              desc: "数据库驱动应集中在 database 包初始化"
+            - pkg: github.com/go-sql-driver/mysql
+              desc: "数据库驱动应集中在 database 包初始化"
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      verbose: true
+      disable-default-exclusions: true
+      exclude-functions:
+        - fmt.Print
+        - fmt.Printf
+        - fmt.Println
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*strings.Builder).Write
+        - (*strings.Builder).WriteByte
+        - (*strings.Builder).WriteRune
+        - (*strings.Builder).WriteString
+        - (*bytes.Buffer).Write
+        - (*bytes.Buffer).WriteByte
+        - (*bytes.Buffer).WriteRune
+        - (*bytes.Buffer).WriteString
+        - (io.Writer).Write
+        - io.Copy(*bytes.Buffer)
+        - io.Copy(os.Stdout)
+        - io/ioutil.ReadFile
+    gosec:
+      severity: high
+      confidence: high
+      excludes:
+        - G103
+        - G109
+        - G115
+        - G201
+        - G202
+        - G301
+        - G302
+        - G306
+        - G404
+    ineffassign:
+      check-escaping-errors: true
+    staticcheck:
+      checks:
+        - all
+        # 先保留少量高噪音项的排除，便于渐进收紧。
+        - '-ST1000'
+        - '-ST1003'
+        - '-ST1020'
+        - '-ST1021'
+        - '-ST1022'
+      dot-import-whitelist:
+        - fmt
+      initialisms:
+        - ACL
+        - API
+        - ASCII
+        - CPU
+        - CSS
+        - DNS
+        - EOF
+        - GUID
+        - HTML
+        - HTTP
+        - HTTPS
+        - ID
+        - IP
+        - JSON
+        - QPS
+        - RAM
+        - RPC
+        - SLA
+        - SMTP
+        - SQL
+        - SSH
+        - TCP
+        - TLS
+        - TTL
+        - UDP
+        - UI
+        - GID
+        - UID
+        - UUID
+        - URI
+        - URL
+        - UTF8
+        - VM
+        - XML
+        - XMPP
+        - XSRF
+        - XSS
+        - SIP
+        - RTP
+        - AMQP
+        - DB
+        - TS
+      http-status-code-whitelist:
+        - "200"
+        - "400"
+        - "404"
+        - "500"
+    unused:
+      field-writes-are-uses: true
+      post-statements-are-reads: true
+      exported-fields-are-used: true
+      parameters-are-used: true
+      local-variables-are-used: false
+      generated-is-used: true
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    paths:
+      - webs/node_modules/
+  settings:
+    gofmt:
+      simplify: false
+      rewrite-rules:
+        - pattern: 'interface{}'
+          replacement: 'any'
+        - pattern: 'a[b:len(a)]'
+          replacement: 'a[b:]'
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

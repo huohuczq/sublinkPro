@@ -1,5 +1,6 @@
 import PropTypes from 'prop-types';
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 
 // material-ui
 import { useTheme } from '@mui/material/styles';
@@ -27,6 +28,7 @@ import Switch from '@mui/material/Switch';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import Grid from '@mui/material/Grid';
+import Checkbox from '@mui/material/Checkbox';
 
 // icons
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
@@ -39,29 +41,44 @@ import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 
 // project imports
 import CronExpressionGenerator from 'components/CronExpressionGenerator';
+import useResolvedColorScheme from 'hooks/useResolvedColorScheme';
+import { withAlpha } from 'utils/colorUtils';
+import { getNodeCheckStrategyThemeTokens } from '../nodeCheckTheme';
 
 // api
-import { createNodeCheckProfile, updateNodeCheckProfile } from 'api/nodeCheck';
+import { createNodeCheckProfile, getNodeCheckMeta, updateNodeCheckProfile } from 'api/nodeCheck';
 
 // constants
-import { SPEED_TEST_TCP_OPTIONS, SPEED_TEST_MIHOMO_OPTIONS, LATENCY_TEST_URL_OPTIONS, LANDING_IP_URL_OPTIONS } from '../utils';
+import {
+  SPEED_TEST_TCP_OPTIONS,
+  SPEED_TEST_MIHOMO_OPTIONS,
+  LATENCY_TEST_URL_OPTIONS,
+  LANDING_IP_URL_OPTIONS,
+  QUALITY_CHECK_URL_OPTIONS,
+  buildNodeCheckProfilePayload,
+  createNodeCheckProfileFormState,
+  formatUnlockProviderLabel,
+  getUnlockProviderOptions,
+  setUnlockMeta
+} from '../utils';
 
 /**
  * 可折叠配置区块
  */
-function ConfigSection({ title, icon, children, defaultExpanded = true, helperText }) {
+function ConfigSection({ title, icon, children, defaultExpanded = true, helperText, themeTokens }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
-  const theme = useTheme();
-  const isDark = theme.palette.mode === 'dark';
+  const { isDark, palette, panelBorder, sectionSurface, sectionHeaderSurface, sectionHoverSurface } = themeTokens;
 
   return (
     <Paper
       elevation={0}
       sx={{
-        border: `1px solid ${isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)'}`,
+        border: `1px solid ${panelBorder}`,
         borderRadius: 2,
         overflow: 'hidden',
-        mb: 2
+        mb: 2,
+        backgroundColor: sectionSurface,
+        boxShadow: isDark ? `inset 0 1px 0 ${withAlpha(palette.common.white, 0.04)}` : 'none'
       }}
     >
       <Box
@@ -72,9 +89,9 @@ function ConfigSection({ title, icon, children, defaultExpanded = true, helperTe
           justifyContent: 'space-between',
           p: 1.5,
           cursor: 'pointer',
-          backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
+          backgroundColor: sectionHeaderSurface,
           '&:hover': {
-            backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)'
+            background: sectionHoverSurface
           }
         }}
       >
@@ -87,11 +104,11 @@ function ConfigSection({ title, icon, children, defaultExpanded = true, helperTe
         {expanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
       </Box>
       <Collapse in={expanded}>
-        <Divider />
+        <Divider sx={{ borderColor: panelBorder }} />
         <Box sx={{ p: 2 }}>
           {children}
           {helperText && (
-            <Typography variant="caption" color="textSecondary" sx={{ mt: 1.5, display: 'block' }}>
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 1.5, display: 'block' }}>
               {helperText}
             </Typography>
           )}
@@ -106,7 +123,8 @@ ConfigSection.propTypes = {
   icon: PropTypes.node,
   children: PropTypes.node.isRequired,
   defaultExpanded: PropTypes.bool,
-  helperText: PropTypes.string
+  helperText: PropTypes.string,
+  themeTokens: PropTypes.object.isRequired
 };
 
 /**
@@ -114,92 +132,87 @@ ConfigSection.propTypes = {
  */
 export default function NodeCheckProfileFormDialog({ open, onClose, profile, groupOptions = [], tagOptions = [], onSuccess }) {
   const theme = useTheme();
+  const { t } = useTranslation();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   const isEdit = !!profile;
-
-  // 表单状态
-  const [form, setForm] = useState({
-    name: '',
-    enabled: false,
-    cronExpr: '',
-    mode: 'tcp',
-    testUrl: '',
-    latencyUrl: '',
-    timeout: 5,
-    groups: [],
-    tags: [],
-    latencyConcurrency: 0,
-    speedConcurrency: 0,
-    detectCountry: false,
-    landingIpUrl: '',
-    includeHandshake: true,
-    speedRecordMode: 'average',
-    peakSampleInterval: 100,
-    trafficByGroup: true,
-    trafficBySource: true,
-    trafficByNode: false,
-    preserveSpeedResult: false
+  const { isDark } = useResolvedColorScheme();
+  const themeTokens = getNodeCheckStrategyThemeTokens(theme, isDark);
+  const { palette, dialogSurface, dialogSurfaceGradient, headerSurface, actionSurface, panelBorder } = themeTokens;
+  const getTokenChipSx = (accent) => ({
+    color: accent,
+    backgroundColor: withAlpha(accent, isDark ? 0.18 : 0.1),
+    border: `1px solid ${withAlpha(accent, isDark ? 0.34 : 0.2)}`,
+    boxShadow: isDark ? `inset 0 1px 0 ${withAlpha(palette.common.white, 0.04)}` : 'none',
+    '& .MuiChip-deleteIcon': {
+      color: withAlpha(accent, isDark ? 0.78 : 0.62),
+      '&:hover': {
+        color: accent
+      }
+    }
+  });
+  const getAlertSx = (accent) => ({
+    color: isDark ? accent : palette.text.primary,
+    backgroundColor: withAlpha(accent, isDark ? 0.12 : 0.08),
+    border: `1px solid ${withAlpha(accent, isDark ? 0.28 : 0.16)}`,
+    boxShadow: isDark ? `inset 0 1px 0 ${withAlpha(palette.common.white, 0.04)}` : 'none'
   });
 
+  const autocompleteChipSx = {
+    '& .MuiAutocomplete-tag': {
+      bgcolor: isDark ? withAlpha(palette.primary.main, 0.16) : undefined,
+      color: isDark ? themeTokens.primaryText : undefined,
+      border: isDark ? '1px solid' : undefined,
+      borderColor: isDark ? withAlpha(palette.primary.main, 0.3) : undefined,
+      '& .MuiChip-deleteIcon': {
+        color: isDark ? withAlpha(palette.primary.main, 0.7) : undefined,
+        transition: 'color 0.2s',
+        '&:hover': {
+          color: isDark ? palette.primary.main : undefined
+        }
+      }
+    }
+  };
+
+  // 表单状态
+  const [form, setForm] = useState(() => createNodeCheckProfileFormState());
+
   const [submitting, setSubmitting] = useState(false);
+  const [unlockMetaLoading, setUnlockMetaLoading] = useState(false);
+  const [unlockProviderQuery, setUnlockProviderQuery] = useState('');
 
   // 初始化表单
   useEffect(() => {
     if (open) {
-      if (profile) {
-        // 解析 groups 和 tags 字符串为数组
-        const groups = profile.groups ? profile.groups.split(',').filter((g) => g) : [];
-        const tags = profile.tags ? profile.tags.split(',').filter((t) => t) : [];
-
-        setForm({
-          name: profile.name || '',
-          enabled: profile.enabled || false,
-          cronExpr: profile.cronExpr || '',
-          mode: profile.mode || 'tcp',
-          testUrl: profile.testUrl || '',
-          latencyUrl: profile.latencyUrl || '',
-          timeout: profile.timeout || 5,
-          groups: groups,
-          tags: tags,
-          latencyConcurrency: profile.latencyConcurrency || 0,
-          speedConcurrency: profile.speedConcurrency ?? 0,
-          detectCountry: profile.detectCountry || false,
-          landingIpUrl: profile.landingIpUrl || '',
-          includeHandshake: profile.includeHandshake !== false,
-          speedRecordMode: profile.speedRecordMode || 'average',
-          peakSampleInterval: profile.peakSampleInterval || 100,
-          trafficByGroup: profile.trafficByGroup !== false,
-          trafficBySource: profile.trafficBySource !== false,
-          trafficByNode: profile.trafficByNode || false,
-          preserveSpeedResult: profile.preserveSpeedResult || false
-        });
-      } else {
-        // 新建时的默认值
-        setForm({
-          name: '',
-          enabled: false,
-          cronExpr: '',
-          mode: 'tcp',
-          testUrl: SPEED_TEST_TCP_OPTIONS[0]?.value || '',
-          latencyUrl: '',
-          timeout: 5,
-          groups: [],
-          tags: [],
-          latencyConcurrency: 0,
-          speedConcurrency: 0,
-          detectCountry: false,
-          landingIpUrl: '',
-          includeHandshake: true,
-          speedRecordMode: 'average',
-          peakSampleInterval: 100,
-          trafficByGroup: true,
-          trafficBySource: true,
-          trafficByNode: false,
-          preserveSpeedResult: false
-        });
-      }
+      setForm(createNodeCheckProfileFormState(profile));
     }
   }, [open, profile]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const loadUnlockMeta = async () => {
+      setUnlockMetaLoading(true);
+      try {
+        const response = await getNodeCheckMeta();
+        setUnlockMeta(response.data || {});
+      } catch (error) {
+        console.error('加载解锁元数据失败:', error);
+      } finally {
+        setUnlockMetaLoading(false);
+      }
+    };
+
+    loadUnlockMeta();
+  }, [open]);
+
+  useEffect(() => {
+    if (open && groupOptions && form.groups?.length > 0) {
+      const validGroups = form.groups.filter((g) => groupOptions.includes(g));
+      if (validGroups.length !== form.groups.length) {
+        setForm((prev) => ({ ...prev, groups: validGroups }));
+      }
+    }
+  }, [groupOptions, open, form.groups, setForm]);
 
   // 更新表单字段
   const updateForm = (field, value) => {
@@ -220,28 +233,7 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
 
     setSubmitting(true);
     try {
-      const data = {
-        name: form.name.trim(),
-        enabled: form.enabled,
-        cronExpr: form.cronExpr,
-        mode: form.mode,
-        testUrl: form.testUrl,
-        latencyUrl: form.latencyUrl,
-        timeout: form.timeout,
-        groups: form.groups,
-        tags: form.tags,
-        latencyConcurrency: form.latencyConcurrency,
-        speedConcurrency: form.speedConcurrency,
-        detectCountry: form.detectCountry,
-        landingIpUrl: form.landingIpUrl,
-        includeHandshake: form.includeHandshake,
-        speedRecordMode: form.speedRecordMode,
-        peakSampleInterval: form.peakSampleInterval,
-        trafficByGroup: form.trafficByGroup,
-        trafficBySource: form.trafficBySource,
-        trafficByNode: form.trafficByNode,
-        preserveSpeedResult: form.preserveSpeedResult
-      };
+      const data = buildNodeCheckProfilePayload(form);
 
       if (isEdit) {
         await updateNodeCheckProfile(profile.id, data);
@@ -258,55 +250,87 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
   };
 
   const urlOptions = form.mode === 'mihomo' ? SPEED_TEST_MIHOMO_OPTIONS : SPEED_TEST_TCP_OPTIONS;
+  const unlockProviderOptions = getUnlockProviderOptions();
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth fullScreen={isMobile}>
-      <DialogTitle>
+    <Dialog
+      open={open}
+      onClose={onClose}
+      maxWidth="sm"
+      fullWidth
+      fullScreen={isMobile}
+      PaperProps={{
+        sx: {
+          backgroundColor: dialogSurface,
+          backgroundImage: dialogSurfaceGradient,
+          border: '1px solid',
+          borderColor: panelBorder,
+          boxShadow: isDark ? `inset 0 1px 0 ${withAlpha(palette.common.white, 0.05)}` : theme.shadows[8]
+        }
+      }}
+    >
+      <DialogTitle
+        sx={{
+          borderBottom: `1px solid ${panelBorder}`,
+          backgroundColor: headerSurface
+        }}
+      >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <SpeedIcon color="primary" />
-          <span>{isEdit ? '编辑检测策略' : '新建检测策略'}</span>
+          <span>{isEdit ? t('nodes.nodeCheckProfiles.form.editTitle') : t('nodes.nodeCheckProfiles.form.createTitle')}</span>
         </Box>
       </DialogTitle>
 
-      <DialogContent dividers>
+      <DialogContent dividers sx={{ backgroundColor: dialogSurface, borderColor: panelBorder }}>
         {/* 策略名称 - 增加上边距避免遮挡 */}
         <TextField
           fullWidth
-          label="策略名称"
+          label={t('nodes.nodeCheckProfiles.form.name')}
           value={form.name}
           onChange={(e) => updateForm('name', e.target.value)}
-          placeholder="例如：每日全量检测"
+          placeholder={t('nodes.nodeCheckProfiles.form.namePlaceholder')}
           sx={{ mb: 2, mt: 1 }}
           required
         />
 
         {/* ========== 定时检测 ========== */}
-        <ConfigSection title="定时检测" icon={<TimerIcon fontSize="small" color="action" />}>
+        <ConfigSection
+          title={t('nodes.nodeCheckProfiles.form.scheduleTitle')}
+          icon={<TimerIcon fontSize="small" color="action" />}
+          themeTokens={themeTokens}
+        >
           <Stack spacing={2}>
             <FormControlLabel
               control={<Switch checked={form.enabled} onChange={(e) => updateForm('enabled', e.target.checked)} />}
-              label="启用定时检测"
+              label={t('nodes.nodeCheckProfiles.form.enableSchedule')}
             />
             {form.enabled && (
-              <CronExpressionGenerator value={form.cronExpr} onChange={(value) => updateForm('cronExpr', value)} label="定时表达式" />
+              <CronExpressionGenerator
+                value={form.cronExpr}
+                onChange={(value) => updateForm('cronExpr', value)}
+                label={t('nodes.nodeCheckProfiles.form.cronExpression')}
+              />
             )}
           </Stack>
         </ConfigSection>
 
         {/* ========== 测速模式 ========== */}
         <ConfigSection
-          title="测速模式"
+          title={t('nodes.nodeCheckProfiles.form.modeTitle')}
           icon={<SpeedIcon fontSize="small" color="action" />}
+          themeTokens={themeTokens}
           helperText={
-            form.mode === 'mihomo' ? '两阶段测试：先并发测延迟，再低并发测下载速度' : '仅测试延迟，速度更快，适合快速筛选可用节点'
+            form.mode === 'mihomo'
+              ? t('nodes.nodeCheckProfiles.form.modeHelper.full')
+              : t('nodes.nodeCheckProfiles.form.modeHelper.delayOnly')
           }
         >
           <Stack spacing={2}>
             <FormControl fullWidth size="small">
-              <InputLabel>测速模式</InputLabel>
-              <Select value={form.mode} label="测速模式" onChange={(e) => handleModeChange(e.target.value)}>
-                <MenuItem value="tcp">仅延迟测试 (更快)</MenuItem>
-                <MenuItem value="mihomo">延迟 + 下载速度测试</MenuItem>
+              <InputLabel>{t('nodes.nodeCheckProfiles.form.mode')}</InputLabel>
+              <Select value={form.mode} label={t('nodes.nodeCheckProfiles.form.mode')} onChange={(e) => handleModeChange(e.target.value)}>
+                <MenuItem value="tcp">{t('nodes.nodeCheckProfiles.form.modeOptions.tcp')}</MenuItem>
+                <MenuItem value="mihomo">{t('nodes.nodeCheckProfiles.form.modeOptions.mihomo')}</MenuItem>
               </Select>
             </FormControl>
 
@@ -325,7 +349,7 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                 <Box component="li" {...props} key={option.value}>
                   <Box>
                     <Typography variant="body2">{option.label}</Typography>
-                    <Typography variant="caption" color="textSecondary" sx={{ wordBreak: 'break-all' }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ wordBreak: 'break-all' }}>
                       {option.value}
                     </Typography>
                   </Box>
@@ -334,8 +358,16 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
               renderInput={(params) => (
                 <TextField
                   {...params}
-                  label={form.mode === 'mihomo' ? '下载测速URL' : '延迟测试URL'}
-                  placeholder={form.mode === 'mihomo' ? '请选择或输入下载测速URL' : '请选择或输入204测速URL'}
+                  label={
+                    form.mode === 'mihomo'
+                      ? t('nodes.nodeCheckProfiles.form.downloadTestUrl')
+                      : t('nodes.nodeCheckProfiles.form.delayTestUrl')
+                  }
+                  placeholder={
+                    form.mode === 'mihomo'
+                      ? t('nodes.nodeCheckProfiles.form.downloadTestUrlPlaceholder')
+                      : t('nodes.nodeCheckProfiles.form.delayTestUrlPlaceholder')
+                  }
                 />
               )}
             />
@@ -357,20 +389,26 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                   <Box component="li" {...props} key={option.value}>
                     <Box>
                       <Typography variant="body2">{option.label}</Typography>
-                      <Typography variant="caption" color="textSecondary" sx={{ wordBreak: 'break-all' }}>
+                      <Typography variant="caption" color="text.secondary" sx={{ wordBreak: 'break-all' }}>
                         {option.value}
                       </Typography>
                     </Box>
                   </Box>
                 )}
-                renderInput={(params) => <TextField {...params} label="延迟测试URL（阶段一）" placeholder="留空则使用速度测试URL" />}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label={t('nodes.nodeCheckProfiles.form.latencyStageUrl')}
+                    placeholder={t('nodes.nodeCheckProfiles.form.latencyStageUrlPlaceholder')}
+                  />
+                )}
               />
             )}
 
             <TextField
               fullWidth
               size="small"
-              label="超时时间"
+              label={t('nodes.nodeCheckProfiles.form.timeout')}
               type="text"
               inputProps={{ inputMode: 'numeric', pattern: '[0-9]*' }}
               value={form.timeout}
@@ -384,21 +422,23 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                 const val = Number(e.target.value) || 5;
                 updateForm('timeout', val);
               }}
-              InputProps={{ endAdornment: <InputAdornment position="end">秒</InputAdornment> }}
+              InputProps={{
+                endAdornment: <InputAdornment position="end">{t('nodes.nodeCheckProfiles.form.units.seconds')}</InputAdornment>
+              }}
             />
 
             {/* 速度记录模式 - 仅在Mihomo模式下显示 */}
             {form.mode === 'mihomo' && (
               <>
                 <FormControl fullWidth size="small">
-                  <InputLabel>速度记录模式</InputLabel>
+                  <InputLabel>{t('nodes.nodeCheckProfiles.form.speedRecordMode')}</InputLabel>
                   <Select
                     value={form.speedRecordMode || 'average'}
-                    label="速度记录模式"
+                    label={t('nodes.nodeCheckProfiles.form.speedRecordMode')}
                     onChange={(e) => updateForm('speedRecordMode', e.target.value)}
                   >
-                    <MenuItem value="average">平均速度 (推荐)</MenuItem>
-                    <MenuItem value="peak">峰值速度</MenuItem>
+                    <MenuItem value="average">{t('nodes.nodeCheckProfiles.form.speedRecordOptions.average')}</MenuItem>
+                    <MenuItem value="peak">{t('nodes.nodeCheckProfiles.form.speedRecordOptions.peak')}</MenuItem>
                   </Select>
                 </FormControl>
 
@@ -406,7 +446,7 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                   <TextField
                     fullWidth
                     size="small"
-                    label="峰值采样间隔"
+                    label={t('nodes.nodeCheckProfiles.form.peakSampleInterval')}
                     type="text"
                     inputProps={{ inputMode: 'numeric', pattern: '[0-9]*' }}
                     value={form.peakSampleInterval ?? 100}
@@ -420,8 +460,10 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                       const val = Math.min(200, Math.max(50, Number(e.target.value) || 100));
                       updateForm('peakSampleInterval', val);
                     }}
-                    InputProps={{ endAdornment: <InputAdornment position="end">毫秒</InputAdornment> }}
-                    helperText="采样间隔范围：50-200毫秒"
+                    InputProps={{
+                      endAdornment: <InputAdornment position="end">{t('nodes.nodeCheckProfiles.form.units.milliseconds')}</InputAdornment>
+                    }}
+                    helperText={t('nodes.nodeCheckProfiles.form.peakSampleHelper')}
                   />
                 )}
               </>
@@ -444,19 +486,19 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
               }
               label={
                 <Typography variant="body2">
-                  检测落地IP国家
-                  <Typography component="span" variant="caption" color="textSecondary" sx={{ ml: 0.5 }}>
-                    (测速时顺便获取节点出口国家)
+                  {t('nodes.nodeCheckProfiles.form.detectCountry')}
+                  <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>
+                    {t('nodes.nodeCheckProfiles.form.detectCountryHint')}
                   </Typography>
                 </Typography>
               }
             />
             {form.detectCountry && (
               <FormControl fullWidth size="small">
-                <InputLabel>IP查询接口</InputLabel>
+                <InputLabel>{t('nodes.nodeCheckProfiles.form.ipQueryUrl')}</InputLabel>
                 <Select
                   value={form.landingIpUrl || 'https://api.ipify.org'}
-                  label="IP查询接口"
+                  label={t('nodes.nodeCheckProfiles.form.ipQueryUrl')}
                   onChange={(e) => updateForm('landingIpUrl', e.target.value)}
                 >
                   {LANDING_IP_URL_OPTIONS.map((opt) => (
@@ -466,6 +508,138 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                   ))}
                 </Select>
               </FormControl>
+            )}
+
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={form.detectQuality}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    updateForm('detectQuality', checked);
+                    if (checked && !form.qualityCheckUrl) {
+                      updateForm('qualityCheckUrl', 'https://my.123169.xyz/v1/info');
+                    }
+                  }}
+                  size="small"
+                />
+              }
+              label={
+                <Typography variant="body2">
+                  {t('nodes.nodeCheckProfiles.form.detectQuality')}
+                  <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>
+                    {t('nodes.nodeCheckProfiles.form.detectQualityHint')}
+                  </Typography>
+                </Typography>
+              }
+            />
+            {form.detectQuality && (
+              <Autocomplete
+                freeSolo
+                size="small"
+                options={QUALITY_CHECK_URL_OPTIONS}
+                getOptionLabel={(option) => (typeof option === 'string' ? option : option.value)}
+                value={form.qualityCheckUrl || ''}
+                onChange={(_, newValue) => {
+                  const url = typeof newValue === 'string' ? newValue : newValue?.value || '';
+                  updateForm('qualityCheckUrl', url);
+                }}
+                onInputChange={(_, newValue) => updateForm('qualityCheckUrl', newValue || '')}
+                renderOption={(props, option) => (
+                  <Box component="li" {...props} key={option.value}>
+                    <Box>
+                      <Typography variant="body2">{option.label}</Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ wordBreak: 'break-all' }}>
+                        {option.value}
+                      </Typography>
+                    </Box>
+                  </Box>
+                )}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label={t('nodes.nodeCheckProfiles.form.qualityCheckUrl')}
+                    placeholder={t('nodes.nodeCheckProfiles.form.qualityCheckUrlPlaceholder')}
+                  />
+                )}
+              />
+            )}
+
+            <FormControlLabel
+              control={<Switch checked={form.detectUnlock} onChange={(e) => updateForm('detectUnlock', e.target.checked)} size="small" />}
+              label={
+                <Typography variant="body2">
+                  {t('nodes.nodeCheckProfiles.form.detectUnlock')}
+                  <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>
+                    {t('nodes.nodeCheckProfiles.form.detectUnlockHint')}
+                  </Typography>
+                </Typography>
+              }
+            />
+            {form.detectUnlock && (
+              <Stack spacing={1.5}>
+                <Alert severity="warning" variant="outlined" sx={getAlertSx(palette.warning.main)}>
+                  {t('nodes.nodeCheckProfiles.form.unlockWarning')}
+                </Alert>
+                <Autocomplete
+                  multiple
+                  size="small"
+                  disableCloseOnSelect
+                  options={unlockProviderOptions}
+                  getOptionLabel={(option) => (typeof option === 'string' ? option : option.label || option.value)}
+                  value={form.unlockProviders}
+                  inputValue={unlockProviderQuery}
+                  onInputChange={(_, newValue) => setUnlockProviderQuery(newValue || '')}
+                  onChange={(_, newValue) =>
+                    updateForm(
+                      'unlockProviders',
+                      newValue.map((item) => (typeof item === 'string' ? item : item?.value || '')).filter(Boolean)
+                    )
+                  }
+                  isOptionEqualToValue={(option, value) => {
+                    const optionValue = typeof option === 'string' ? option : option?.value;
+                    const selectedValue = typeof value === 'string' ? value : value?.value;
+                    return optionValue === selectedValue;
+                  }}
+                  renderTags={(value, getTagProps) =>
+                    value.map((option, index) => {
+                      const { key, ...tagProps } = getTagProps({ index });
+                      return (
+                        <Chip
+                          key={key}
+                          label={formatUnlockProviderLabel(option)}
+                          size="small"
+                          sx={getTokenChipSx(palette.info.main)}
+                          {...tagProps}
+                        />
+                      );
+                    })
+                  }
+                  renderOption={(props, option, { selected }) => (
+                    <Box component="li" {...props} key={option.value}>
+                      <Checkbox checked={selected} size="small" sx={{ mr: 1 }} />
+                      <Box>
+                        <Typography variant="body2">{option.label || formatUnlockProviderLabel(option.value)}</Typography>
+                        <Typography variant="caption" color="text.secondary" display="block">
+                          {option.description || option.value}
+                        </Typography>
+                      </Box>
+                    </Box>
+                  )}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label={t('nodes.nodeCheckProfiles.form.unlockProvider')}
+                      placeholder={t('nodes.nodeCheckProfiles.form.unlockProviderPlaceholder')}
+                      helperText={
+                        unlockMetaLoading
+                          ? t('nodes.nodeCheckProfiles.form.unlockProviderLoading')
+                          : t('nodes.nodeCheckProfiles.form.unlockProviderHelper')
+                      }
+                    />
+                  )}
+                />
+              </Stack>
             )}
 
             {/* TCP模式专属选项：保留速度测试结果 */}
@@ -480,9 +654,9 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                 }
                 label={
                   <Typography variant="body2">
-                    保留速度测试结果
-                    <Typography component="span" variant="caption" color="textSecondary" sx={{ ml: 0.5 }}>
-                      (延迟测试不覆盖上次速度结果)
+                    {t('nodes.nodeCheckProfiles.form.preserveSpeedResult')}
+                    <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>
+                      {t('nodes.nodeCheckProfiles.form.preserveSpeedResultHint')}
                     </Typography>
                   </Typography>
                 }
@@ -492,7 +666,12 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
         </ConfigSection>
 
         {/* ========== 性能参数 ========== */}
-        <ConfigSection title="性能参数" icon={<TuneIcon fontSize="small" color="action" />} defaultExpanded={true}>
+        <ConfigSection
+          title={t('nodes.nodeCheckProfiles.form.performanceTitle')}
+          icon={<TuneIcon fontSize="small" color="action" />}
+          defaultExpanded={true}
+          themeTokens={themeTokens}
+        >
           <Stack spacing={2}>
             {/* 握手时间设置 - 带详细说明 */}
             <Alert
@@ -514,23 +693,25 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                 }
                 label={
                   <Typography variant="body2" fontWeight={500}>
-                    延迟包含握手时间
+                    {t('nodes.nodeCheckProfiles.form.includeHandshake')}
                   </Typography>
                 }
                 sx={{ mb: 0.5, ml: 0 }}
               />
-              <Typography variant="caption" color="textSecondary" component="div">
+              <Typography variant="caption" color="text.secondary" component="div">
                 {(form.includeHandshake ?? true) ? (
                   <>
-                    <strong>开启（推荐）</strong>：测量完整连接时间，包含TCP/TLS/代理协议握手。
+                    <strong>{t('nodes.nodeCheckProfiles.form.handshake.enabledTitle')}</strong>
+                    {t('nodes.nodeCheckProfiles.form.handshake.enabledDesc')}
                     <br />
-                    反映真实使用体验，每次请求都需要握手。
+                    {t('nodes.nodeCheckProfiles.form.handshake.enabledDetail')}
                   </>
                 ) : (
                   <>
-                    <strong>关闭</strong>：先预热建立连接，再测量纯传输延迟。
+                    <strong>{t('nodes.nodeCheckProfiles.form.handshake.disabledTitle')}</strong>
+                    {t('nodes.nodeCheckProfiles.form.handshake.disabledDesc')}
                     <br />
-                    适合精确评估网络线路质量（排除握手开销）。若预热失败则判定节点不可用。
+                    {t('nodes.nodeCheckProfiles.form.handshake.disabledDetail')}
                   </>
                 )}
               </Typography>
@@ -541,36 +722,36 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                 <TextField
                   fullWidth
                   size="small"
-                  label="延迟测试并发"
+                  label={t('nodes.nodeCheckProfiles.form.latencyConcurrency')}
                   type="text"
                   inputProps={{ inputMode: 'numeric', pattern: '[0-9]*' }}
                   value={form.latencyConcurrency || ''}
-                  placeholder="自动"
+                  placeholder={t('nodes.nodeCheckProfiles.form.auto')}
                   onChange={(e) => {
                     const val = e.target.value;
                     if (val === '' || /^\d+$/.test(val)) {
                       updateForm('latencyConcurrency', val === '' ? 0 : Number(val));
                     }
                   }}
-                  helperText="0=智能动态"
+                  helperText={t('nodes.nodeCheckProfiles.form.dynamicHelper')}
                 />
               </Grid>
               <Grid item xs={12} sm={6}>
                 <TextField
                   fullWidth
                   size="small"
-                  label="速度测试并发"
+                  label={t('nodes.nodeCheckProfiles.form.speedConcurrency')}
                   type="text"
                   inputProps={{ inputMode: 'numeric', pattern: '[0-9]*' }}
                   value={form.speedConcurrency || ''}
-                  placeholder="自动"
+                  placeholder={t('nodes.nodeCheckProfiles.form.auto')}
                   onChange={(e) => {
                     const val = e.target.value;
                     if (val === '' || /^\d+$/.test(val)) {
                       updateForm('speedConcurrency', val === '' ? 0 : Number(val));
                     }
                   }}
-                  helperText="0=智能动态"
+                  helperText={t('nodes.nodeCheckProfiles.form.dynamicHelper')}
                 />
               </Grid>
             </Grid>
@@ -579,20 +760,27 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
 
         {/* ========== 测速范围 ========== */}
         <ConfigSection
-          title="测速范围"
+          title={t('nodes.nodeCheckProfiles.form.scopeTitle')}
           icon={<DataUsageIcon fontSize="small" color="action" />}
           defaultExpanded={false}
-          helperText="分组优先级高于标签：选了分组则先按分组筛选，再按标签过滤；只选标签则直接按标签筛选；都不选则测全部"
+          themeTokens={themeTokens}
+          helperText={t('nodes.nodeCheckProfiles.form.scopeHelper')}
         >
           <Stack spacing={2}>
             <Autocomplete
               multiple
-              freeSolo
               size="small"
               options={groupOptions}
               value={form.groups}
               onChange={(_, newValue) => updateForm('groups', newValue)}
-              renderInput={(params) => <TextField {...params} label="测速分组" placeholder="留空则测试全部分组" />}
+              sx={autocompleteChipSx}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label={t('nodes.nodeCheckProfiles.form.groups')}
+                  placeholder={t('nodes.nodeCheckProfiles.form.groupsPlaceholder')}
+                />
+              )}
             />
             <Autocomplete
               multiple
@@ -616,11 +804,7 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                       key={key}
                       label={option.name || option}
                       size="small"
-                      sx={{
-                        backgroundColor: tagObj?.color || '#1976d2',
-                        color: '#fff',
-                        '& .MuiChip-deleteIcon': { color: 'rgba(255,255,255,0.7)' }
-                      }}
+                      sx={getTokenChipSx(tagObj?.color || palette.primary.main)}
                       {...tagProps}
                     />
                   );
@@ -633,20 +817,31 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                       width: 12,
                       height: 12,
                       borderRadius: '50%',
-                      backgroundColor: option.color || '#1976d2',
+                      backgroundColor: option.color || palette.primary.main,
                       mr: 1
                     }}
                   />
                   {option.name}
                 </Box>
               )}
-              renderInput={(params) => <TextField {...params} label="测速标签" placeholder="留空则不按标签过滤" />}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label={t('nodes.nodeCheckProfiles.form.tags')}
+                  placeholder={t('nodes.nodeCheckProfiles.form.tagsPlaceholder')}
+                />
+              )}
             />
           </Stack>
         </ConfigSection>
 
         {/* ========== 流量统计 ========== */}
-        <ConfigSection title="流量统计" icon={<DataUsageIcon fontSize="small" color="action" />} defaultExpanded={false}>
+        <ConfigSection
+          title={t('nodes.nodeCheckProfiles.form.trafficTitle')}
+          icon={<DataUsageIcon fontSize="small" color="action" />}
+          defaultExpanded={false}
+          themeTokens={themeTokens}
+        >
           <Stack spacing={1}>
             <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
               <FormControlLabel
@@ -657,7 +852,7 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                     size="small"
                   />
                 }
-                label={<Typography variant="body2">按分组统计</Typography>}
+                label={<Typography variant="body2">{t('nodes.nodeCheckProfiles.form.trafficByGroup')}</Typography>}
               />
               <FormControlLabel
                 control={
@@ -667,7 +862,7 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                     size="small"
                   />
                 }
-                label={<Typography variant="body2">按来源统计</Typography>}
+                label={<Typography variant="body2">{t('nodes.nodeCheckProfiles.form.trafficBySource')}</Typography>}
               />
               <FormControlLabel
                 control={
@@ -680,9 +875,9 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
                 }
                 label={
                   <Typography variant="body2">
-                    按节点统计
+                    {t('nodes.nodeCheckProfiles.form.trafficByNode')}
                     <Typography component="span" variant="caption" color="error.main" sx={{ ml: 0.5 }}>
-                      (大数据量)
+                      {t('nodes.nodeCheckProfiles.form.largeData')}
                     </Typography>
                   </Typography>
                 }
@@ -690,17 +885,24 @@ export default function NodeCheckProfileFormDialog({ open, onClose, profile, gro
             </Box>
             {form.trafficByNode && (
               <Typography variant="caption" color="error.main">
-                ⚠️ 按节点统计会记录每个节点的流量消耗，节点数量过万时会增加约1-2MB存储空间
+                {t('nodes.nodeCheckProfiles.form.trafficByNodeWarning')}
               </Typography>
             )}
           </Stack>
         </ConfigSection>
       </DialogContent>
 
-      <DialogActions sx={{ px: 3, py: 2 }}>
-        <Button onClick={onClose}>取消</Button>
+      <DialogActions
+        sx={{
+          px: 3,
+          py: 2,
+          borderTop: `1px solid ${panelBorder}`,
+          backgroundColor: actionSurface
+        }}
+      >
+        <Button onClick={onClose}>{t('common.cancel')}</Button>
         <Button variant="contained" onClick={handleSubmit} disabled={!form.name.trim() || submitting}>
-          {submitting ? '保存中...' : '保存设置'}
+          {submitting ? t('common.saving') : t('nodes.nodeCheckProfiles.form.saveSettings')}
         </Button>
       </DialogActions>
     </Dialog>

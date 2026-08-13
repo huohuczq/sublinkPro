@@ -14,6 +14,24 @@
 # 环境变量: SUBLINK_PORT
 port: 8000
 
+# 数据库 DSN
+# 支持 sqlite/mysql/postgres
+# 留空时默认使用 SQLite，并在 db_path/sublink.db 创建数据库文件
+# 环境变量: SUBLINK_DSN
+# 示例:
+# dsn: sqlite:///app/db/sublink.db
+# dsn: mysql://user:pass@tcp(mysql:3306)/sublink?charset=utf8mb4&parseTime=True&loc=Local
+# dsn: postgres://user:pass@postgres:5432/sublink?sslmode=disable
+# dsn:
+
+# 本地数据目录
+# 1. 默认配置文件路径: db_path/config.yaml
+# 2. 默认 SQLite 数据库路径: db_path/sublink.db
+# 3. 默认 GeoIP 数据库路径: db_path/GeoLite2-City.mmdb
+# 使用 MySQL/Postgres 时，此目录仍用于本地配置与数据文件
+# 环境变量: SUBLINK_DB_PATH
+# db_path: ./db
+
 # 日志等级 (debug/info/warn/error/fatal)
 # debug: 调试信息，开发时使用
 # info: 一般信息，正常运行状态（默认）
@@ -90,6 +108,24 @@ captcha_mode: 2
 # 不影响 API 接口和订阅获取功能
 # 环境变量: SUBLINK_WEB_BASE_PATH
 # web_base_path: /admin
+
+# ============================================
+# 反向代理 / 真实客户端 IP
+# ============================================
+
+# 可信反向代理列表（支持 IP 或 CIDR）
+# 只有来自这些代理的 X-Forwarded-For / X-Real-IP 才会被信任
+# 默认已包含本机、Docker/内网常见网段，适用于 Nginx/Caddy/宝塔反代到本机或容器网络
+# 如果您使用公网负载均衡、Cloudflare Tunnel 或其他外部代理，请按实际代理出口 IP / CIDR 补充
+# 如需完全禁用代理信任，可设置为空数组: trusted_proxies: []
+# 环境变量: SUBLINK_TRUSTED_PROXIES（逗号分隔）
+trusted_proxies:
+  - 127.0.0.1
+  - ::1
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 100.64.0.0/10
 
 # ============================================
 # 敏感配置说明

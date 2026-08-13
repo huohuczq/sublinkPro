@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 
 // material-ui
 import Button from '@mui/material/Button';
@@ -12,7 +13,10 @@ import InputLabel from '@mui/material/InputLabel';
 import OutlinedInput from '@mui/material/OutlinedInput';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
+import Chip from '@mui/material/Chip';
+import Divider from '@mui/material/Divider';
 import Stack from '@mui/material/Stack';
+import Typography from '@mui/material/Typography';
 
 // project imports
 import AnimateButton from 'ui-component/extended/AnimateButton';
@@ -37,7 +41,8 @@ const CAPTCHA_MODE = {
 
 export default function AuthLogin() {
   const navigate = useNavigate();
-  const { login } = useAuth();
+  const { t } = useTranslation();
+  const { login, verifyMfa, rememberedUsernameKey } = useAuth();
   const turnstileDialogRef = useRef(null);
 
   const [username, setUsername] = useState('');
@@ -49,6 +54,10 @@ export default function AuthLogin() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [rememberMe, setRememberMe] = useState(false);
+  const [mfaCode, setMfaCode] = useState('');
+  const [recoveryCode, setRecoveryCode] = useState('');
+  const [useRecoveryCode, setUseRecoveryCode] = useState(false);
+  const [mfaChallenge, setMfaChallenge] = useState(null);
 
   // 验证码配置状态
   const [captchaMode, setCaptchaMode] = useState(CAPTCHA_MODE.TRADITIONAL);
@@ -57,9 +66,6 @@ export default function AuthLogin() {
 
   // Turnstile 弹窗状态
   const [turnstileDialogOpen, setTurnstileDialogOpen] = useState(false);
-  // 存储待提交的登录信息
-  const pendingLoginRef = useRef(null);
-
   // 获取验证码配置
   const fetchCaptcha = useCallback(async () => {
     try {
@@ -88,6 +94,21 @@ export default function AuthLogin() {
     fetchCaptcha();
   }, [fetchCaptcha]);
 
+  useEffect(() => {
+    try {
+      const rememberedUsername = localStorage.getItem(rememberedUsernameKey);
+      if (!rememberedUsername) {
+        return;
+      }
+
+      setUsername(rememberedUsername);
+      setRememberMe(true);
+    } catch (err) {
+      console.error('读取记住的用户名失败:', err);
+      localStorage.removeItem(rememberedUsernameKey);
+    }
+  }, [rememberedUsernameKey]);
+
   const handleClickShowPassword = () => {
     setShowPassword(!showPassword);
   };
@@ -95,6 +116,17 @@ export default function AuthLogin() {
   const handleMouseDownPassword = (event) => {
     event.preventDefault();
   };
+
+  const resetMfaState = useCallback(() => {
+    setMfaChallenge(null);
+    setMfaCode('');
+    setRecoveryCode('');
+    setUseRecoveryCode(false);
+  }, []);
+
+  const challengeMethods = mfaChallenge?.availableMethods || [];
+  const canUseRecoveryCode = mfaChallenge?.recoveryAvailable || challengeMethods.includes('recovery_code');
+  const maskedAccountHint = mfaChallenge?.hint || username;
 
   // 执行实际登录请求
   const performLogin = async (turnstileToken = '') => {
@@ -112,9 +144,16 @@ export default function AuthLogin() {
       );
 
       if (result.success) {
+        resetMfaState();
         navigate('/dashboard/default');
+      } else if (result.mfaRequired && result.challenge) {
+        setMfaChallenge(result.challenge);
+        setUseRecoveryCode(false);
+        setMfaCode('');
+        setRecoveryCode('');
+        setError('');
       } else {
-        setError(result.message || '登录失败');
+        setError(result.message || t('auth.login.loginFailed'));
         // 登录失败时刷新验证码或重置 Turnstile
         if (captchaMode === CAPTCHA_MODE.TRADITIONAL) {
           fetchCaptcha();
@@ -127,7 +166,7 @@ export default function AuthLogin() {
         }
       }
     } catch {
-      setError('登录失败，请稍后重试');
+      setError(t('auth.login.loginFailed'));
       if (captchaMode === CAPTCHA_MODE.TRADITIONAL) {
         fetchCaptcha();
         setCaptchaCode('');
@@ -147,7 +186,63 @@ export default function AuthLogin() {
   // Turnstile 弹窗关闭
   const handleTurnstileDialogClose = () => {
     setTurnstileDialogOpen(false);
-    pendingLoginRef.current = null;
+  };
+
+  const handleMfaSubmit = async (event) => {
+    event.preventDefault();
+    setError('');
+
+    if (!mfaChallenge?.challengeToken) {
+      setError(t('auth.mfa.missingContext'));
+      return;
+    }
+
+    if (useRecoveryCode) {
+      if (!recoveryCode.trim()) {
+        setError(t('auth.mfa.missingRecovery'));
+        return;
+      }
+    } else if (!mfaCode.trim()) {
+      setError(t('auth.mfa.missingCode'));
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const result = await verifyMfa({
+        challengeToken: mfaChallenge.challengeToken,
+        code: useRecoveryCode ? '' : mfaCode.trim(),
+        recoveryCode: useRecoveryCode ? recoveryCode.trim() : '',
+        type: useRecoveryCode ? 'recovery_code' : 'totp',
+        rememberMe,
+        username
+      });
+
+      if (result.success) {
+        resetMfaState();
+        navigate('/dashboard/default');
+      } else {
+        setError(result.message || t('auth.mfa.verifyFailed'));
+        if (useRecoveryCode) {
+          setRecoveryCode('');
+        } else {
+          setMfaCode('');
+        }
+      }
+    } catch {
+      setError(t('auth.mfa.verifyFailed'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBackToCredentials = () => {
+    resetMfaState();
+    setError('');
+    if (captchaMode === CAPTCHA_MODE.TRADITIONAL) {
+      fetchCaptcha();
+      setCaptchaCode('');
+    }
   };
 
   const handleSubmit = async (event) => {
@@ -156,17 +251,17 @@ export default function AuthLogin() {
 
     // 表单验证
     if (!username.trim()) {
-      setError('请输入用户名');
+      setError(t('auth.login.missingUsername'));
       return;
     }
 
     if (!password.trim()) {
-      setError('请输入密码');
+      setError(t('auth.login.missingPassword'));
       return;
     }
 
     if (password.length < 6) {
-      setError('密码长度至少6位');
+      setError(t('auth.login.passwordMinLength'));
       return;
     }
 
@@ -185,7 +280,7 @@ export default function AuthLogin() {
       default:
         // 传统验证码模式
         if (!captchaCode.trim()) {
-          setError('请输入验证码');
+          setError(t('auth.login.missingCaptcha'));
           return;
         }
         performLogin('');
@@ -201,7 +296,7 @@ export default function AuthLogin() {
 
     return (
       <CustomFormControl fullWidth>
-        <InputLabel htmlFor="outlined-adornment-captcha-login">验证码</InputLabel>
+        <InputLabel htmlFor="outlined-adornment-captcha-login">{t('auth.login.captcha')}</InputLabel>
         <OutlinedInput
           id="outlined-adornment-captcha-login"
           type="text"
@@ -217,7 +312,7 @@ export default function AuthLogin() {
                   <Box
                     component="img"
                     src={captchaBase64}
-                    alt="验证码"
+                    alt={t('auth.login.captcha')}
                     sx={{
                       height: 40,
                       cursor: 'pointer',
@@ -226,84 +321,107 @@ export default function AuthLogin() {
                     onClick={fetchCaptcha}
                   />
                 )}
-                <IconButton onClick={fetchCaptcha} size="small" title="刷新验证码">
+                <IconButton onClick={fetchCaptcha} size="small" title={t('auth.login.refreshCaptcha')}>
                   <RefreshIcon />
                 </IconButton>
               </Stack>
             </InputAdornment>
           }
-          label="验证码"
+          label={t('auth.login.captcha')}
         />
       </CustomFormControl>
     );
   };
 
-  return (
-    <>
-      <form onSubmit={handleSubmit}>
-        {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
-            {error}
-          </Alert>
+  const renderMfaForm = () => (
+    <form onSubmit={handleMfaSubmit}>
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          {error}
+        </Alert>
+      )}
+
+      <Alert severity="info" sx={{ mb: 2 }}>
+        <Stack spacing={0.5}>
+          <Typography variant="body2">{t('auth.mfa.info')}</Typography>
+          {maskedAccountHint && (
+            <Typography variant="caption" color="text.secondary">
+              {t('auth.mfa.currentAccount', { account: maskedAccountHint })}
+            </Typography>
+          )}
+        </Stack>
+      </Alert>
+
+      <Stack spacing={2}>
+        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+          <Chip
+            color={!useRecoveryCode ? 'secondary' : 'default'}
+            label={t('auth.mfa.authenticator')}
+            size="small"
+            variant={!useRecoveryCode ? 'filled' : 'outlined'}
+          />
+          {canUseRecoveryCode && (
+            <Chip
+              color={useRecoveryCode ? 'secondary' : 'default'}
+              label={t('auth.mfa.recoveryCode')}
+              size="small"
+              variant={useRecoveryCode ? 'filled' : 'outlined'}
+            />
+          )}
+        </Stack>
+
+        {!useRecoveryCode ? (
+          <CustomFormControl fullWidth>
+            <InputLabel htmlFor="outlined-adornment-totp-code">{t('auth.mfa.codeLabel')}</InputLabel>
+            <OutlinedInput
+              id="outlined-adornment-totp-code"
+              type="text"
+              value={mfaCode}
+              onChange={(e) => setMfaCode(e.target.value.replace(/\s+/g, '').slice(0, 8))}
+              name="totpCode"
+              label={t('auth.mfa.codeLabel')}
+              autoComplete="one-time-code"
+              autoFocus
+              inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', 'aria-describedby': 'mfa-code-helper-text' }}
+            />
+          </CustomFormControl>
+        ) : (
+          <CustomFormControl fullWidth>
+            <InputLabel htmlFor="outlined-adornment-recovery-code">{t('auth.mfa.recoveryCodeLabel')}</InputLabel>
+            <OutlinedInput
+              id="outlined-adornment-recovery-code"
+              type="text"
+              value={recoveryCode}
+              onChange={(e) => setRecoveryCode(e.target.value.trimStart())}
+              name="recoveryCode"
+              label={t('auth.mfa.recoveryCodeLabel')}
+              autoComplete="one-time-code"
+              autoFocus
+            />
+          </CustomFormControl>
         )}
 
-        {/* 降级提示 */}
-        {captchaDegraded && (
-          <Alert severity="info" sx={{ mb: 2 }}>
-            Turnstile 配置不完整，已降级为传统验证码
-          </Alert>
+        <Typography id="mfa-code-helper-text" variant="caption" color="text.secondary" sx={{ mt: -1 }}>
+          {useRecoveryCode ? t('auth.mfa.recoveryCodeHint') : t('auth.mfa.authenticatorHint')}
+        </Typography>
+
+        {canUseRecoveryCode && (
+          <Button
+            color="secondary"
+            variant="text"
+            onClick={() => setUseRecoveryCode((prev) => !prev)}
+            sx={{ alignSelf: 'flex-start', px: 0.5 }}
+          >
+            {useRecoveryCode ? t('auth.mfa.useAuthenticatorBtn') : t('auth.mfa.useRecoveryBtn')}
+          </Button>
         )}
 
-        <CustomFormControl fullWidth>
-          <InputLabel htmlFor="outlined-adornment-username-login">用户名</InputLabel>
-          <OutlinedInput
-            id="outlined-adornment-username-login"
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            name="username"
-            label="用户名"
-            autoComplete="username"
-            autoFocus
-          />
-        </CustomFormControl>
+        <Divider />
 
-        <CustomFormControl fullWidth>
-          <InputLabel htmlFor="outlined-adornment-password-login">密码</InputLabel>
-          <OutlinedInput
-            id="outlined-adornment-password-login"
-            type={showPassword ? 'text' : 'password'}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            name="password"
-            autoComplete="current-password"
-            endAdornment={
-              <InputAdornment position="end">
-                <IconButton
-                  aria-label="切换密码可见性"
-                  onClick={handleClickShowPassword}
-                  onMouseDown={handleMouseDownPassword}
-                  edge="end"
-                  size="large"
-                >
-                  {showPassword ? <Visibility /> : <VisibilityOff />}
-                </IconButton>
-              </InputAdornment>
-            }
-            label="密码"
-          />
-        </CustomFormControl>
-
-        {/* 验证码区域（仅传统模式） */}
-        {renderCaptcha()}
-
-        <FormControlLabel
-          control={<Checkbox checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} name="rememberMe" color="secondary" />}
-          label="记住密码"
-          sx={{ mt: 1, mb: 1, ml: 0 }}
-        />
-
-        <Box sx={{ mt: 1 }}>
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+          <Button variant="outlined" onClick={handleBackToCredentials} disabled={loading}>
+            {t('auth.mfa.backBtn')}
+          </Button>
           <AnimateButton>
             <Button
               color="secondary"
@@ -312,15 +430,102 @@ export default function AuthLogin() {
               type="submit"
               variant="contained"
               disabled={loading}
-              startIcon={loading ? <CircularProgress size={20} color="inherit" /> : null}
+              sx={{ position: 'relative' }}
             >
-              {loading ? '登录中...' : '登 录'}
+              {loading && <CircularProgress size={20} color="inherit" sx={{ position: 'absolute', left: 16 }} />}
+              {loading ? t('auth.mfa.verifying') : t('auth.mfa.verifyBtn')}
             </Button>
           </AnimateButton>
-        </Box>
-      </form>
+        </Stack>
+      </Stack>
+    </form>
+  );
 
-      {/* Turnstile 验证弹窗 */}
+  const renderPrimaryLoginForm = () => (
+    <form onSubmit={handleSubmit}>
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          {error}
+        </Alert>
+      )}
+
+      {captchaDegraded && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          {t('auth.login.turnstileDegraded')}
+        </Alert>
+      )}
+
+      <CustomFormControl fullWidth>
+        <InputLabel htmlFor="outlined-adornment-username-login">{t('auth.login.username')}</InputLabel>
+        <OutlinedInput
+          id="outlined-adornment-username-login"
+          type="text"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          name="username"
+          label={t('auth.login.username')}
+          autoComplete="username"
+          autoFocus
+        />
+      </CustomFormControl>
+
+      <CustomFormControl fullWidth>
+        <InputLabel htmlFor="outlined-adornment-password-login">{t('auth.login.password')}</InputLabel>
+        <OutlinedInput
+          id="outlined-adornment-password-login"
+          type={showPassword ? 'text' : 'password'}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          name="password"
+          autoComplete="current-password"
+          endAdornment={
+            <InputAdornment position="end">
+              <IconButton
+                aria-label={t('auth.login.togglePassword')}
+                onClick={handleClickShowPassword}
+                onMouseDown={handleMouseDownPassword}
+                edge="end"
+                size="large"
+              >
+                {showPassword ? <Visibility /> : <VisibilityOff />}
+              </IconButton>
+            </InputAdornment>
+          }
+          label={t('auth.login.password')}
+        />
+      </CustomFormControl>
+
+      {renderCaptcha()}
+
+      <FormControlLabel
+        control={<Checkbox checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} name="rememberMe" color="secondary" />}
+        label={t('auth.login.rememberMe')}
+        sx={{ mt: 1, mb: 1, ml: 0 }}
+      />
+
+      <Box sx={{ mt: 1 }}>
+        <AnimateButton>
+          <Button
+            color="secondary"
+            fullWidth
+            size="large"
+            type="submit"
+            variant="contained"
+            disabled={loading}
+            sx={{ position: 'relative' }}
+          >
+            {loading && <CircularProgress size={20} color="inherit" sx={{ position: 'absolute', left: 16 }} />}
+            {loading ? t('auth.login.loggingIn') : t('auth.login.loginBtn')}
+          </Button>
+        </AnimateButton>
+      </Box>
+    </form>
+  );
+
+  return (
+    <>
+      {mfaChallenge ? renderMfaForm() : renderPrimaryLoginForm()}
+
       {captchaMode === CAPTCHA_MODE.TURNSTILE && turnstileSiteKey && (
         <TurnstileDialog
           ref={turnstileDialogRef}

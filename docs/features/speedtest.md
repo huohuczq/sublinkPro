@@ -1,76 +1,148 @@
-# 测速系统
+English | [简体中文](speedtest.zh-CN.md)
 
-SublinkPro 提供专业级的节点测速功能，采用科学的测试方法确保结果准确可靠。
+# Speed Test System
+
+SublinkPro provides professional node speed testing with a scientific method for accurate and reliable results.
 
 ---
 
-## 🔬 技术特点
+## 🔬 Technical Features
 
-| 特点 | 说明 |
+| Feature | Description |
 |:---|:---|
-| **双阶段分离测试** | 延迟测试与下载速度测试分开进行，各自使用最适合的测试URL和方法 |
-| **智能延迟测量** | 支持 UnifiedDelay 模式，可选择包含或排除握手时间（系统自动发送两次请求取第二次结果） |
-| **独立并发设置** | 延迟测试和速度测试可分别配置不同的并发数，平衡效率与精度 |
-| **状态自动标记** | 测速完成后自动根据结果更新节点的延迟状态和速度状态 |
-| **实时进度展示** | 测速过程中实时显示进度和状态，支持任务面板查看 |
-| **流量统计** | 每个节点测速完成后记录消耗流量，任务完成时汇总显示 |
+| **Separated two stage tests** | Latency and download speed tests run separately, each using the most suitable test URL and method |
+| **Smart latency measurement** | Supports UnifiedDelay mode, with optional inclusion or exclusion of handshake time. The system sends two requests and uses the second result |
+| **Independent concurrency settings** | Latency and speed tests can use different concurrency values to balance efficiency and accuracy |
+| **Automatic status marking** | After tests complete, node latency status and speed status are updated automatically |
+| **IP quality checks** | During speed tests, the system can also check exit IP fraud score, IP type, and residential attribute |
+| **Unlock checks** | During node checks, the system can also check streaming / AI service availability regions |
+| **Real time progress** | Progress and state are shown in real time during tests, with task panel support |
+| **Traffic statistics** | Traffic consumed by each tested node is recorded, and task totals are shown when complete |
 
 ---
 
-## 📊 测速状态分类
+## 📊 Speed Test Status Categories
 
-| 颜色 | 延迟阈值 | 速度阈值 |
+| Color | Latency threshold | Speed threshold |
 |:---|:---|:---|
-| 🟢 绿色 | < 200ms | >= 5 MB/s |
-| 🟡 黄色 | 200-500ms | 1-5 MB/s |
-| 🔴 红色 | >= 500ms 或超时/失败 | < 1 MB/s 或失败 |
-| ⚪ 灰色 | 未测试 | 未测试 |
+| 🟢 Green | < 200ms | >= 5 MB/s |
+| 🟡 Yellow | 200-500ms | 1-5 MB/s |
+| 🔴 Red | >= 500ms or timeout/failure | < 1 MB/s or failure |
+| ⚪ Gray | Untested | Untested |
 
 ---
 
-## 🔧 测速原理与流量计算
+## 🌐 IP Quality Checks
+
+After enabling **IP quality check** in “Check Settings”, the system performs extra IP quality API requests during the speed test flow and adds quality information for the node exit IP.
+
+The current `ippure` style API returns fields such as `fraudScore`, `isBroadcast`, and `isResidential`. The frontend and filtering logic interpret them as follows.
+
+### Result semantics
+
+| Field | API response | Frontend display |
+|:---|:---|:---|
+| **IP type** | `isBroadcast = true` | Broadcast IP |
+| **IP type** | `isBroadcast = false` | Native IP |
+| **IP type** | Field missing or not checked in this run | Untested |
+| **Residential attribute** | `isResidential = true` | Residential IP |
+| **Residential attribute** | `isResidential = false` | Data center IP |
+| **Residential attribute** | Field missing or not checked in this run | Untested |
+| **Fraud score** | `fraudScore = 0-100` | Lower is better |
 
 > [!IMPORTANT]
-> **核心原理**：测速采用「限时下载」方式，即在设定的超时时间内尽可能多地下载数据，然后根据实际下载的字节数和耗时计算速度。
+> **Untested is not false**: When the API does not return `isBroadcast` or `isResidential`, the system displays “Untested”. It does not incorrectly classify the node as “Native IP” or “Data center IP”.
 
-**速度计算公式**：
-```
-速度 (MB/s) = 实际下载字节数 ÷ 1024 ÷ 1024 ÷ 实际耗时(秒)
-```
+### Fraud score levels
 
-### 常见疑问
-
-| 现象 | 原因 |
-|:---|:---|
-| 设置 5MB 测速文件，但实际下载不到 5MB | 节点速度慢，在超时时间内未下载完 |
-| 有的节点下载 500KB，有的下载 5MB | 速度快的节点在超时前下载完成，慢的节点下载不完 |
-| 流量消耗显示几百KB | 节点速度约为 100KB/s × 超时时间(秒) |
-
-### 示例（假设超时时间为 5 秒）
-
-| 节点速度 | 实际下载量 | 计算结果 |
+| Score range | Rating | Description |
 |:---|:---|:---|
-| 10 MB/s | 5 MB（提前完成） | 速度 ≈ 10 MB/s |
-| 1 MB/s | 5 MB | 速度 = 1 MB/s |
-| 0.2 MB/s | 1 MB | 速度 = 0.2 MB/s |
-| 0.1 MB/s | 500 KB | 速度 = 0.1 MB/s |
+| `0 - 10` | Excellent | Very low risk |
+| `11 - 30` | Great | Lower risk |
+| `31 - 50` | Good | Usable normally |
+| `51 - 70` | Medium | Judge with your business scenario |
+| `71 - 89` | Poor | Higher risk |
+| `90+` | Very poor | Very high risk |
+
+### Where results can be used
+
+- **Node Management**: view fraud score, IP type, and residential attribute directly, and filter by all three dimensions.
+- **Subscription filtering**: set max fraud score, IP type, and residential attribute filters while editing subscriptions.
+- **Node rename rules**: use `$FraudScore`, `$IpType`, and `$Residential` in rename rules.
+- **Automatic tags / chain proxy**: after condition fields are added, rules can match directly on IP quality results.
 
 ---
 
-## ⚙️ 参数配置建议
+## 🌍 Unlock Checks
 
-| 参数 | 说明 | 建议值 |
-|:---|:---|:---|
-| **测速超时时间** | 每个节点测速的最大时长 | 5-10秒（平衡速度与准确性） |
-| **测速文件 URL** | 用于下载测速的文件地址 | 建议 ≥ 超时时间 × 预期最大速度 |
-| **延迟测试 URL** | 用于延迟测试的地址 | 建议使用 HTTP 204 或小文件，如 Cloudflare 的 generate_204 |
-| **延迟测试并发** | 同时进行延迟测试的节点数 | 10-50（可适当调高） |
-| **速度测试并发** | 同时进行速度测试的节点数 | 1-3（避免带宽竞争） |
+After enabling **unlock check** in “Check Settings”, the system runs selected Provider probes during the node check flow.
+
+Built in Providers currently include:
+
+- Netflix
+- Disney+
+- YouTube Premium
+- OpenAI
+- Gemini
+- Claude
+
+Unlock results are written back to node information and displayed in the node list, node details, task progress panel, and Task Center.
 
 > [!TIP]
-> **测速文件大小建议**：如果超时时间为 5 秒，预期最快节点为 20 MB/s，则测速文件应 ≥ 100MB。推荐使用 Cloudflare 的测速 URL：`https://speed.cloudflare.com/__down?bytes=100000000`（100MB）
-> 
-> ⚠️ **注意**：文件越大超时时间越大可能消耗流量越多
+> Unlock checks use an independent Provider Checker + registry architecture, so adding platforms later does not require rewriting the whole speed test task.
+>
+> Provider selectors, unlock status options, and unlock condition schemas are delivered by the backend, so adding a normal checker does not require manually adding options across multiple frontend pages.
+
+For detailed architecture and extension instructions, see:
+
+- [🌍 Unlock checks](unlock-check.md)
+
+---
+
+## 🔧 Speed Test Principle and Traffic Calculation
+
+> [!IMPORTANT]
+> **Core principle**: Speed tests use “timed download”. During the configured timeout, the system downloads as much data as possible, then calculates speed from actual downloaded bytes and elapsed time.
+
+**Speed formula**:
+
+```text
+Speed (MB/s) = actual downloaded bytes ÷ 1024 ÷ 1024 ÷ actual elapsed time, seconds
+```
+
+### Common questions
+
+| Symptom | Reason |
+|:---|:---|
+| Test file is 5MB, but less than 5MB is downloaded | The node is slow and did not finish the download within the timeout |
+| Some nodes download 500KB, others download 5MB | Fast nodes finish before timeout, slow nodes do not |
+| Traffic consumption shows a few hundred KB | Node speed is about 100KB/s × timeout in seconds |
+
+### Example, assuming a 5 second timeout
+
+| Node speed | Actual download | Calculated result |
+|:---|:---|:---|
+| 10 MB/s | 5 MB, finished early | Speed ≈ 10 MB/s |
+| 1 MB/s | 5 MB | Speed = 1 MB/s |
+| 0.2 MB/s | 1 MB | Speed = 0.2 MB/s |
+| 0.1 MB/s | 500 KB | Speed = 0.1 MB/s |
+
+---
+
+## ⚙️ Parameter Recommendations
+
+| Parameter | Description | Recommended value |
+|:---|:---|:---|
+| **Speed test timeout** | Maximum duration for each node speed test | 5-10 seconds, balancing speed and accuracy |
+| **Speed test file URL** | File URL used for download speed testing | Recommended size ≥ timeout × expected max speed |
+| **Latency test URL** | URL used for latency testing | Use HTTP 204 or a small file, such as Cloudflare generate_204 |
+| **Latency concurrency** | Number of nodes tested for latency at the same time | 10-50, can be increased as needed |
+| **Speed test concurrency** | Number of nodes tested for speed at the same time | 1-3, to avoid bandwidth contention |
+
+> [!TIP]
+> **Speed test file size recommendation**: If timeout is 5 seconds and the expected fastest node is 20 MB/s, the test file should be at least 100MB. Recommended Cloudflare speed test URL: `https://speed.cloudflare.com/__down?bytes=100000000`, 100MB.
+>
+> ⚠️ **Note**: Larger files and longer timeouts may consume more traffic.
 
 > [!WARNING]
-> **流量消耗提示**：每次测速会消耗实际带宽流量。100个节点 × 5MB 测速文件 = 最多消耗 500MB 流量。慢速节点消耗较少，但快速节点会下载完整文件。
+> **Traffic consumption warning**: Each speed test consumes real bandwidth. 100 nodes × 5MB test file = up to 500MB traffic. Slow nodes consume less, but fast nodes may download the full file.

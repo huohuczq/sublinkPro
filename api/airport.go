@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"sublink/dto"
 	"sublink/models"
 	"sublink/node"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/robfig/cron/v3"
-	"gorm.io/gorm"
 )
 
 // validateCron 验证5字段Cron表达式
@@ -19,6 +19,30 @@ func validateCron(expr string) bool {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	_, err := parser.Parse(expr)
 	return err == nil
+}
+
+func normalizeAirportRequestHeaders(headers []dto.AirportRequestHeader) (models.AirportRequestHeaders, error) {
+	normalized := make(models.AirportRequestHeaders, 0, len(headers))
+	for _, header := range headers {
+		key := strings.TrimSpace(header.Key)
+		value := strings.TrimSpace(header.Value)
+
+		if key == "" && value == "" {
+			continue
+		}
+		if key == "" {
+			return nil, errors.New("自定义 Header 的名称不能为空")
+		}
+		if strings.EqualFold(key, "User-Agent") {
+			return nil, errors.New("User-Agent 请使用专用字段设置")
+		}
+
+		normalized = append(normalized, models.AirportRequestHeader{
+			Key:   key,
+			Value: value,
+		})
+	}
+	return normalized, nil
 }
 
 // AirportWithStats 机场数据（包含节点统计）
@@ -51,8 +75,7 @@ func AirportList(c *gin.Context) {
 
 	// 解析启用状态筛选
 	if enabledStr := c.Query("enabled"); enabledStr != "" {
-		enabled := enabledStr == "true"
-		filter.Enabled = &enabled
+		filter.Enabled = new(enabledStr == "true")
 	}
 
 	// 分页查询（带筛选）
@@ -150,27 +173,40 @@ func AirportAdd(c *gin.Context) {
 		return
 	}
 
+	requestHeaders, err := normalizeAirportRequestHeaders(req.RequestHeaders)
+	if err != nil {
+		utils.FailWithMsg(c, err.Error())
+		return
+	}
+
 	airport := models.Airport{
-		Name:               req.Name,
-		URL:                req.URL,
-		CronExpr:           req.CronExpr,
-		Enabled:            req.Enabled,
-		Group:              req.Group,
-		DownloadWithProxy:  req.DownloadWithProxy,
-		ProxyLink:          req.ProxyLink,
-		UserAgent:          req.UserAgent,
-		FetchUsageInfo:     req.FetchUsageInfo,
-		SkipTLSVerify:      req.SkipTLSVerify,
-		Remark:             req.Remark,
-		Logo:               req.Logo,
-		NodeNameWhitelist:  req.NodeNameWhitelist,
-		NodeNameBlacklist:  req.NodeNameBlacklist,
-		ProtocolWhitelist:  req.ProtocolWhitelist,
-		ProtocolBlacklist:  req.ProtocolBlacklist,
-		NodeNamePreprocess: req.NodeNamePreprocess,
-		DeduplicationRule:  req.DeduplicationRule,
-		NodeNameUniquify:   req.NodeNameUniquify,
-		NodeNamePrefix:     req.NodeNamePrefix,
+		Name:                         req.Name,
+		URL:                          req.URL,
+		CronExpr:                     req.CronExpr,
+		Enabled:                      req.Enabled,
+		Group:                        req.Group,
+		DownloadWithProxy:            req.DownloadWithProxy,
+		ProxyLink:                    req.ProxyLink,
+		UserAgent:                    req.UserAgent,
+		RequestHeaders:               requestHeaders,
+		FetchUsageInfo:               req.FetchUsageInfo,
+		SkipTLSVerify:                req.SkipTLSVerify,
+		UpdateAfterDetect:            req.UpdateAfterDetect,
+		UpdateAfterDetectProfileID:   req.UpdateAfterDetectProfileID,
+		UpdateAfterDetectChangedOnly: req.UpdateAfterDetectChangedOnly,
+		Remark:                       req.Remark,
+		Logo:                         req.Logo,
+		NodeNameWhitelist:            req.NodeNameWhitelist,
+		NodeNameBlacklist:            req.NodeNameBlacklist,
+		ProtocolWhitelist:            req.ProtocolWhitelist,
+		ProtocolBlacklist:            req.ProtocolBlacklist,
+		NodeNamePreprocess:           req.NodeNamePreprocess,
+		DeduplicationRule:            req.DeduplicationRule,
+		NodeNameUniquify:             req.NodeNameUniquify,
+		NodeNamePrefix:               req.NodeNamePrefix,
+		NodeNameIntraUniquify:        req.NodeNameIntraUniquify,
+		AutoFillCountry:              req.AutoFillCountry,
+		BackfillExistingCountry:      req.BackfillExistingCountry,
 	}
 
 	// 检查是否重复
@@ -220,6 +256,12 @@ func AirportUpdate(c *gin.Context) {
 		return
 	}
 
+	requestHeaders, err := normalizeAirportRequestHeaders(req.RequestHeaders)
+	if err != nil {
+		utils.FailWithMsg(c, err.Error())
+		return
+	}
+
 	// 检查是否存在
 	existing, err := models.GetAirportByID(id)
 	if err != nil {
@@ -227,13 +269,13 @@ func AirportUpdate(c *gin.Context) {
 		return
 	}
 
-	// 检查名称/URL是否与其他机场冲突
-	checkAirport := models.Airport{Name: req.Name, URL: req.URL}
-	if err := checkAirport.Find(); err == nil && checkAirport.ID != id {
-		utils.FailWithMsg(c, "机场已存在（名称或URL与其他机场重复）")
-		return
-	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	conflict, err := models.HasAirportIdentityConflict(id, req.Name, req.URL)
+	if err != nil {
 		utils.FailWithMsg(c, "更新失败")
+		return
+	}
+	if conflict {
+		utils.FailWithMsg(c, "机场已存在（名称或URL与其他机场重复）")
 		return
 	}
 
@@ -246,8 +288,12 @@ func AirportUpdate(c *gin.Context) {
 	existing.DownloadWithProxy = req.DownloadWithProxy
 	existing.ProxyLink = req.ProxyLink
 	existing.UserAgent = req.UserAgent
+	existing.RequestHeaders = requestHeaders
 	existing.FetchUsageInfo = req.FetchUsageInfo
 	existing.SkipTLSVerify = req.SkipTLSVerify
+	existing.UpdateAfterDetect = req.UpdateAfterDetect
+	existing.UpdateAfterDetectProfileID = req.UpdateAfterDetectProfileID
+	existing.UpdateAfterDetectChangedOnly = req.UpdateAfterDetectChangedOnly
 	existing.Remark = req.Remark
 	existing.Logo = req.Logo
 	existing.NodeNameWhitelist = req.NodeNameWhitelist
@@ -258,6 +304,9 @@ func AirportUpdate(c *gin.Context) {
 	existing.DeduplicationRule = req.DeduplicationRule
 	existing.NodeNameUniquify = req.NodeNameUniquify
 	existing.NodeNamePrefix = req.NodeNamePrefix
+	existing.NodeNameIntraUniquify = req.NodeNameIntraUniquify
+	existing.AutoFillCountry = req.AutoFillCountry
+	existing.BackfillExistingCountry = req.BackfillExistingCountry
 
 	if err := existing.Update(); err != nil {
 		utils.FailWithMsg(c, "更新失败: "+err.Error())
@@ -275,6 +324,60 @@ func AirportUpdate(c *gin.Context) {
 	_ = sch.UpdateJob(id, req.CronExpr, req.Enabled, req.URL, req.Name)
 
 	utils.OkWithMsg(c, "更新成功")
+}
+
+// AirportBatchUpdate 批量更新机场的调度和分组
+func AirportBatchUpdate(c *gin.Context) {
+	var req dto.AirportBatchUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.FailWithMsg(c, "参数错误: "+err.Error())
+		return
+	}
+
+	if len(req.IDs) == 0 {
+		utils.FailWithMsg(c, "请选择要修改的机场")
+		return
+	}
+	if !req.ApplyGroup && !req.ApplySchedule {
+		utils.FailWithMsg(c, "请至少选择一个要修改的字段")
+		return
+	}
+	if req.ApplySchedule {
+		req.CronExpr = strings.TrimSpace(req.CronExpr)
+		if req.CronExpr == "" {
+			utils.FailWithMsg(c, "请输入Cron表达式")
+			return
+		}
+		if !validateCron(req.CronExpr) {
+			utils.FailWithMsg(c, "Cron表达式格式错误")
+			return
+		}
+	}
+
+	updatedAirports, err := models.BatchUpdateAirports(req.IDs, models.AirportBatchUpdateParams{
+		ApplyGroup:    req.ApplyGroup,
+		Group:         req.Group,
+		ApplySchedule: req.ApplySchedule,
+		CronExpr:      req.CronExpr,
+	})
+	if err != nil {
+		utils.FailWithMsg(c, "批量更新失败: "+err.Error())
+		return
+	}
+
+	if req.ApplySchedule {
+		sch := scheduler.GetSchedulerManager()
+		for _, airport := range updatedAirports {
+			if err := sch.UpdateJob(airport.ID, airport.CronExpr, airport.Enabled, airport.URL, airport.Name); err != nil {
+				utils.FailWithMsg(c, "批量更新成功，但刷新调度失败: "+err.Error())
+				return
+			}
+		}
+	}
+
+	utils.OkDetailed(c, "批量更新成功", gin.H{
+		"count": len(updatedAirports),
+	})
 }
 
 // AirportDelete 删除机场
@@ -330,6 +433,66 @@ func AirportPull(c *gin.Context) {
 	utils.OkWithMsg(c, "任务已提交，请稍后刷新查看结果")
 }
 
+// AirportPullAll 批量拉取机场订阅
+// 支持两种模式：
+// 1. 提供 ids 参数：拉取指定的机场（不论启用状态）
+// 2. 不提供 ids 参数：拉取所有已启用的机场
+func AirportPullAll(c *gin.Context) {
+	var req dto.AirportPullAllRequest
+	// 尝试解析请求体，如果没有请求体或解析失败，req.IDs 为 nil/empty
+	_ = c.ShouldBindJSON(&req)
+
+	var airportsToProcess []models.Airport
+
+	if len(req.IDs) > 0 {
+		// 模式1：拉取指定的机场（用户明确选择，不论启用状态）
+		for _, id := range req.IDs {
+			airport, err := models.GetAirportByID(id)
+			if err != nil {
+				// 跳过不存在的机场，继续处理其他机场
+				utils.Warn("机场 ID %d 不存在，已跳过", id)
+				continue
+			}
+			airportsToProcess = append(airportsToProcess, *airport)
+		}
+	} else {
+		// 模式2：拉取所有已启用的机场
+		airportModel := models.Airport{}
+		allAirports, err := airportModel.List()
+		if err != nil {
+			utils.FailWithMsg(c, "获取机场列表失败")
+			return
+		}
+
+		for _, airport := range allAirports {
+			if airport.Enabled {
+				airportsToProcess = append(airportsToProcess, airport)
+			}
+		}
+	}
+
+	if len(airportsToProcess) == 0 {
+		if len(req.IDs) > 0 {
+			utils.OkWithMsg(c, "没有找到有效的机场")
+		} else {
+			utils.OkWithMsg(c, "没有已启用的机场")
+		}
+		return
+	}
+
+	// 提交拉取任务
+	count := 0
+	for _, airport := range airportsToProcess {
+		go scheduler.ExecuteSubscriptionTaskWithTrigger(airport.ID, airport.URL, airport.Name, models.TaskTriggerManual)
+		count++
+	}
+
+	utils.OkWithData(c, map[string]any{
+		"message": "批量拉取任务已提交",
+		"count":   count,
+	})
+}
+
 // AirportRefreshUsage 仅刷新机场的用量信息，不更新订阅/节点
 func AirportRefreshUsage(c *gin.Context) {
 	idStr := c.Param("id")
@@ -358,7 +521,7 @@ func AirportRefreshUsage(c *gin.Context) {
 	}
 
 	// 返回用量信息
-	utils.OkDetailed(c, "用量信息已更新", map[string]interface{}{
+	utils.OkDetailed(c, "用量信息已更新", map[string]any{
 		"upload":   usageInfo.Upload,
 		"download": usageInfo.Download,
 		"total":    usageInfo.Total,

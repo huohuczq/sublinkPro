@@ -1,3 +1,13 @@
+import i18n from 'i18n';
+import { getFraudScoreLevel, getQualityStatusMeta, QUALITY_STATUS, QUALITY_STATUS_OPTIONS } from 'utils/fraudScore';
+import {
+  formatCountry as formatCountryDisplay,
+  getCountryDisplay as getCountryDisplayInfo,
+  isoToFlag as isoCodeToFlag
+} from 'utils/countryDisplay';
+
+const translate = (key, defaultValue, options = {}) => i18n.t(key, { defaultValue, ...options });
+
 // Cron 表达式预设 - 包含友好的说明
 export const CRON_OPTIONS = [
   { label: '每30分钟', value: '*/30 * * * *' },
@@ -41,6 +51,632 @@ export const LANDING_IP_URL_OPTIONS = [
   { label: 'ipinfo.io', value: 'https://ipinfo.io/ip' }
 ];
 
+// IP质量检测接口选项
+export const QUALITY_CHECK_URL_OPTIONS = [
+  { label: 'IPPure (推荐)', value: 'https://my.123169.xyz/v1/info' },
+  { label: 'IPPure', value: 'https://my.ippure.com/v1/info' }
+];
+
+const UNLOCK_PROVIDER_LABEL_MAP = {
+  netflix: 'Netflix',
+  disney: 'Disney+',
+  disneyplus: 'Disney+',
+  youtube: 'YouTube',
+  youtube_premium: 'YouTube Premium',
+  youtubepremium: 'YouTube Premium',
+  tiktok: 'TikTok',
+  openai: 'OpenAI',
+  chatgpt: 'ChatGPT',
+  claude: 'Claude',
+  copilot: 'GitHub Copilot',
+  gemini: 'Gemini',
+  spotify: 'Spotify',
+  bbc_iplayer: 'BBC iPlayer',
+  prime_video: 'Prime Video',
+  amazon_prime: 'Prime Video',
+  bilibili_hk_mo_tw: 'Bilibili 港澳台',
+  bahamut: 'Bahamut',
+  tvbanywhere: 'TVB Anywhere'
+};
+
+const DEFAULT_UNLOCK_STATUS_METAS = [
+  {
+    value: 'available',
+    labelKey: 'nodes.unlock.status.available.label',
+    shortLabelKey: 'nodes.unlock.status.available.short',
+    descriptionKey: 'nodes.unlock.status.available.description',
+    color: 'success',
+    severity: 'success'
+  },
+  {
+    value: 'partial',
+    labelKey: 'nodes.unlock.status.partial.label',
+    shortLabelKey: 'nodes.unlock.status.partial.short',
+    color: 'warning',
+    severity: 'warning',
+    descriptionKey: 'nodes.unlock.status.partial.description'
+  },
+  {
+    value: 'reachable',
+    labelKey: 'nodes.unlock.status.reachable.label',
+    shortLabelKey: 'nodes.unlock.status.reachable.short',
+    color: 'info',
+    severity: 'info',
+    descriptionKey: 'nodes.unlock.status.reachable.description'
+  },
+  {
+    value: 'restricted',
+    labelKey: 'nodes.unlock.status.restricted.label',
+    shortLabelKey: 'nodes.unlock.status.restricted.short',
+    color: 'error',
+    severity: 'error',
+    descriptionKey: 'nodes.unlock.status.restricted.description'
+  },
+  {
+    value: 'unsupported',
+    labelKey: 'nodes.unlock.status.unsupported.label',
+    shortLabelKey: 'nodes.unlock.status.unsupported.short',
+    color: 'warning',
+    severity: 'warning',
+    descriptionKey: 'nodes.unlock.status.unsupported.description'
+  },
+  {
+    value: 'unknown',
+    labelKey: 'nodes.unlock.status.unknown.label',
+    shortLabelKey: 'nodes.unlock.status.unknown.short',
+    color: 'default',
+    severity: 'default',
+    descriptionKey: 'nodes.unlock.status.unknown.description'
+  },
+  {
+    value: 'error',
+    labelKey: 'nodes.unlock.status.error.label',
+    shortLabelKey: 'nodes.unlock.status.error.short',
+    color: 'error',
+    severity: 'error',
+    descriptionKey: 'nodes.unlock.status.error.description'
+  },
+  {
+    value: 'untested',
+    labelKey: 'nodes.unlock.status.untested.label',
+    shortLabelKey: 'nodes.unlock.status.untested.short',
+    color: 'default',
+    severity: 'default',
+    descriptionKey: 'nodes.unlock.status.untested.description'
+  }
+];
+
+let unlockMetaState = {
+  providers: [],
+  statuses: DEFAULT_UNLOCK_STATUS_METAS,
+  renameVariables: [],
+  conditionFields: []
+};
+
+const getCleanString = (value) => {
+  if (value === undefined || value === null) return '';
+  return String(value).trim();
+};
+
+export const setUnlockMeta = (meta = {}) => {
+  unlockMetaState = {
+    providers: Array.isArray(meta.unlockProviders) ? meta.unlockProviders : Array.isArray(meta.providers) ? meta.providers : [],
+    statuses: Array.isArray(meta.unlockStatuses) && meta.unlockStatuses.length > 0 ? meta.unlockStatuses : DEFAULT_UNLOCK_STATUS_METAS,
+    renameVariables: Array.isArray(meta.unlockRenameVariables) ? meta.unlockRenameVariables : [],
+    conditionFields: Array.isArray(meta.conditionFields) ? meta.conditionFields : []
+  };
+};
+
+export const getUnlockProviderOptions = () => unlockMetaState.providers || [];
+export const getUnlockRenameVariables = () => unlockMetaState.renameVariables || [];
+export const getNodeConditionFieldMetas = () => unlockMetaState.conditionFields || [];
+
+export const getUnlockStatusOptions = (includeAll = true) => {
+  const statusOptions = (unlockMetaState.statuses || DEFAULT_UNLOCK_STATUS_METAS).map((item) => ({
+    value: item.value,
+    label: getLocalizedUnlockStatusLabel(item),
+    shortLabel: getLocalizedUnlockStatusShortLabel(item),
+    color: item.color || item.severity || 'default',
+    description: getLocalizedUnlockStatusDescription(item)
+  }));
+
+  return includeAll ? [{ value: '', label: translate('common.all', 'All') }, ...statusOptions] : statusOptions;
+};
+
+export const resolveNodeConditionOptionSource = (optionSource, includeAll = false) => {
+  switch (optionSource) {
+    case 'unlockProviders':
+      return getUnlockProviderOptions();
+    case 'unlockStatuses':
+      return getUnlockStatusOptions(includeAll);
+    default:
+      return [];
+  }
+};
+
+export const createEmptyUnlockRule = () => ({ provider: '', status: '', keyword: '' });
+
+export const getUnlockRuleModeOptions = () => [
+  {
+    value: 'or',
+    label: translate('nodes.unlock.ruleModes.or.label', 'Match any rule'),
+    description: translate('nodes.unlock.ruleModes.or.description', 'Multiple rules are matched with OR')
+  },
+  {
+    value: 'and',
+    label: translate('nodes.unlock.ruleModes.and.label', 'Match all rules'),
+    description: translate('nodes.unlock.ruleModes.and.description', 'Multiple rules are matched with AND')
+  }
+];
+
+export const normalizeUnlockRules = (rules) => {
+  if (!Array.isArray(rules)) return [];
+  return rules
+    .map((rule) => {
+      if (!rule || typeof rule !== 'object') return null;
+      return {
+        provider: getCleanString(rule.provider || rule.Provider || rule.value),
+        status: getCleanString(rule.status || rule.Status),
+        keyword: getCleanString(rule.keyword || rule.Keyword)
+      };
+    })
+    .filter((rule) => rule && (rule.provider || rule.status || rule.keyword));
+};
+
+export const buildUnlockRulesPayload = (rules) => JSON.stringify(normalizeUnlockRules(rules));
+
+export const parseNodeCheckProfileList = (value) => {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (typeof item === 'string') return item.trim();
+        if (item && typeof item === 'object') return getCleanString(item.name || item.value || item.label);
+        return '';
+      })
+      .filter(Boolean);
+  }
+
+  if (typeof value === 'string') {
+    return value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
+export const normalizeUnlockProviders = (providers) => {
+  if (Array.isArray(providers)) {
+    return [
+      ...new Set(
+        providers
+          .map((provider) => {
+            if (typeof provider === 'string') return provider.trim();
+            if (provider && typeof provider === 'object') {
+              return getCleanString(provider.value || provider.provider || provider.name || provider.label);
+            }
+            return '';
+          })
+          .filter(Boolean)
+      )
+    ];
+  }
+
+  if (typeof providers === 'string') {
+    const trimmed = providers.trim();
+    if (!trimmed) return [];
+
+    const parsed = safeParseJson(trimmed);
+    if (Array.isArray(parsed)) {
+      return normalizeUnlockProviders(parsed);
+    }
+
+    return trimmed
+      .split(',')
+      .map((provider) => provider.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
+export const formatUnlockProviderLabel = (provider) => {
+  const raw = getCleanString(provider);
+  if (!raw) return '';
+
+  const normalized = raw.toLowerCase().replace(/[\s-]+/g, '_');
+  const dynamicOption = getUnlockProviderOptions().find((item) => getCleanString(item?.value).toLowerCase() === normalized);
+  if (dynamicOption?.label) {
+    return dynamicOption.label;
+  }
+  if (UNLOCK_PROVIDER_LABEL_MAP[normalized]) {
+    return UNLOCK_PROVIDER_LABEL_MAP[normalized];
+  }
+
+  return raw
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(' ');
+};
+
+export const formatUnlockProvidersSummary = (providers, limit = 2) => {
+  const normalizedProviders = normalizeUnlockProviders(providers);
+  if (normalizedProviders.length === 0) return translate('nodes.unlock.notSelected', 'Not selected');
+
+  const labels = normalizedProviders.slice(0, limit).map((provider) => formatUnlockProviderLabel(provider));
+  const extraCount = normalizedProviders.length - labels.length;
+  return extraCount > 0 ? `${labels.join('、')} +${extraCount}` : labels.join('、');
+};
+
+const getLocalizedUnlockStatusLabel = (item) => {
+  if (!item) return '';
+  const value = getCleanString(item.value).toLowerCase();
+  if (item.labelKey) return translate(item.labelKey, item.label || item.shortLabel || value);
+  if (value) return translate(`nodes.unlock.status.${value}.label`, item.label || item.shortLabel || item.value);
+  return item.label || item.shortLabel || item.value || '';
+};
+
+const getLocalizedUnlockStatusShortLabel = (item) => {
+  if (!item) return '';
+  const value = getCleanString(item.value).toLowerCase();
+  if (item.shortLabelKey) return translate(item.shortLabelKey, item.shortLabel || item.label || value);
+  if (value) return translate(`nodes.unlock.status.${value}.short`, item.shortLabel || item.label || item.value);
+  return item.shortLabel || item.label || item.value || '';
+};
+
+const getLocalizedUnlockStatusDescription = (item) => {
+  if (!item) return '';
+  const value = getCleanString(item.value).toLowerCase();
+  if (item.descriptionKey) return translate(item.descriptionKey, item.description || '');
+  if (value) return translate(`nodes.unlock.status.${value}.description`, item.description || '');
+  return item.description || '';
+};
+
+const formatUnlockReason = (reason) => {
+  const raw = getCleanString(reason);
+  if (!raw) return '';
+  const normalized = raw.toLowerCase().replace(/[\s-]+/g, '_');
+  return translate(`nodes.unlock.reasons.${normalized}`, raw);
+};
+
+export const createNodeCheckProfileFormState = (profile = null) => {
+  if (profile) {
+    return {
+      name: profile.name || '',
+      enabled: profile.enabled || false,
+      cronExpr: profile.cronExpr || '',
+      mode: profile.mode || 'tcp',
+      testUrl: profile.testUrl || '',
+      latencyUrl: profile.latencyUrl || '',
+      timeout: profile.timeout || 5,
+      groups: parseNodeCheckProfileList(profile.groups),
+      tags: parseNodeCheckProfileList(profile.tags),
+      latencyConcurrency: profile.latencyConcurrency || 0,
+      speedConcurrency: profile.speedConcurrency ?? 0,
+      detectCountry: profile.detectCountry || false,
+      landingIpUrl: profile.landingIpUrl || '',
+      includeHandshake: profile.includeHandshake !== false,
+      speedRecordMode: profile.speedRecordMode || 'average',
+      peakSampleInterval: profile.peakSampleInterval || 100,
+      trafficByGroup: profile.trafficByGroup !== false,
+      trafficBySource: profile.trafficBySource !== false,
+      trafficByNode: profile.trafficByNode || false,
+      preserveSpeedResult: profile.preserveSpeedResult || false,
+      detectQuality: profile.detectQuality || false,
+      qualityCheckUrl: profile.qualityCheckUrl || '',
+      detectUnlock: profile.detectUnlock || false,
+      unlockProviders: normalizeUnlockProviders(profile.unlockProviders)
+    };
+  }
+
+  return {
+    name: '',
+    enabled: false,
+    cronExpr: '',
+    mode: 'tcp',
+    testUrl: SPEED_TEST_TCP_OPTIONS[0]?.value || '',
+    latencyUrl: '',
+    timeout: 5,
+    groups: [],
+    tags: [],
+    latencyConcurrency: 0,
+    speedConcurrency: 0,
+    detectCountry: false,
+    landingIpUrl: '',
+    includeHandshake: true,
+    speedRecordMode: 'average',
+    peakSampleInterval: 100,
+    trafficByGroup: true,
+    trafficBySource: true,
+    trafficByNode: false,
+    preserveSpeedResult: false,
+    detectQuality: false,
+    qualityCheckUrl: '',
+    detectUnlock: false,
+    unlockProviders: []
+  };
+};
+
+export const buildNodeCheckProfilePayload = (profile, overrides = {}) => ({
+  name: getCleanString(profile.name),
+  enabled: Boolean(profile.enabled),
+  cronExpr: profile.cronExpr || '',
+  mode: profile.mode || 'tcp',
+  testUrl: profile.testUrl || '',
+  latencyUrl: profile.latencyUrl || '',
+  timeout: profile.timeout,
+  groups: parseNodeCheckProfileList(profile.groups),
+  tags: parseNodeCheckProfileList(profile.tags),
+  latencyConcurrency: profile.latencyConcurrency ?? 0,
+  speedConcurrency: profile.speedConcurrency ?? 0,
+  detectCountry: Boolean(profile.detectCountry),
+  landingIpUrl: profile.landingIpUrl || '',
+  includeHandshake: profile.includeHandshake !== false,
+  speedRecordMode: profile.speedRecordMode || 'average',
+  peakSampleInterval: profile.peakSampleInterval || 100,
+  trafficByGroup: profile.trafficByGroup !== false,
+  trafficBySource: profile.trafficBySource !== false,
+  trafficByNode: Boolean(profile.trafficByNode),
+  preserveSpeedResult: Boolean(profile.preserveSpeedResult),
+  detectQuality: Boolean(profile.detectQuality),
+  qualityCheckUrl: profile.qualityCheckUrl || '',
+  detectUnlock: Boolean(profile.detectUnlock),
+  unlockProviders: normalizeUnlockProviders(profile.unlockProviders),
+  ...overrides
+});
+
+export const getUnlockStatusMeta = (status) => {
+  const normalized = getCleanString(status).toLowerCase();
+
+  const dynamicMeta = (unlockMetaState.statuses || DEFAULT_UNLOCK_STATUS_METAS).find(
+    (item) => getCleanString(item?.value).toLowerCase() === normalized
+  );
+  if (dynamicMeta) {
+    return {
+      key: normalized || 'default',
+      label: getLocalizedUnlockStatusLabel(dynamicMeta),
+      shortLabel: getLocalizedUnlockStatusShortLabel(dynamicMeta),
+      color: dynamicMeta.color || dynamicMeta.severity || 'default',
+      variant: 'outlined',
+      description: getLocalizedUnlockStatusDescription(dynamicMeta)
+    };
+  }
+
+  if (!normalized) {
+    return {
+      key: 'default',
+      label: translate('nodes.unlock.status.unknown.label', 'Unknown'),
+      shortLabel: translate('nodes.unlock.status.unknown.short', 'Unknown'),
+      color: 'default',
+      variant: 'outlined'
+    };
+  }
+
+  if (['success', 'supported', 'unlock', 'unlocked', 'available', 'ok', 'passed', 'pass', 'yes'].includes(normalized)) {
+    return {
+      key: 'success',
+      label: translate('nodes.unlock.status.available.label', 'Available'),
+      shortLabel: translate('nodes.unlock.status.available.short', 'Available'),
+      color: 'success',
+      variant: 'outlined'
+    };
+  }
+
+  if (['partial', 'limited', 'warning', 'region_restricted'].includes(normalized)) {
+    return {
+      key: 'warning',
+      label: translate('nodes.unlock.status.restricted.label', 'Restricted'),
+      shortLabel: translate('nodes.unlock.status.restricted.short', 'Restricted'),
+      color: 'warning',
+      variant: 'outlined'
+    };
+  }
+
+  if (['pending', 'running', 'checking', 'processing'].includes(normalized)) {
+    return {
+      key: 'info',
+      label: translate('nodes.unlock.status.checking.label', 'Checking'),
+      shortLabel: translate('nodes.unlock.status.checking.short', 'Checking'),
+      color: 'info',
+      variant: 'outlined'
+    };
+  }
+
+  if (['timeout', 'timed_out'].includes(normalized)) {
+    return {
+      key: 'timeout',
+      label: translate('nodes.unlock.status.timeout.label', 'Timeout'),
+      shortLabel: translate('nodes.unlock.status.timeout.short', 'Timeout'),
+      color: 'warning',
+      variant: 'outlined'
+    };
+  }
+
+  if (['blocked', 'locked', 'unsupported', 'unavailable', 'denied', 'forbidden', 'error', 'failed', 'fail', 'no'].includes(normalized)) {
+    return {
+      key: 'error',
+      label: translate('nodes.unlock.status.unavailable.label', 'Unavailable'),
+      shortLabel: translate('nodes.unlock.status.unavailable.short', 'Unavailable'),
+      color: 'error',
+      variant: 'outlined'
+    };
+  }
+
+  return {
+    key: 'custom',
+    label: getCleanString(status),
+    shortLabel: getCleanString(status),
+    color: 'default',
+    variant: 'outlined'
+  };
+};
+
+const safeParseJson = (value) => {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+};
+
+export const parseUnlockSummary = (unlockSummary) => {
+  if (!unlockSummary) return null;
+
+  const parsed = typeof unlockSummary === 'string' ? safeParseJson(unlockSummary) : unlockSummary;
+  if (!parsed || typeof parsed !== 'object') return null;
+
+  const providers = Array.isArray(parsed.providers)
+    ? parsed.providers
+        .map((item) => ({
+          provider: getCleanString(item?.provider || item?.name),
+          status: getCleanString(item?.status),
+          region: getCleanString(item?.region),
+          reason: getCleanString(item?.reason),
+          detail: getCleanString(item?.detail)
+        }))
+        .filter((item) => item.provider)
+    : [];
+
+  if (providers.length === 0 && !parsed.updatedAt) {
+    return null;
+  }
+
+  return {
+    providers,
+    updatedAt: parsed.updatedAt || '',
+    counts: parsed.counts && typeof parsed.counts === 'object' ? parsed.counts : null
+  };
+};
+
+export const extractUnlockSummaryFromTaskResult = (taskResult) => {
+  const parsedResult = typeof taskResult === 'string' ? safeParseJson(taskResult) : taskResult;
+  if (!parsedResult || typeof parsedResult !== 'object') return null;
+
+  if (parsedResult.data && typeof parsedResult.data === 'object') {
+    return extractUnlockSummaryFromTaskResult(parsedResult.data);
+  }
+
+  if (parsedResult.unlockSummary) {
+    return parseUnlockSummary(parsedResult.unlockSummary);
+  }
+
+  if (parsedResult.unlock && typeof parsedResult.unlock === 'object') {
+    return parseUnlockSummary(parsedResult.unlock);
+  }
+
+  if (parsedResult.unlockEnabled && parsedResult.unlock && typeof parsedResult.unlock === 'object') {
+    const aggregateProviders = Array.isArray(parsedResult.unlock.providers) ? parsedResult.unlock.providers : [];
+    const aggregateCounts = parsedResult.unlock.counts && typeof parsedResult.unlock.counts === 'object' ? parsedResult.unlock.counts : {};
+    const aggregateSummary = aggregateProviders
+      .map((provider) => {
+        const counts = aggregateCounts[provider] || {};
+        const bestStatus = ['available', 'reachable', 'partial', 'restricted', 'unsupported', 'error', 'unknown'].find(
+          (status) => counts[status] > 0
+        );
+        if (!bestStatus) return null;
+        return {
+          provider,
+          status: bestStatus,
+          detail: Object.entries(counts)
+            .map(([status, count]) => `${status}:${count}`)
+            .join(' · ')
+        };
+      })
+      .filter(Boolean);
+
+    if (aggregateSummary.length > 0) {
+      return parseUnlockSummary({ providers: aggregateSummary });
+    }
+  }
+
+  if (Array.isArray(parsedResult.providers)) {
+    return parseUnlockSummary(parsedResult);
+  }
+
+  if (Array.isArray(parsedResult.unlockProviders) && parsedResult.unlockProviders.some((item) => item && typeof item === 'object')) {
+    return parseUnlockSummary({ providers: parsedResult.unlockProviders, updatedAt: parsedResult.updatedAt || parsedResult.unlockCheckAt });
+  }
+
+  return null;
+};
+
+export const getUnlockProviderDisplay = (providerResult) => {
+  const providerLabel = formatUnlockProviderLabel(providerResult?.provider);
+  const statusMeta = getUnlockStatusMeta(providerResult?.status);
+  const region = getCleanString(providerResult?.region);
+  const reason = formatUnlockReason(providerResult?.reason);
+  const detail = getCleanString(providerResult?.detail);
+
+  const compactStatus = statusMeta.key === 'available' && region ? region : statusMeta.shortLabel;
+  const compactLabel = compactStatus ? `${providerLabel} ${compactStatus}` : providerLabel;
+  const tooltip = [
+    statusMeta.label,
+    statusMeta.description || '',
+    region ? translate('nodes.unlock.regionTooltip', 'Region: {{region}}', { region }) : '',
+    reason ? translate('nodes.unlock.reasonTooltip', 'Reason: {{reason}}', { reason }) : '',
+    detail
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  return {
+    provider: providerResult?.provider,
+    providerLabel,
+    compactLabel,
+    statusLabel: statusMeta.label,
+    statusShortLabel: statusMeta.shortLabel,
+    color: statusMeta.color,
+    variant: statusMeta.variant,
+    region,
+    reason,
+    detail,
+    tooltip,
+    description: statusMeta.description || ''
+  };
+};
+
+export const getUnlockSummaryDisplay = (unlockSummary, options = {}) => {
+  const parsedSummary = parseUnlockSummary(unlockSummary);
+  if (!parsedSummary) return null;
+
+  const limit = options.limit ?? 2;
+  const items = parsedSummary.providers.map((provider) => getUnlockProviderDisplay(provider));
+  const compactItems = items.slice(0, limit);
+  const extraCount = Math.max(items.length - compactItems.length, 0);
+
+  return {
+    items,
+    compactItems,
+    extraCount,
+    updatedAt: parsedSummary.updatedAt,
+    summaryText: compactItems.map((item) => item.compactLabel).join(' · ')
+  };
+};
+
+export const getNodeUnlockSummaryDisplay = (node, options = {}) => {
+  if (!node) return null;
+
+  const display = getUnlockSummaryDisplay(node.unlockSummary || node.UnlockSummary, options);
+  if (!display) return null;
+
+  return {
+    ...display,
+    checkedAt: node.unlockCheckAt || node.UnlockCheckAt || display.updatedAt || ''
+  };
+};
+
+export const getUnlockTaskResultText = (taskResult, limit = 2) => {
+  const summary = getUnlockSummaryDisplay(extractUnlockSummaryFromTaskResult(taskResult), { limit });
+  if (!summary || summary.compactItems.length === 0) return null;
+
+  return translate('nodes.unlock.taskSummary', 'Unlock {{summary}}', {
+    summary: `${summary.summaryText}${summary.extraCount > 0 ? ` +${summary.extraCount}` : ''}`
+  });
+};
+
 // User-Agent 预设选项
 export const USER_AGENT_OPTIONS = [
   { label: '无 (空)', value: '' },
@@ -73,22 +709,13 @@ export const formatDateTime = (dateTimeString) => {
 };
 
 // ISO国家代码转换为国旗emoji
-export const isoToFlag = (isoCode) => {
-  if (!isoCode || isoCode.length !== 2) return '';
-  isoCode = isoCode.toUpperCase() === 'TW' ? 'CN' : isoCode;
-  const codePoints = isoCode
-    .toUpperCase()
-    .split('')
-    .map((char) => 127397 + char.charCodeAt(0));
-  return String.fromCodePoint(...codePoints);
-};
+export const isoToFlag = isoCodeToFlag;
 
 // 格式化国家显示 (国旗emoji + 代码)
-export const formatCountry = (linkCountry) => {
-  if (!linkCountry) return '';
-  const flag = isoToFlag(linkCountry);
-  return flag ? `${flag} ${linkCountry}` : linkCountry;
-};
+export const formatCountry = formatCountryDisplay;
+
+// 获取国家显示信息，包含未知国家回退
+export const getCountryDisplay = getCountryDisplayInfo;
 
 // Cron 表达式验证
 export const validateCronExpression = (cron) => {
@@ -151,13 +778,15 @@ export const NODE_STATUS = {
   ERROR: 'error' // 错误
 };
 
+export { QUALITY_STATUS_OPTIONS };
+
 // 状态选择器选项 (用于过滤器下拉框)
 export const STATUS_OPTIONS = [
-  { value: '', label: '全部' },
-  { value: NODE_STATUS.UNTESTED, label: '未测速', color: 'default' },
-  { value: NODE_STATUS.SUCCESS, label: '成功', color: 'success' },
-  { value: NODE_STATUS.TIMEOUT, label: '超时', color: 'warning' },
-  { value: NODE_STATUS.ERROR, label: '失败', color: 'error' }
+  { value: '', label: 'All', labelKey: 'nodeConditions.status.all' },
+  { value: NODE_STATUS.UNTESTED, label: 'Untested', labelKey: 'nodeConditions.status.untested', color: 'default' },
+  { value: NODE_STATUS.SUCCESS, label: 'Success', labelKey: 'nodeConditions.status.success', color: 'success' },
+  { value: NODE_STATUS.TIMEOUT, label: 'Timeout', labelKey: 'nodeConditions.status.timeout', color: 'warning' },
+  { value: NODE_STATUS.ERROR, label: 'Failed', labelKey: 'nodeConditions.status.error', color: 'error' }
 ];
 
 // 速度颜色 (基于数值)
@@ -173,13 +802,13 @@ export const getSpeedColor = (speed) => {
 export const getSpeedDisplay = (speed, speedStatus) => {
   // 优先根据状态判断
   if (speedStatus === NODE_STATUS.TIMEOUT) {
-    return { label: '超时', color: 'warning', variant: 'outlined' };
+    return { label: translate('nodeConditions.status.timeout', 'Timeout'), color: 'warning', variant: 'outlined' };
   }
   if (speedStatus === NODE_STATUS.ERROR || speed === -1) {
-    return { label: '失败', color: 'error', variant: 'outlined' };
+    return { label: translate('nodeConditions.status.error', 'Failed'), color: 'error', variant: 'outlined' };
   }
   if (speedStatus === NODE_STATUS.UNTESTED || (!speedStatus && speed <= 0)) {
-    return { label: '未测速', color: 'default', variant: 'outlined' };
+    return { label: translate('nodeConditions.status.untested', 'Untested'), color: 'default', variant: 'outlined' };
   }
   // 成功状态，显示具体速度值
   return { label: `${speed.toFixed(2)}MB/s`, color: getSpeedColor(speed), variant: 'outlined' };
@@ -189,14 +818,136 @@ export const getSpeedDisplay = (speed, speedStatus) => {
 export const getDelayDisplay = (delay, delayStatus) => {
   // 优先根据状态判断
   if (delayStatus === NODE_STATUS.TIMEOUT || delay === -1) {
-    return { label: '超时', color: 'error', variant: 'outlined' };
+    return { label: translate('nodeConditions.status.timeout', 'Timeout'), color: 'error', variant: 'outlined' };
   }
   if (delayStatus === NODE_STATUS.ERROR) {
-    return { label: '失败', color: 'error', variant: 'outlined' };
+    return { label: translate('nodeConditions.status.error', 'Failed'), color: 'error', variant: 'outlined' };
   }
   if (delayStatus === NODE_STATUS.UNTESTED || (!delayStatus && delay <= 0)) {
-    return { label: '未测速', color: 'default', variant: 'outlined' };
+    return { label: translate('nodeConditions.status.untested', 'Untested'), color: 'default', variant: 'outlined' };
   }
   // 成功状态，显示具体延迟值
   return { label: `${delay}ms`, color: getDelayColor(delay), variant: 'outlined' };
 };
+
+export const getFraudScoreDisplay = (fraudScore, qualityStatus = QUALITY_STATUS.UNTESTED, qualityFamily = '') => {
+  if (qualityStatus !== QUALITY_STATUS.SUCCESS) {
+    const statusMeta = getQualityStatusMeta(qualityStatus, qualityFamily);
+    return {
+      label: statusMeta.shortLabel,
+      detailLabel: statusMeta.label,
+      color: statusMeta.color,
+      variant: statusMeta.variant,
+      tooltip: statusMeta.tooltip,
+      state: qualityStatus
+    };
+  }
+
+  if (fraudScore === undefined || fraudScore === null || fraudScore < 0) {
+    const statusMeta = getQualityStatusMeta(QUALITY_STATUS.UNTESTED, qualityFamily);
+    return { label: statusMeta.shortLabel, color: 'default', variant: 'outlined', state: QUALITY_STATUS.UNTESTED };
+  }
+
+  const matchedLevel = getFraudScoreLevel(fraudScore);
+  const levelStyles = {
+    excellentPlus: {
+      sx: (theme) => [
+        {
+          color: '#6b7280',
+          borderColor: '#9ca3af',
+          backgroundColor: 'rgba(148,163,184,0.08)'
+        },
+        theme.applyStyles('dark', {
+          color: '#e5e7eb',
+          borderColor: '#94a3b8',
+          backgroundColor: 'rgba(148,163,184,0.12)'
+        })
+      ]
+    },
+    excellent: {
+      sx: {
+        color: '#15803d',
+        borderColor: '#22c55e',
+        backgroundColor: 'rgba(34,197,94,0.08)'
+      }
+    },
+    good: {
+      sx: {
+        color: '#a16207',
+        borderColor: '#eab308',
+        backgroundColor: 'rgba(234,179,8,0.10)'
+      }
+    },
+    medium: {
+      sx: {
+        color: '#c2410c',
+        borderColor: '#f97316',
+        backgroundColor: 'rgba(249,115,22,0.10)'
+      }
+    },
+    poor: {
+      sx: {
+        color: '#b91c1c',
+        borderColor: '#ef4444',
+        backgroundColor: 'rgba(239,68,68,0.10)'
+      }
+    },
+    veryPoor: {
+      sx: (theme) => [
+        {
+          color: '#111827',
+          borderColor: '#1f2937',
+          backgroundColor: 'rgba(15,23,42,0.08)'
+        },
+        theme.applyStyles('dark', {
+          color: '#cbd5e1',
+          borderColor: '#64748b',
+          backgroundColor: 'rgba(15,23,42,0.35)'
+        })
+      ]
+    }
+  };
+  const matchedStyle = levelStyles[matchedLevel.category] || levelStyles.veryPoor;
+  const categoryLabel = matchedLevel.category ? i18n.t(`nodeConditions.fraudLevels.${matchedLevel.category}`, matchedLevel.category) : '';
+  return {
+    label: `${fraudScore}`,
+    detailLabel: categoryLabel ? `${fraudScore} (${categoryLabel})` : `${fraudScore}`,
+    color: 'default',
+    variant: 'outlined',
+    sx: matchedStyle.sx
+  };
+};
+
+export const getIpTypeDisplay = (isBroadcast, qualityStatus = QUALITY_STATUS.UNTESTED, qualityFamily = '') => {
+  if (qualityStatus !== QUALITY_STATUS.SUCCESS) {
+    const statusMeta = getQualityStatusMeta(qualityStatus, qualityFamily);
+    return {
+      label: statusMeta.shortLabel,
+      color: statusMeta.color,
+      variant: statusMeta.variant,
+      tooltip: statusMeta.tooltip,
+      state: qualityStatus
+    };
+  }
+  return isBroadcast
+    ? { label: translate('nodeConditions.ipType.broadcast', 'Broadcast IP'), color: 'warning', variant: 'outlined' }
+    : { label: translate('nodeConditions.ipType.native', 'Native IP'), color: 'success', variant: 'outlined' };
+};
+
+export const getResidentialDisplay = (isResidential, qualityStatus = QUALITY_STATUS.UNTESTED, qualityFamily = '') => {
+  if (qualityStatus !== QUALITY_STATUS.SUCCESS) {
+    const statusMeta = getQualityStatusMeta(qualityStatus, qualityFamily);
+    return {
+      label: statusMeta.shortLabel,
+      color: statusMeta.color,
+      variant: statusMeta.variant,
+      tooltip: statusMeta.tooltip,
+      state: qualityStatus
+    };
+  }
+  return isResidential
+    ? { label: translate('nodeConditions.residential.residential', 'Residential IP'), color: 'success', variant: 'outlined' }
+    : { label: translate('nodeConditions.residential.datacenter', 'Datacenter IP'), color: 'default', variant: 'outlined' };
+};
+
+export const getQualityStatusDisplay = (qualityStatus, qualityFamily) => getQualityStatusMeta(qualityStatus, qualityFamily);

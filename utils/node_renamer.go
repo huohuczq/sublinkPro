@@ -3,9 +3,10 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"regexp"
 	"strings"
+
+	"sublink/constants"
 )
 
 // TagGroupTagsFn 标签组标签查询函数类型
@@ -23,6 +24,25 @@ func SetTagGroupTagsFunc(fn TagGroupTagsFn) {
 
 // tagGroupRegex 匹配 $TagGroup(xxx) 格式的正则
 var tagGroupRegex = regexp.MustCompile(`\$TagGroup\(([^)]+)\)`)
+var unlockRegex = regexp.MustCompile(`\$Unlock\(([^)]+)\)`)
+
+var protocolLabelFromLinkFunc func(string) string
+var renameNodeLinkFunc func(string, string) string
+
+func SetProtocolLinkFuncs(labelFunc func(string) string, renameFunc func(string, string) string) {
+	protocolLabelFromLinkFunc = labelFunc
+	renameNodeLinkFunc = renameFunc
+}
+
+type renameUnlockSummary struct {
+	Providers []renameUnlockProvider `json:"providers"`
+}
+
+type renameUnlockProvider struct {
+	Provider string `json:"provider"`
+	Status   string `json:"status"`
+	Region   string `json:"region,omitempty"`
+}
 
 // replaceTagGroupVariables 替换规则中的 $TagGroup(xxx) 变量
 // rule: 包含 $TagGroup(xxx) 变量的规则字符串
@@ -68,16 +88,137 @@ func replaceTagGroupVariables(rule string, nodeTags string) string {
 
 // NodeInfo 节点信息结构体，用于重命名
 type NodeInfo struct {
-	Name        string  // 系统节点备注名称
-	LinkName    string  // 节点原始名称（来自订阅源）
-	LinkCountry string  // 落地IP国家代码
-	Speed       float64 // 速度 (MB/s)
-	DelayTime   int     // 延迟 (ms)
-	Group       string  // 分组
-	Source      string  // 来源（手动添加/订阅名称）
-	Index       int     // 序号 (从1开始)
-	Protocol    string  // 协议类型
-	Tags        string  // 节点标签（逗号分隔）
+	Name            string  // 系统节点备注名称
+	LinkName        string  // 节点原始名称（来自订阅源）
+	LinkCountry     string  // 落地IP国家代码
+	LinkCountryName string  // 落地IP国家名称（从国家规则匹配，如果未匹配则为空）
+	Speed           float64 // 速度 (MB/s)
+	SpeedStatus     string  // 速度状态: untested/success/timeout/error
+	DelayTime       int     // 延迟 (ms)
+	DelayStatus     string  // 延迟状态: untested/success/timeout/error
+	Group           string  // 分组
+	Source          string  // 来源（手动添加/订阅名称）
+	Index           int     // 序号 (从1开始)
+	DuplicateIndex  int     // 同名序号索引（0=首个同名，1=第二个同名）
+	Protocol        string  // 协议类型
+	Tags            string  // 节点标签（逗号分隔）
+	IsBroadcast     bool    // IP来源：true=广播 false=原生
+	IsResidential   bool    // 是否住宅IP
+	FraudScore      int     // 欺诈评分（0-100，-1=未检测）
+	QualityStatus   string
+	QualityFamily   string
+	UnlockRaw       string
+	UnlockSummary   string
+	UnlockStatus    string
+	UnlockLabel     string
+	UnlockRegion    string
+}
+
+const (
+	qualityStatusUntested = "untested"
+	qualityStatusSuccess  = "success"
+	qualityStatusPartial  = "partial"
+	qualityStatusFailed   = "failed"
+	qualityStatusDisabled = "disabled"
+	qualityFamilyIPv6     = "ipv6"
+)
+
+// FormatFraudScoreIcon 根据欺诈评分返回对应图标
+// fraudScore: 欺诈评分（0-100，-1=未检测）
+func FormatFraudScoreIcon(fraudScore int, qualityStatus string) string {
+	if qualityStatus == qualityStatusPartial {
+		return "ℹ️"
+	}
+	if qualityStatus != "" && qualityStatus != qualityStatusSuccess {
+		return "⛔️"
+	}
+	if fraudScore < 0 {
+		return "⛔️"
+	}
+	switch {
+	case fraudScore <= 10:
+		return "⚪"
+	case fraudScore <= 30:
+		return "🟢"
+	case fraudScore <= 50:
+		return "🟡"
+	case fraudScore <= 70:
+		return "🟠"
+	case fraudScore <= 89:
+		return "🔴"
+	default:
+		return "⚫"
+	}
+}
+
+// FormatSpeedIcon 根据速度和测速状态返回对应图标
+func FormatSpeedIcon(speed float64, speedStatus string) string {
+	switch speedStatus {
+	case constants.StatusTimeout:
+		return "⏱️"
+	case constants.StatusError:
+		return "❌"
+	case constants.StatusSuccess:
+		if speed >= 5 {
+			return "🟢"
+		}
+		if speed >= 1 {
+			return "🟡"
+		}
+		return "🔴"
+	case constants.StatusUntested:
+		return "⛔️"
+	}
+
+	// 兼容历史数据：状态缺失时根据数值兜底判断
+	if speed == -1 {
+		return "❌"
+	}
+	if speed > 0 {
+		if speed >= 5 {
+			return "🟢"
+		}
+		if speed >= 1 {
+			return "🟡"
+		}
+		return "🔴"
+	}
+	return "⛔️"
+}
+
+// FormatDelayIcon 根据延迟和测速状态返回对应图标
+func FormatDelayIcon(delay int, delayStatus string) string {
+	switch delayStatus {
+	case constants.StatusTimeout:
+		return "⏱️"
+	case constants.StatusError:
+		return "❌"
+	case constants.StatusSuccess:
+		if delay < 200 {
+			return "🟢"
+		}
+		if delay < 500 {
+			return "🟡"
+		}
+		return "🔴"
+	case constants.StatusUntested:
+		return "⛔️"
+	}
+
+	// 兼容历史数据：状态缺失时根据数值兜底判断
+	if delay == -1 {
+		return "⏱️"
+	}
+	if delay > 0 {
+		if delay < 200 {
+			return "🟢"
+		}
+		if delay < 500 {
+			return "🟡"
+		}
+		return "🔴"
+	}
+	return "⛔️"
 }
 
 // PreprocessRule 原名预处理规则结构体
@@ -240,6 +381,13 @@ func RenameNode(rule string, info NodeInfo) string {
 	if linkCountry == "" {
 		linkCountry = "未知"
 	}
+
+	// 国家名称：如果有则使用，否则回退到国家代码
+	linkCountryName := info.LinkCountryName
+	if linkCountryName == "" {
+		linkCountryName = linkCountry
+	}
+
 	// 如果来源为manual则替换为手动
 	linkSource := info.Source
 	if linkSource == "manual" {
@@ -268,9 +416,42 @@ func RenameNode(rule string, info NodeInfo) string {
 	}
 	// 按变量名长度降序排列，长的变量名优先替换
 	replacements := []replacement{
+		{"$LinkCountryName", linkCountryName}, // 国家名称优先（比 $LinkCountry 更长）
 		{"$LinkCountry", linkCountry},
+		{"$Residential", func() string {
+			if info.QualityStatus != qualityStatusSuccess {
+				return formatQualityText(info)
+			}
+			if info.IsResidential {
+				return "住宅IP"
+			}
+			return "机房IP"
+		}()},
+		{"$SpeedIcon", FormatSpeedIcon(info.Speed, info.SpeedStatus)},
+		{"$DelayIcon", FormatDelayIcon(info.DelayTime, info.DelayStatus)},
+		{"$FraudScoreIcon", FormatFraudScoreIcon(info.FraudScore, info.QualityStatus)},
+		{"$FraudScore", func() string {
+			if info.QualityStatus != qualityStatusSuccess {
+				return formatQualityText(info)
+			}
+			return fmt.Sprintf("%d", info.FraudScore)
+		}()},
 		{"$LinkName", info.LinkName},
+		{"$DuplicateIndex", FormatDuplicateIndex(info.DuplicateIndex)},
 		{"$Protocol", info.Protocol},
+		{"$UnlockStatus", info.UnlockStatus},
+		{"$UnlockLabel", info.UnlockLabel},
+		{"$UnlockRegion", info.UnlockRegion},
+		{"$Unlock", info.UnlockSummary},
+		{"$IpType", func() string {
+			if info.QualityStatus != qualityStatusSuccess {
+				return formatQualityText(info)
+			}
+			if info.IsBroadcast {
+				return "广播IP"
+			}
+			return "原生IP"
+		}()},
 		{"$Source", linkSource},
 		{"$Speed", FormatSpeed(info.Speed)},
 		{"$Delay", FormatDelay(info.DelayTime)},
@@ -280,6 +461,18 @@ func RenameNode(rule string, info NodeInfo) string {
 		{"$Flag", ISOToFlag(info.LinkCountry)},
 		{"$Tags", tags}, // 所有标签（竖线｜分隔）
 	}
+
+	result = unlockRegex.ReplaceAllStringFunc(result, func(match string) string {
+		submatches := unlockRegex.FindStringSubmatch(match)
+		if len(submatches) < 2 {
+			return ""
+		}
+		provider := strings.TrimSpace(submatches[1])
+		if provider == "" {
+			return ""
+		}
+		return buildProviderUnlockValue(info.UnlockRaw, provider)
+	})
 
 	for _, r := range replacements {
 		result = strings.ReplaceAll(result, r.variable, r.value)
@@ -297,6 +490,65 @@ func RenameNode(rule string, info NodeInfo) string {
 	}
 
 	return result
+}
+
+// FormatDuplicateIndex 格式化同名编号变量。
+func FormatDuplicateIndex(index int) string {
+	if index <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d", index)
+}
+
+func buildProviderUnlockValue(raw string, provider string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "未检测"
+	}
+	var summary renameUnlockSummary
+	if err := json.Unmarshal([]byte(trimmed), &summary); err != nil {
+		return "未检测"
+	}
+	provider = normalizeUnlockProviderKey(provider)
+	for _, item := range summary.Providers {
+		if normalizeUnlockProviderKey(item.Provider) != provider {
+			continue
+		}
+		parts := []string{formatUnlockStatusLabel(item.Status)}
+		if item.Region != "" {
+			parts = append(parts, item.Region)
+		}
+		return strings.Join(parts, "-")
+	}
+	return "未检测"
+}
+
+func normalizeUnlockProviderKey(provider string) string {
+	key := strings.ToLower(strings.TrimSpace(provider))
+	key = strings.ReplaceAll(key, " ", "_")
+	key = strings.ReplaceAll(key, "-", "_")
+	return strings.Trim(key, "_")
+}
+
+func formatUnlockStatusLabel(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "available":
+		return "解锁"
+	case "partial":
+		return "部分"
+	case "reachable":
+		return "直连"
+	case "restricted":
+		return "受限"
+	case "unsupported":
+		return "不支持"
+	case "error":
+		return "异常"
+	case "unknown":
+		return "未知"
+	default:
+		return "未测"
+	}
 }
 
 // FormatSpeed 格式化速度显示
@@ -327,29 +579,10 @@ func GetProtocolFromLink(link string) string {
 	if link == "" {
 		return "未知"
 	}
-
-	// 常见协议前缀映射（返回显示名称，用于节点重命名等场景）
-	protocolPrefixes := map[string]string{
-		"ss://":        "SS",
-		"ssr://":       "SSR",
-		"vmess://":     "VMess",
-		"vless://":     "VLESS",
-		"trojan://":    "Trojan",
-		"hysteria://":  "Hysteria",
-		"hysteria2://": "Hysteria2",
-		"hy2://":       "Hysteria2",
-		"tuic://":      "TUIC",
-		"wg://":        "WireGuard",
-		"wireguard://": "WireGuard",
-		"naive://":     "NaiveProxy",
-		"anytls://":    "AnyTLS",
-		"socks5://":    "SOCKS5",
-	}
-
-	linkLower := strings.ToLower(link)
-	for prefix, name := range protocolPrefixes {
-		if strings.HasPrefix(linkLower, prefix) {
-			return name
+	if protocolLabelFromLinkFunc != nil {
+		label := protocolLabelFromLinkFunc(link)
+		if label != "" {
+			return label
 		}
 	}
 
@@ -364,126 +597,29 @@ func RenameNodeLink(link string, newName string) string {
 	if link == "" || newName == "" {
 		return link
 	}
-
-	// 获取协议scheme
-	idx := strings.Index(link, "://")
-	if idx == -1 {
-		return link
+	if renameNodeLinkFunc != nil {
+		renamed := renameNodeLinkFunc(link, newName)
+		if renamed != "" {
+			return renamed
+		}
 	}
-	scheme := strings.ToLower(link[:idx])
+	return link
+}
 
-	switch scheme {
-	case "vmess":
-		return renameVmessLink(link, newName)
-	case "vless", "trojan", "hy2", "hysteria2", "hysteria", "tuic", "anytls", "socks5":
-		return renameFragmentLink(link, newName)
-	case "ss":
-		return renameSSLink(link, newName)
-	case "ssr":
-		return renameSSRLink(link, newName)
+func formatQualityText(info NodeInfo) string {
+	switch info.QualityStatus {
+	case qualityStatusPartial:
+		if info.QualityFamily == qualityFamilyIPv6 {
+			return "IPv6部分结果"
+		}
+		return "部分结果"
+	case qualityStatusFailed:
+		return "检测失败"
+	case qualityStatusDisabled:
+		return "未启用"
+	case qualityStatusUntested, "":
+		return "未检测"
 	default:
-		// 尝试使用Fragment方式
-		return renameFragmentLink(link, newName)
+		return "未检测"
 	}
-}
-
-// renameVmessLink VMess协议重命名 (base64 JSON)
-func renameVmessLink(link string, newName string) string {
-	if !strings.HasPrefix(link, "vmess://") {
-		return link
-	}
-
-	encoded := strings.TrimPrefix(link, "vmess://")
-	decoded := Base64Decode(strings.TrimSpace(encoded))
-	if decoded == "" {
-		return link
-	}
-
-	var vmess map[string]interface{}
-	if err := json.Unmarshal([]byte(decoded), &vmess); err != nil {
-		return link
-	}
-
-	vmess["ps"] = newName
-
-	newJSON, err := json.Marshal(vmess)
-	if err != nil {
-		return link
-	}
-
-	return "vmess://" + Base64Encode(string(newJSON))
-}
-
-// renameFragmentLink 使用URL Fragment的协议重命名 (vless, trojan, hy2, tuic等)
-func renameFragmentLink(link string, newName string) string {
-	u, err := url.Parse(link)
-	if err != nil {
-		return link
-	}
-	u.Fragment = newName
-	return u.String()
-}
-
-// renameSSLink SS协议重命名
-func renameSSLink(link string, newName string) string {
-	if !strings.HasPrefix(link, "ss://") {
-		return link
-	}
-
-	// SS链接可能有多种格式:
-	// 1. ss://base64(method:password)@host:port#name (SIP002)
-	// 2. ss://base64(全部内容)
-
-	u, err := url.Parse(link)
-	if err != nil {
-		// 尝试解析纯base64格式
-		encoded := strings.TrimPrefix(link, "ss://")
-		// 分离 #name 部分
-		hashIdx := strings.LastIndex(encoded, "#")
-		if hashIdx != -1 {
-			encoded = encoded[:hashIdx]
-		}
-		return "ss://" + encoded + "#" + url.PathEscape(newName)
-	}
-	u.Fragment = newName
-	return u.String()
-}
-
-// renameSSRLink SSR协议重命名 (需要解码base64)
-func renameSSRLink(link string, newName string) string {
-	if !strings.HasPrefix(link, "ssr://") {
-		return link
-	}
-
-	encoded := strings.TrimPrefix(link, "ssr://")
-	decoded := Base64Decode(encoded)
-	if decoded == "" {
-		return link
-	}
-
-	// SSR格式: host:port:protocol:method:obfs:base64(password)/?params
-	// remarks=base64(name)
-	if strings.Contains(decoded, "remarks=") {
-		// 替换remarks参数
-		parts := strings.Split(decoded, "remarks=")
-		if len(parts) >= 2 {
-			// 找到remarks的结束位置（下一个&或字符串结束）
-			endIdx := strings.Index(parts[1], "&")
-			var suffix string
-			if endIdx != -1 {
-				suffix = parts[1][endIdx:]
-			} else {
-				suffix = ""
-			}
-			decoded = parts[0] + "remarks=" + Base64Encode(newName) + suffix
-		}
-	} else if strings.Contains(decoded, "/?") {
-		// 有参数但没有remarks，添加remarks
-		decoded = decoded + "&remarks=" + Base64Encode(newName)
-	} else {
-		// 没有参数，添加参数
-		decoded = decoded + "/?remarks=" + Base64Encode(newName)
-	}
-
-	return "ssr://" + Base64Encode(decoded)
 }

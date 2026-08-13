@@ -18,12 +18,14 @@ const ScriptList = Loadable(lazy(() => import('views/scripts')));
 const AccessKeyList = Loadable(lazy(() => import('views/accesskeys')));
 const UserSettings = Loadable(lazy(() => import('views/settings')));
 const SystemMonitor = Loadable(lazy(() => import('views/monitor')));
+const SystemUpdates = Loadable(lazy(() => import('views/system-updates')));
 const TagList = Loadable(lazy(() => import('views/tags')));
 const TaskList = Loadable(lazy(() => import('views/tasks')));
 const HostList = Loadable(lazy(() => import('views/hosts')));
+const CountryRulesPage = Loadable(lazy(() => import('views/country-rules')));
+const WebhookList = Loadable(lazy(() => import('views/webhooks')));
 const AirportList = Loadable(lazy(() => import('views/airports')));
 const NodeCheckList = Loadable(lazy(() => import('views/node-check')));
-
 // ==============================|| MAIN ROUTING ||==============================  //
 
 const MainRoutes = {
@@ -94,18 +96,22 @@ const MainRoutes = {
     },
     {
       path: 'settings',
-      element: <UserSettings />
+      element: <Navigate to="/system/settings" replace />
     },
     {
       path: 'system',
       children: [
         {
-          path: 'user',
+          path: 'settings',
           element: <UserSettings />
         },
         {
           path: 'monitor',
           element: <SystemMonitor />
+        },
+        {
+          path: 'updates',
+          element: <SystemUpdates />
         },
         {
           path: 'tasks',
@@ -114,6 +120,14 @@ const MainRoutes = {
         {
           path: 'hosts',
           element: <HostList />
+        },
+        {
+          path: 'country-rules',
+          element: <CountryRulesPage />
+        },
+        {
+          path: 'webhooks',
+          element: <WebhookList />
         }
       ]
     }

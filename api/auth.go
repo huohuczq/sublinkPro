@@ -6,7 +6,7 @@ import (
 	"sublink/middlewares"
 	"sublink/models"
 	"sublink/services/geoip"
-	"sublink/services/sse"
+	"sublink/services/notifications"
 	"sublink/utils"
 	"time"
 
@@ -16,13 +16,15 @@ import (
 )
 
 // 获取token
-func GetToken(username string) (string, error) {
+func GetToken(user *models.User) (string, error) {
+	credentialSign := models.GenerateCredentialSign(user.Username, user.Password)
 	c := &middlewares.JwtClaims{
-		Username: username,
+		Username:       user.Username,
+		CredentialSign: credentialSign,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour * 14)), // 14天后过期
 			IssuedAt:  jwt.NewNumericDate(time.Now()),                          // 签发时间
-			Subject:   username,
+			Subject:   user.Username,
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, c)
@@ -45,13 +47,13 @@ func GetCaptcha(c *gin.Context) {
 	switch captchaCfg.Mode {
 	case config.CaptchaModeDisabled:
 		// 关闭验证码，不需要返回验证码数据
-		utils.OkDetailed(c, "验证码已关闭", response)
+		utils.OkDetailedI18n(c, "验证码已关闭", response, "backend.auth.captcha.disabled", nil)
 		return
 
 	case config.CaptchaModeTurnstile:
 		// Turnstile 模式，返回 site key
 		response["turnstileSiteKey"] = captchaCfg.TurnstileSiteKey
-		utils.OkDetailed(c, "获取 Turnstile 配置成功", response)
+		utils.OkDetailedI18n(c, "获取 Turnstile 配置成功", response, "backend.auth.captcha.turnstileLoaded", nil)
 		return
 
 	default:
@@ -59,12 +61,12 @@ func GetCaptcha(c *gin.Context) {
 		id, bs4, _, err := utils.GetCaptcha()
 		if err != nil {
 			utils.Error("获取验证码失败: %v", err)
-			utils.FailWithMsg(c, "获取验证码失败")
+			utils.FailWithI18n(c, "获取验证码失败", "backend.auth.captcha.loadFailed", nil)
 			return
 		}
 		response["captchaKey"] = id
 		response["captchaBase64"] = bs4
-		utils.OkDetailed(c, "获取验证码成功", response)
+		utils.OkDetailedI18n(c, "获取验证码成功", response, "backend.auth.captcha.loaded", nil)
 	}
 }
 
@@ -74,14 +76,13 @@ func UserLogin(c *gin.Context) {
 	password := c.PostForm("password")
 	captchaCode := c.PostForm("captchaCode")
 	captchaKey := c.PostForm("captchaKey")
-	rememberMe := c.PostForm("rememberMe") == "true"
 	ip := c.ClientIP()
 
 	// 0. 检查IP是否被封禁
 	limiter := GetLoginLimiter()
 	if isBanned, banUntil := limiter.CheckBan(ip); isBanned {
 		minutes := int(time.Until(banUntil).Minutes()) + 1
-		utils.FailWithMsg(c, fmt.Sprintf("由于多次登录失败，IP已被封禁，请 %d 分钟后再试", minutes))
+		utils.FailWithI18n(c, fmt.Sprintf("由于多次登录失败，IP已被封禁，请 %d 分钟后再试", minutes), "backend.auth.login.ipBanned", map[string]any{"minutes": minutes})
 		return
 	}
 
@@ -97,18 +98,18 @@ func UserLogin(c *gin.Context) {
 		turnstileToken := c.PostForm("turnstileToken")
 		if turnstileToken == "" {
 			utils.Warn("Turnstile 令牌为空")
-			utils.FailWithData(c, "请完成人机验证", gin.H{"errorType": "captcha"})
+			utils.FailWithDataI18n(c, "请完成人机验证", gin.H{"errorType": "captcha"}, "backend.auth.login.turnstileRequired", nil)
 			return
 		}
 		verified, err := utils.VerifyTurnstile(turnstileToken, config.GetTurnstileSecretKey(), ip, config.GetTurnstileProxyLink())
 		if err != nil {
 			utils.Error("Turnstile 验证出错: %v", err)
-			utils.FailWithData(c, "人机验证失败", gin.H{"errorType": "captcha"})
+			utils.FailWithDataI18n(c, "人机验证失败", gin.H{"errorType": "captcha"}, "backend.auth.login.turnstileFailed", nil)
 			return
 		}
 		if !verified {
 			utils.Warn("Turnstile 验证未通过")
-			utils.FailWithData(c, "人机验证未通过", gin.H{"errorType": "captcha"})
+			utils.FailWithDataI18n(c, "人机验证未通过", gin.H{"errorType": "captcha"}, "backend.auth.login.turnstileRejected", nil)
 			return
 		}
 
@@ -116,7 +117,7 @@ func UserLogin(c *gin.Context) {
 		// 传统验证码模式
 		if !utils.VerifyCaptcha(captchaKey, captchaCode) {
 			utils.Warn("验证码错误")
-			utils.FailWithData(c, "验证码错误", gin.H{"errorType": "captcha"})
+			utils.FailWithDataI18n(c, "验证码错误", gin.H{"errorType": "captcha"}, "backend.auth.login.captchaInvalid", nil)
 			return
 		}
 	}
@@ -125,116 +126,58 @@ func UserLogin(c *gin.Context) {
 	if err != nil {
 		utils.Warn("账号或者密码错误: %v", err)
 		limiter.RecordFailure(ip) // 记录失败
-		utils.FailWithData(c, "用户名或密码错误", gin.H{"errorType": "credentials"})
+		utils.FailWithDataI18n(c, "用户名或密码错误", gin.H{"errorType": "credentials"}, "backend.auth.login.invalidCredentials", nil)
 		return
 	}
 	// 登录成功，清除失败记录
 	limiter.ClearFailures(ip)
-	// 生成token
-	token, err := GetToken(username)
-	if err != nil {
-		utils.Error("获取token失败: %v", err)
-		utils.FailWithMsg(c, "获取token失败")
-		return
-	}
-
-	// 如果勾选记住密码，生成 rememberToken (支持多设备)
-	var rememberToken string
-	if rememberMe {
-		userAgent := c.GetHeader("User-Agent")
-		rememberToken, err = models.GenerateRememberToken(user.ID, userAgent)
+	if user.TOTPEnabled {
+		challengeToken, err := issuePendingMFAChallenge(user)
 		if err != nil {
-			utils.Error("生成记住密码令牌失败: %v", err)
-			// 不影响正常登录，只是不返回 rememberToken
+			utils.Error("生成 MFA 挑战失败: %v", err)
+			utils.FailWithI18n(c, "生成登录验证失败", "backend.auth.login.mfaChallengeFailed", nil)
+			return
 		}
-	}
-
-	// 异步发送登录通知
-	go func(username, ip string) {
-		location, err := geoip.GetLocation(ip)
-		if err != nil {
-			location = "未知位置"
-		}
-		if location == "" {
-			location = "未知位置"
-		}
-		timeStr := time.Now().Format("2006-01-02 15:04:05")
-
-		payload := sse.NotificationPayload{
-			Event:   "user_login",
-			Title:   "用户登录通知",
-			Message: fmt.Sprintf("用户 %s 已登录\nIP: %s (%s)\n时间: %s", username, ip, location, timeStr),
-			Data: map[string]interface{}{
-				"username": username,
-				"ip":       ip,
-				"location": location,
-				"time":     timeStr,
-			},
-			Time: timeStr,
-		}
-
-		// 触发 Telegram 和 Webhook
-		sse.TriggerTelegram("user_login", payload)
-		sse.TriggerWebhook("user_login", payload)
-	}(username, ip)
-
-	// 登录成功返回token
-	utils.OkDetailed(c, "登录成功", gin.H{
-		"accessToken":   token,
-		"tokenType":     "Bearer",
-		"refreshToken":  nil,
-		"expires":       nil,
-		"rememberToken": rememberToken,
-	})
-}
-
-// RememberLogin 使用记住密码令牌登录
-func RememberLogin(c *gin.Context) {
-	rememberToken := c.PostForm("rememberToken")
-	if rememberToken == "" {
-		utils.FailWithMsg(c, "无效的登录令牌")
+		utils.OkDetailedI18n(c, "需要进行二次验证", gin.H{
+			"requiresMFA":    true,
+			"challengeToken": challengeToken,
+			"methods":        []string{"totp", "recovery_code"},
+		}, "backend.auth.login.mfaRequired", nil)
 		return
 	}
 
-	// 验证令牌并获取用户
-	user, err := models.VerifyAndGetUserByToken(rememberToken)
-	if err != nil {
-		utils.Warn("记住密码令牌验证失败: %v", err)
-		utils.FailWithMsg(c, "登录令牌已过期，请重新登录")
-		return
-	}
-
-	// 生成新的 JWT token
-	token, err := GetToken(user.Username)
-	if err != nil {
-		utils.Error("获取token失败: %v", err)
-		utils.FailWithMsg(c, "获取token失败")
-		return
-	}
-
-	// 返回登录成功
-	utils.OkDetailed(c, "自动登录成功", gin.H{
-		"accessToken":  token,
-		"tokenType":    "Bearer",
-		"refreshToken": nil,
-		"expires":      nil,
-	})
+	respondLoginSuccess(c, user, ip)
 }
 
 // UserOut 用户退出登录
 func UserOut(c *gin.Context) {
 	// 拿到jwt中的username
 	if _, Is := c.Get("username"); Is {
-		// 如果前端传递了 rememberToken，删除它
-		rememberToken := c.Query("rememberToken")
-		if rememberToken == "" {
-			rememberToken = c.PostForm("rememberToken")
-		}
-		if rememberToken != "" {
-			if err := models.DeleteRememberToken(rememberToken); err != nil {
-				utils.Error("删除记住密码令牌失败: %v", err)
-			}
-		}
-		utils.OkWithMsg(c, "退出成功")
+		utils.OkDetailedI18n(c, "退出成功", nil, "backend.auth.logout.success", nil)
 	}
+}
+
+func notifyUserLogin(username, ip string) {
+	location, err := geoip.GetLocation(ip)
+	if err != nil {
+		location = "未知位置"
+	}
+	if location == "" {
+		location = "未知位置"
+	}
+	timeStr := time.Now().Format("2006-01-02 15:04:05")
+
+	payload := notifications.Payload{
+		Title:   "用户登录通知",
+		Message: fmt.Sprintf("用户 %s 已登录\nIP: %s (%s)\n时间: %s", username, ip, location, timeStr),
+		Data: map[string]any{
+			"username": username,
+			"ip":       ip,
+			"location": location,
+			"time":     timeStr,
+		},
+		Time: timeStr,
+	}
+
+	notifications.Publish("security.user_login", payload)
 }

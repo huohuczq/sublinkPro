@@ -8,18 +8,68 @@ import (
 	"sublink/utils"
 )
 
+func ConvertProxyToWireGuard(proxy Proxy) WireGuard {
+	return WireGuard{
+		Name:         proxy.Name,
+		Server:       proxy.Server,
+		Port:         int(proxy.Port),
+		PrivateKey:   proxy.Private_key,
+		PublicKey:    proxy.Public_key,
+		PreSharedKey: proxy.Pre_shared_key,
+		IP:           proxy.Ip,
+		IPv6:         proxy.Ipv6,
+		MTU:          proxy.Mtu,
+		Reserved:     proxy.Reserved,
+	}
+}
+
+func init() {
+	base := newProtocolSpec("wireguard", []string{"wireguard://", "wg://"}, "WireGuard", "#88171a", "W", WireGuard{}, "Name", DecodeWireGuardURL, EncodeWireGuardURL, func(w WireGuard) LinkIdentity {
+		return buildIdentity("wireguard", w.Name, w.Server, utils.GetPortString(w.Port))
+	},
+		FieldMeta{Name: "Name", Label: "节点名称", Type: "string", Group: "basic"},
+		FieldMeta{Name: "Server", Label: "服务器地址", Type: "string", Group: "basic"},
+		FieldMeta{Name: "Port", Label: "端口", Type: "int", Group: "basic"},
+		FieldMeta{Name: "PrivateKey", Label: "私钥", Type: "string", Group: "auth", Secret: true},
+		FieldMeta{Name: "PublicKey", Label: "公钥", Type: "string", Group: "auth", Advanced: true},
+		FieldMeta{Name: "PreSharedKey", Label: "预共享密钥", Type: "string", Group: "auth", Secret: true, Advanced: true},
+		FieldMeta{Name: "IP", Label: "IPv4 地址", Type: "string", Group: "transport", Placeholder: "10.0.0.2/32"},
+		FieldMeta{Name: "IPv6", Label: "IPv6 地址", Type: "string", Group: "transport", Advanced: true},
+		FieldMeta{Name: "MTU", Label: "MTU", Type: "int", Group: "transport", Advanced: true},
+		FieldMeta{Name: "Reserved", Label: "Reserved", Type: "string", Group: "advanced", Advanced: true},
+	)
+	MustRegisterProtocol(newProxyProtocolSpec(base, func(link Urls, _ OutputConfig) (Proxy, error) {
+		return buildWireGuardProxy(link)
+	}, func(proxy Proxy) bool {
+		return proxyTypeMatches(proxy, "wireguard")
+	}, ConvertProxyToWireGuard, EncodeWireGuardURL))
+}
+
+// buildWireGuardProxy 将 WireGuard 链接转换为 Clash Proxy，并按当前实现补默认名称与默认 AllowedIPs。
+func buildWireGuardProxy(link Urls) (Proxy, error) {
+	wg, err := DecodeWireGuardURL(link.Url)
+	if err != nil {
+		return Proxy{}, err
+	}
+	if wg.Name == "" {
+		wg.Name = fmt.Sprintf("%s:%s", wg.Server, utils.GetPortString(wg.Port))
+	}
+	return Proxy{Name: wg.Name, Type: "wireguard", Server: wg.Server, Port: FlexPort(utils.GetPortInt(wg.Port)), Private_key: wg.PrivateKey, Public_key: wg.PublicKey, Pre_shared_key: wg.PreSharedKey, Ip: wg.IP, Ipv6: wg.IPv6, Mtu: wg.MTU, Reserved: wg.Reserved, Allowed_ips: []string{"0.0.0.0/0"}, Udp: true, Dialer_proxy: link.DialerProxyName}, nil
+}
+
 // WireGuard 结构体，存储 WireGuard 节点信息
 type WireGuard struct {
-	Name       string      `json:"name"`       // 节点名称
-	Server     string      `json:"server"`     // 服务器地址
-	Port       interface{} `json:"port"`       // 端口
-	PrivateKey string      `json:"privateKey"` // 客户端私钥
-	PublicKey  string      `json:"publicKey"`  // 服务端公钥
-	IP         string      `json:"ip"`         // 客户端 IPv4 地址
-	IPv6       string      `json:"ipv6"`       // 客户端 IPv6 地址（可选）
-	MTU        int         `json:"mtu"`        // MTU 值（可选，默认 1280）
-	Reserved   []int       `json:"reserved"`   // 保留字段（可选，用于 WARP）
-	DNS        string      `json:"dns"`        // DNS 服务器（可选）
+	Name         string `json:"name"`         // 节点名称
+	Server       string `json:"server"`       // 服务器地址
+	Port         any    `json:"port"`         // 端口
+	PrivateKey   string `json:"privateKey"`   // 客户端私钥
+	PublicKey    string `json:"publicKey"`    // 服务端公钥
+	PreSharedKey string `json:"preSharedKey"` // 预共享密钥（可选，提供额外的对称加密层）
+	IP           string `json:"ip"`           // 客户端 IPv4 地址
+	IPv6         string `json:"ipv6"`         // 客户端 IPv6 地址（可选）
+	MTU          int    `json:"mtu"`          // MTU 值（可选，默认 1280）
+	Reserved     []int  `json:"reserved"`     // 保留字段（可选，用于 WARP）
+	DNS          string `json:"dns"`          // DNS 服务器（可选）
 }
 
 // DecodeWireGuardURL 解析 WireGuard URL
@@ -56,6 +106,12 @@ func DecodeWireGuardURL(s string) (WireGuard, error) {
 	}
 	if publicKey == "" {
 		return WireGuard{}, fmt.Errorf("缺少公钥: %s", s)
+	}
+
+	// 预共享密钥（可选），兼容 presharedkey / pre-shared-key 两种写法
+	preSharedKey := u.Query().Get("presharedkey")
+	if preSharedKey == "" {
+		preSharedKey = u.Query().Get("pre-shared-key")
 	}
 
 	// 解析地址（可能包含 IPv4 和 IPv6，逗号分隔）
@@ -110,6 +166,7 @@ func DecodeWireGuardURL(s string) (WireGuard, error) {
 		fmt.Println("  port:", port)
 		fmt.Println("  privateKey:", privateKey)
 		fmt.Println("  publicKey:", publicKey)
+		fmt.Println("  preSharedKey:", preSharedKey)
 		fmt.Println("  ip:", ip)
 		fmt.Println("  ipv6:", ipv6)
 		fmt.Println("  mtu:", mtu)
@@ -117,16 +174,17 @@ func DecodeWireGuardURL(s string) (WireGuard, error) {
 	}
 
 	return WireGuard{
-		Name:       name,
-		Server:     server,
-		Port:       port,
-		PrivateKey: privateKey,
-		PublicKey:  publicKey,
-		IP:         ip,
-		IPv6:       ipv6,
-		MTU:        mtu,
-		Reserved:   reserved,
-		DNS:        dns,
+		Name:         name,
+		Server:       server,
+		Port:         port,
+		PrivateKey:   privateKey,
+		PublicKey:    publicKey,
+		PreSharedKey: preSharedKey,
+		IP:           ip,
+		IPv6:         ipv6,
+		MTU:          mtu,
+		Reserved:     reserved,
+		DNS:          dns,
 	}, nil
 }
 
@@ -135,13 +193,16 @@ func EncodeWireGuardURL(wg WireGuard) string {
 	u := url.URL{
 		Scheme:   "wireguard",
 		User:     url.User(wg.PrivateKey),
-		Host:     fmt.Sprintf("%s:%s", wg.Server, utils.GetPortString(wg.Port)),
+		Host:     formatURLHostPort(wg.Server, utils.GetPortString(wg.Port)),
 		Fragment: wg.Name,
 	}
 
 	q := u.Query()
 	if wg.PublicKey != "" {
 		q.Set("publickey", wg.PublicKey)
+	}
+	if wg.PreSharedKey != "" {
+		q.Set("presharedkey", wg.PreSharedKey)
 	}
 
 	// 组装地址
@@ -265,6 +326,8 @@ func ParseWireGuardConfig(config string) (WireGuard, error) {
 				}
 			case "publickey":
 				wg.PublicKey = value
+			case "presharedkey":
+				wg.PreSharedKey = value
 			}
 		}
 	}

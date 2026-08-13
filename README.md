@@ -1,7 +1,7 @@
 <div align="center">
   <img src="webs/src/assets/images/logo.svg" width="280px" />
   
-  **✨ 强大的代理订阅管理与转换工具 ✨**
+  **✨ Powerful proxy subscription management and conversion ✨**
 
   <p>
     <img src="https://img.shields.io/github/go-mod/go-version/ZeroDeng01/sublinkPro?style=flat-square&logo=go&logoColor=white" alt="Go Version"/>
@@ -26,54 +26,67 @@
   </p>
   <p>
     <a href="https://github.com/ZeroDeng01/sublinkPro/issues">
-      <img src="https://img.shields.io/badge/问题反馈-Issues-blue?style=flat-square&logo=github" alt="Issues"/>
+      <img src="https://img.shields.io/badge/Feedback-Issues-blue?style=flat-square&logo=github" alt="Issues"/>
     </a>
     <a href="https://github.com/ZeroDeng01/sublinkPro/releases">
-      <img src="https://img.shields.io/badge/版本下载-Releases-green?style=flat-square&logo=github" alt="Releases"/>
+      <img src="https://img.shields.io/badge/Download-Releases-green?style=flat-square&logo=github" alt="Releases"/>
     </a>
   </p>
 </div>
 
+English | [简体中文](README.zh-CN.md)
+
 ---
 
-## 📖 项目简介
+## 📖 Project Overview
 
-`SublinkPro` 是基于优秀的开源项目 [sublinkX](https://github.com/gooaclok819/sublinkX) / [sublinkE](https://github.com/eun1e/sublinkE) 进行二次开发，在原项目基础上做了部分定制优化。感谢原作者的付出与贡献。
+`SublinkPro` is a deeply refactored and enhanced project based on the excellent open source projects [sublinkX](https://github.com/gooaclok819/sublinkX) and [sublinkE](https://github.com/eun1e/sublinkE). Thanks to the original authors for their work and contributions.
 
-- 🎨 **前端框架**：基于 [Berry Free React Material UI Admin Template](https://github.com/codedthemes/berry-free-react-admin-template)
-- ⚡ **后端技术**：Go + Gin + Gorm
-- 🔐 **默认账号**：`admin` / `123456`（请安装后务必修改）
-- 💻 **演示系统**: [https://sublink-pro-demo.zeabur.app](https://sublink-pro-demo.zeabur.app/) 用户名：admin 密码：123456
+- 🎨 **Frontend framework**: Based on [Berry Free React Material UI Admin Template](https://github.com/codedthemes/berry-free-react-admin-template)
+- ⚡ **Backend stack**: Go + Gin + Gorm
+- 🔐 **Default account**: `admin` / `123456`, change it immediately after installation
+- 💻 **Demo**: [https://demo.sublinkpro.dpdns.org/](https://demo.sublinkpro.dpdns.org/), username: admin, password: 123456
 
 > [!WARNING]
-> ⚠️ 本项目和原项目数据库不兼容，请不要混用。
+> ⚠️ This project is not database compatible with the original projects. Don't mix their databases.
 >
-> ⚠️ 请不要使用本项目以及任何本项目的衍生项目进行违反您以及您所服务用户的所在地法律法规的活动。本项目仅供个人开发和学习交流使用。
+> ⚠️ Don't use this project, or any derivative of it, for activities that violate the laws and regulations of your location or the location of the users you serve. This project is for personal development, learning, and exchange only.
 
 ---
 
-## ✨ 功能亮点
+## ✨ Highlights
 
-| 功能 | 说明 | 详情 |
+| Feature | Description | Details |
 |:---|:---|:---:|
-| 🏷️ **智能标签系统** | 自动规则打标签、零代码筛选、标签互斥组 | [📖](docs/features/tags.md) |
-| ⚡ **专业测速系统** | 双阶段测试、智能延迟测量、自动状态标记 | [📖](docs/features/speedtest.md) |
-| 🔗 **链式代理** | Dialer-Proxy 原生支持、可视化配置、拯救被墙节点 | [📖](docs/features/chain-proxy.md) |
-| ✈️ **机场管理** | 多格式导入、定时更新、流量监控 | [📖](docs/features/airport.md) |
-| 📋 **订阅分享** | 多链接管理、过期策略、访问统计 | [📖](docs/features/subscription-share.md) |
-| 🌐 **Host 管理** | 域名映射、DNS 配置、CDN 优选 | [📖](docs/features/host.md) |
-| 🤖 **Telegram Bot** | 远程测速、订阅管理、系统监控 | [📖](docs/features/telegram-bot.md) |
-| 📜 **脚本系统** | 节点过滤、内容后处理、多脚本链式执行 | [📖](docs/script_support.md) |
-| 🔔 **Webhooks** | 支持 PushDeer、Bark、钉钉、方糖等多平台通知 | - |
-| 🔐 **安全特性** | Token 授权、API Key、IP 黑/白名单、访问日志 | - |
+| 🏷️ **Smart tag system** | Automatic rule based tagging, no code filtering, IP quality conditions | [📖](docs/features/tags.md) |
+| ⚡ **Professional speed test system** | Two stage tests, smart latency measurement, IP quality and unlock checks | [📖](docs/features/speedtest.md) |
+| 🔗 **Chain proxy** | Native Dialer-Proxy support, visual configuration, IP quality based node selection | [📖](docs/features/chain-proxy.md) |
+| 🤖 **AI template editing** | Generate operation based previews from natural language, review read-only diffs, accept into the editor, then save normally | [📖](docs/features/template-ai.md) |
+| ✈️ **Airport management** | Multi format import, scheduled updates, traffic monitoring, one click full refresh | [📖](docs/features/airport.md) |
+| 🗂️ **Group ordering** | Drag airport priority within a group to control node order in subscription output | [📖](docs/development.md) |
+| 📋 **Subscription sharing** | Multiple links, expiration policies, access statistics | [📖](docs/features/subscription-share.md) |
+| 🌐 **Host management** | Domain mappings, DNS configuration, CDN preferred IPs | [📖](docs/features/host.md) |
+| ☁️ **Cloudflare Tunnel** | Expose the admin UI without a public IP, with cloudflared managed from the page | [📖](docs/features/cloudflare-tunnel.md) |
+| 🤖 **Telegram Bot** | Remote speed tests, subscription management, system monitoring | [📖](docs/features/telegram-bot.md) |
+| 📜 **Script system** | Node filtering, content post processing, chained scripts | [📖](docs/script_support.md) |
+| 🔔 **Webhooks** | Supports PushDeer, Bark, DingTalk, ServerChan, and other notification platforms | [📖](docs/configuration.md) |
+| 🔐 **Security features** | Token authorization, API Key, IP allow and block lists, access logs | [📖](docs/configuration.md) |
+| 🦾 **AI agent skill** | Drive the whole system in natural language via the REST API — add nodes, build and share subscriptions, manage airports and templates. Portable `SKILL.md` format, works with any compatible AI agent | [📖](skill-sublinkpro/README.md) |
 
 ---
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-### Docker Compose（推荐）
+### Docker Compose, recommended
 
-创建 `docker-compose.yml`：
+> [!IMPORTANT]
+> Runtime data is stored in these directories by default. Keep them during upgrades and migrations:
+>
+> - `./db`: database, configuration files, GeoIP, and other local data
+> - `./template`: template files
+> - `./logs`: runtime logs
+
+Create `docker-compose.yml`:
 
 ```yaml
 services:
@@ -89,78 +102,117 @@ services:
     restart: unless-stopped
 ```
 
-启动服务：
+Start the service:
 
 ```bash
 docker-compose up -d
 ```
 
-访问 `http://localhost:8000`，使用默认账号 `admin` / `123456` 登录。
+Open `http://localhost:8000` and sign in with `admin` / `123456`.
+
+SQLite is used by default. To switch to MySQL or PostgreSQL, set the database connection through `SUBLINK_DSN`, `dsn:` in the config file, or the `--dsn` command line flag. See [⚙️ Configuration](docs/configuration.md) for examples.
+
+> [!NOTE]
+> Even when `SUBLINK_WEB_BASE_PATH` is configured to hide the admin UI entry, API paths (`/api/*`) and subscription or share paths (`/c/*`) stay at the root path. This is a project specific frontend and backend integration rule.
 
 > [!TIP]
-> 更多安装方式（Docker、一键脚本、更新升级等）请参阅 [📦 安装部署指南](docs/installation.md)
+> For more install methods, including Docker, one line scripts, updates, and upgrades, see the [📦 Installation Guide](docs/installation.md).
+
+> [!TIP]
+> The Docker image includes `cloudflared`. After signing in, open `User Center -> Cloudflare Tunnel`, enter the token, and start it. When auto connect is enabled, the Tunnel connects when the service starts.
+
+### Migrate from SQLite to MySQL / PostgreSQL
+
+If your earlier instance used SQLite and you now want to migrate to MySQL or PostgreSQL, use this flow:
+
+1. Sign in to the old SQLite instance, open **System Backup** from the avatar menu in the upper right, and export `backup.zip`.
+2. Configure the `DSN` for MySQL or PostgreSQL in the new instance, and make sure the target database is a fresh empty database.
+3. Start the new instance and open `Settings -> Data Migration`.
+4. Upload the `backup.zip` exported from the old instance.
+5. Choose whether to migrate `AccessKey` and subscription access logs, then start the migration.
+6. After migration completes, **manually restart the project instance**, then sign in again and check the data.
+
+> [!IMPORTANT]
+> Using `backup.zip` is recommended. Uploading a `.db` file directly migrates database records only and won't restore the template directory.
+
+> [!NOTE]
+> If you migrate `AccessKey`, make sure both old and new instances use the same `API encryption key`; otherwise old API Keys may no longer work.
+
+> [!TIP]
+> If migration finishes with “N warnings”, open the corresponding “Database Migration” task in `Task Center` to view details.
 
 ---
 
-## 📖 文档导航
+## 📖 Documentation
 
-### 🔧 安装与配置
+### 🔧 Installation and Configuration
 
-| 文档 | 说明 |
+| Document | Description |
 |:---|:---|
-| [📦 安装部署](docs/installation.md) | Docker、一键脚本、更新升级、Watchtower 自动更新 |
-| [⚙️ 配置说明](docs/configuration.md) | 环境变量、命令行参数、验证码配置 |
+| [📦 Installation](docs/installation.md) | Docker, one line scripts, updates, Watchtower automatic updates |
+| [⚙️ Configuration](docs/configuration.md) | Environment variables, command line flags, CAPTCHA configuration |
 
-### ✨ 功能详解
+### ✨ Feature Guides
 
-| 文档 | 说明 |
+| Document | Description |
 |:---|:---|
-| [🏷️ 智能标签系统](docs/features/tags.md) | 自动规则打标签、零代码筛选、标签互斥组 |
-| [⚡ 测速系统](docs/features/speedtest.md) | 测速原理、参数配置、流量计算 |
-| [🔗 链式代理](docs/features/chain-proxy.md) | Dialer-Proxy、使用场景、配置流程 |
-| [✈️ 机场管理](docs/features/airport.md) | 订阅导入、定时更新、流量监控 |
-| [📋 订阅分享](docs/features/subscription-share.md) | 多链接管理、过期策略、访问统计 |
-| [🌐 Host 管理](docs/features/host.md) | 域名映射、DNS 配置、测速持久化 |
-| [🤖 Telegram 机器人](docs/features/telegram-bot.md) | 命令列表、配置指南 |
-| [📜 脚本功能](docs/script_support.md) | 节点过滤、内容后处理、函数参考 |
+| [🏷️ Smart tag system](docs/features/tags.md) | Automatic rule based tagging, no code filtering, IP quality rules |
+| [⚡ Speed test system](docs/features/speedtest.md) | Test design, IP quality checks, unlock checks, parameter tuning |
+| [🌍 Unlock checks](docs/features/unlock-check.md) | Streaming and AI availability checks, Provider architecture, extensions |
+| [🔗 Chain proxy](docs/features/chain-proxy.md) | Dialer-Proxy, condition based node selection, configuration flow |
+| [🤖 AI template editing](docs/features/template-ai.md) | Operation based previews, read-only diff review, accept into editor, normal save |
+| [✈️ Airport management](docs/features/airport.md) | Subscription import, scheduled updates, traffic monitoring |
+| [📋 Subscription sharing](docs/features/subscription-share.md) | Multiple links, expiration policies, access statistics |
+| [🌐 Host management](docs/features/host.md) | Domain mappings, DNS configuration, speed test persistence |
+| [☁️ Cloudflare Tunnel](docs/features/cloudflare-tunnel.md) | Create a Tunnel, get a token, configure public access |
+| [🤖 Telegram Bot](docs/features/telegram-bot.md) | Command list and setup guide |
+| [📜 Script support](docs/script_support.md) | Node filtering, content post processing, function reference |
+| [🔐 Multi factor authentication, MFA](docs/features/mfa.md) | TOTP setup, recovery codes, emergency reset flow |
 
-### 👨‍💻 开发者
+### 👨‍💻 Developers
 
-| 文档 | 说明 |
+| Document | Description |
 |:---|:---|
-| [🛠️ 开发指南](docs/development.md) | 项目结构、本地开发、定时任务开发 |
+| [🛠️ Development Guide](docs/development.md) | Project structure, local development, scheduled task development |
+| [🔌 Protocol Extension Guide](docs/development.md#-protocol-extension-guide) | Add a protocol, register capabilities, field metadata, ProtocolDemo example |
 
 ---
 
-## 📡 多协议支持
+## 📡 Multi Protocol Support
 
-| 客户端 | 支持协议 |
+| Client | Supported protocols |
 |:---|:---|
-| **v2ray** | base64 通用格式 |
-| **clash** | ss, ssr, trojan, vmess, vless, hy, hy2, tuic, AnyTLS, Socks5 |
-| **surge** | ss, trojan, vmess, hy2, tuic |
+| **v2ray** | base64 common format, without Clash/mihomo specific protocols such as Mieru and Snell |
+| **clash / mihomo** | ss, ssr, trojan, vmess, vless, hy, hy2, tuic, AnyTLS, Socks5, HTTP, HTTPS, Mieru, Snell |
+| **surge** | ss, trojan, vmess, hy2, tuic, AnyTLS, Snell |
+
+> [!NOTE]
+> Mieru currently supports Clash/mihomo YAML import and export only. Official Mieru has `mieru://` and `mierus://` share links, but does not define a general URL schema suitable for field by field editing. For raw editing and Clash/mihomo import write back, SublinkPro uses an internal editable form: `mieru://username:password@server:port?...#name`, with port ranges written as `portRange=2090-2099`. v2ray and Surge don't support Mieru in SublinkPro. Subscription output skips that protocol instead of converting it to a downgraded form.
+
+> [!NOTE]
+> Snell supports Clash/mihomo and Surge output only. Snell has no official share link schema, so SublinkPro uses an internal editable form for raw editing and Clash/mihomo/Surge import write back: `snell://server:port?psk=xxx&version=3&obfs=http&obfs-host=xxx#name`. v2ray does not support Snell in SublinkPro; subscription output skips it instead of converting it to a downgraded form.
 
 ---
 
-## 🖼️ 项目预览
+## 🖼️ Preview
 
 <details open>
-<summary><b>点击展开/收起预览图</b></summary>
+<summary><b>Show or hide screenshots</b></summary>
 
 | | |
 |:---:|:---:|
-| ![预览1](docs/images/1.jpg) | ![预览2](docs/images/2.jpg) |
-| ![预览3](docs/images/3.jpg) | ![预览4](docs/images/4.jpg) |
-| ![预览5](docs/images/5.jpg) | ![预览6](docs/images/6.jpg) |
-| ![预览7](docs/images/7.jpg) | ![预览8](docs/images/8.jpg) |
-| ![预览9](docs/images/9.jpg) | ![预览10](docs/images/10.jpg) |
-| ![预览11](docs/images/11.jpg) | ![预览12](docs/images/12.jpg) |
+| ![Preview 1](docs/images/1.jpg) | ![Preview 2](docs/images/2.jpg) |
+| ![Preview 3](docs/images/3.jpg) | ![Preview 4](docs/images/4.jpg) |
+| ![Preview 5](docs/images/5.jpg) | ![Preview 6](docs/images/6.jpg) |
+| ![Preview 7](docs/images/7.jpg) | ![Preview 8](docs/images/8.jpg) |
+| ![Preview 9](docs/images/9.jpg) | ![Preview 10](docs/images/10.jpg) |
+| ![Preview 11](docs/images/11.jpg) | ![Preview 12](docs/images/12.jpg) |
 
 </details>
 
 ---
 
-## 📊 项目统计
+## 📊 Project Stats
 
 <div align="center">
 
@@ -171,22 +223,30 @@ docker-compose up -d
 
 ---
 
-## 🤝 贡献与支持
+## 🤝 Contributing and Support
 
-如果这个项目对您有帮助，欢迎：
+If this project helps you, you are welcome to:
 
-- ⭐ **Star** 这个项目表示支持
-- 🐛 提交 [Issue](https://github.com/ZeroDeng01/sublinkPro/issues) 反馈问题或建议
-- 🔧 提交 Pull Request 贡献代码
-- 📖 完善文档和使用教程
+- ⭐ Star the project
+- 🐛 Open an [Issue](https://github.com/ZeroDeng01/sublinkPro/issues) for bugs or suggestions
+- 🔧 Submit a Pull Request
+- 📖 Improve the docs and tutorials
 
-### 🙏 致谢
+### 🌟 Recommended services
 
-感谢以下项目的开源贡献：
+If you need to buy a server, you can support the maintainer through the links below. Purchases through these links may provide commission rewards to the maintainer. Check official pages for exact pricing, promotion eligibility, network performance, and renewal rules.
 
-- [sublinkX](https://github.com/gooaclok819/sublinkX) / [sublinkE](https://github.com/eun1e/sublinkE) - 原始项目
-- [Berry Free React Admin Template](https://github.com/codedthemes/berry-free-react-admin-template) - 前端模板
-- [Mihomo](https://github.com/MetaCubeX/mihomo) - 代理核心
+- **[BandwagonHost](https://bandwagonhost.com/aff.php?aff=19245)**: premium routes, multiple data centers, and CN2 GIA options. Good for high quality route servers, or as a stable landing server with other nodes. Highlights: many VPS locations, CN2 GIA optimized routes, quality route machines.
+- **[Vultr](https://www.vultr.com/?ref=8055869)**: many regions, hourly billing, IP and region changes, starting at $2.5 per month. Good for websites, AI service hosting, route servers, and landing servers. Highlights: many regions, hourly billing, low price, stable service, IPv6 only machines.
+- **[Aliyun](https://www.aliyun.com/minisite/goods?userCode=brje0cbs)**: 99 RMB per year server offer with the same price for new purchase and renewal. Good for domestic deployment and testing, including newapi and SublinkPro. Registration through the link may provide discounts, including AI related discounts. Highlights: suitable for China based deployment and development testing, 99 RMB per year new purchase and renewal, discount coupons.
+
+### 🙏 Acknowledgements
+
+Thanks to these open source projects:
+
+- [sublinkX](https://github.com/gooaclok819/sublinkX) / [sublinkE](https://github.com/eun1e/sublinkE), original projects
+- [Berry Free React Admin Template](https://github.com/codedthemes/berry-free-react-admin-template), frontend template
+- [Mihomo](https://github.com/MetaCubeX/mihomo), proxy core
 
 ---
 

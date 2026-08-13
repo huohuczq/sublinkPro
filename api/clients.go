@@ -1,225 +1,580 @@
 package api
 
 import (
-	"crypto/md5"
-	"encoding/hex"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sublink/models"
 	"sublink/node"
 	"sublink/node/protocol"
+	"sublink/services/substore"
 	"sublink/utils"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
-var SunName string
+const subscriptionNameContextKey = "resolvedSubscriptionName"
 
-// md5加密
-func Md5(src string) string {
-	m := md5.New()
-	m.Write([]byte(src))
-	res := hex.EncodeToString(m.Sum(nil))
-	return res
+const (
+	defaultSubscriptionUpdateIntervalHours = 24
+	maxSubscriptionUpdateIntervalHours     = 8760
+)
+
+type clientResponseMode int
+
+const (
+	clientResponseNormal clientResponseMode = iota
+	clientResponseSyntheticFallback
+)
+
+type fallbackIdentityPolicy int
+
+const (
+	fallbackIdentityOriginalEnvelope fallbackIdentityPolicy = iota
+	fallbackIdentitySyntheticEnvelope
+)
+
+type preparedClientResponse struct {
+	ClientType       string
+	Mode             clientResponseMode
+	Subscription     models.Subcription
+	SubName          string
+	ShareID          int
+	FallbackName     string
+	FallbackIdentity fallbackIdentityPolicy
 }
+
+type resolvedPreparedResponse struct {
+	Subscription models.Subcription
+	SubName      string
+}
+
+type mihomoBridgeOutput struct {
+	Body     []byte
+	Resolved resolvedPreparedResponse
+}
+
+const syntheticClashTemplate = `port: 7890
+proxies: []
+proxy-groups:
+  - name: 节点选择
+    type: select
+    proxies: []
+`
+
+const syntheticSurgeTemplate = `[General]
+
+[Proxy]
+
+[Proxy Group]
+节点选择 = select
+`
+
+var testGetClientAfterResolveSubscriptionNameHook func(*gin.Context)
+
+var (
+	syntheticTemplateOnce sync.Once
+	syntheticClashPath    string
+	syntheticSurgePath    string
+	syntheticTemplateErr  error
+)
+
+func getRemoteSubscription(ctx context.Context, link string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)
+	if err != nil {
+		return nil, err
+	}
+	return http.DefaultClient.Do(req)
+}
+
+func setResolvedSubscriptionName(c *gin.Context, subName string) {
+	c.Set(subscriptionNameContextKey, subName)
+}
+
+func getResolvedSubscriptionName(c *gin.Context) (string, bool) {
+	value, ok := c.Get(subscriptionNameContextKey)
+	if !ok {
+		return "", false
+	}
+
+	subName, ok := value.(string)
+	if !ok || subName == "" {
+		return "", false
+	}
+
+	return subName, true
+}
+
+func resolvedSubscriptionNameOrWriteError(c *gin.Context) (string, bool) {
+	subName, ok := getResolvedSubscriptionName(c)
+	if !ok {
+		_, _ = c.Writer.WriteString("订阅名为空")
+		return "", false
+	}
+
+	return subName, true
+}
+
 func GetClient(c *gin.Context) {
 	// 获取协议头
 	token := c.Query("token")
-	ClientIndex := c.Query("client") // 客户端标识
 	if token == "" {
 		utils.Warn("token为空")
-		c.Writer.WriteString("Not Found")
+		_, _ = c.Writer.WriteString("Not Found")
 		return
 	}
+	clientType := resolveSubscriptionClient(c)
+	prepared, ok := prepareClientResponse(c, clientType, strings.ToLower(token))
+	if !ok {
+		return
+	}
+	setResolvedSubscriptionName(c, prepared.SubName)
+	if testGetClientAfterResolveSubscriptionNameHook != nil {
+		testGetClientAfterResolveSubscriptionNameHook(c)
+	}
+	c.Set("shareID", prepared.ShareID)
+	dispatchPreparedClientResponse(c, prepared)
+}
 
-	// 从分享表查找 token
-	share, err := models.GetSubscriptionShareByToken(strings.ToLower(token))
+func prepareClientResponse(c *gin.Context, clientType, token string) (preparedClientResponse, bool) {
+	share, err := models.GetSubscriptionShareByToken(token)
 	if err != nil {
 		utils.Warn("无效的分享token: %s", token)
-		c.Writer.WriteString("无效的分享链接")
-		return
+		return buildSyntheticFallbackResponse(clientType, "无效的分享链接"), true
 	}
 
-	// 检查是否过期
 	if share.IsExpired() {
 		utils.Warn("分享链接已过期: %s", token)
-		c.Writer.WriteString("分享链接已过期")
-		return
+		var expiredSub models.Subcription
+		expiredSub.ID = share.SubscriptionID
+		if err := expiredSub.Find(); err != nil {
+			utils.Warn("过期分享关联订阅不存在: %d", share.SubscriptionID)
+			return buildSyntheticFallbackResponse(clientType, "订阅不存在"), true
+		}
+		return buildPreparedExpiredShareResponse(expiredSub, clientType, "订阅已过期", share.ID)
 	}
 
-	// 获取关联订阅
 	var sub models.Subcription
 	sub.ID = share.SubscriptionID
 	if err := sub.Find(); err != nil {
 		utils.Warn("订阅不存在: %d", share.SubscriptionID)
-		c.Writer.WriteString("订阅不存在")
-		return
+		return buildSyntheticFallbackResponse(clientType, "订阅不存在"), true
 	}
-	SunName = sub.Name
 
 	// IP 黑白名单检查
 	if sub.IPBlacklist != "" && utils.IsIpInCidr(c.ClientIP(), sub.IPBlacklist) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"msg": "IP受限(IP已被加入黑名单)",
 		})
-		return
+		return preparedClientResponse{}, false
 	}
 	if sub.IPWhitelist != "" && !utils.IsIpInCidr(c.ClientIP(), sub.IPWhitelist) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"msg": "IP受限(您的IP不在允许访问列表)",
 		})
-		return
+		return preparedClientResponse{}, false
 	}
 
-	// 更新访问统计
-	share.RecordAccess()
+	// 异步更新访问统计，避免订阅生成热路径等待数据库写入。
+	share.RecordAccessAsync()
+	prepared, ok := buildPreparedResponseFromSubscription(sub, clientType, share.ID)
+	if !ok {
+		return preparedClientResponse{}, false
+	}
+	return prepared, true
+}
 
-	// 保存 ShareID 到上下文，供IP日志记录使用
-	c.Set("shareID", share.ID)
-
-	// 判断是否带客户端参数
-	switch ClientIndex {
-	case "clash":
-		GetClash(c)
-		return
-	case "surge":
-		GetSurge(c)
-		return
-	case "v2ray":
-		GetV2ray(c)
-		return
+func resolveSubscriptionClient(c *gin.Context) string {
+	clientIndex := strings.ToLower(strings.TrimSpace(c.Query("client")))
+	switch clientIndex {
+	case "clash", "mihomo", "surge", "v2ray", "uri", "v2ray-uri":
+		return clientIndex
+	}
+	if substore.IsSupportedTarget(clientIndex) {
+		return clientIndex
 	}
 
-	// 自动识别客户端
-	ClientList := []string{"clash", "surge"}
-	for k, v := range c.Request.Header {
-		if k == "User-Agent" {
-			for _, UserAgent := range v {
-				if UserAgent == "" {
-					fmt.Println("User-Agent为空")
-				}
-				for _, client := range ClientList {
-					if strings.Contains(strings.ToLower(UserAgent), strings.ToLower(client)) {
-						switch client {
-						case "clash":
-							GetClash(c)
-							return
-						case "surge":
-							GetSurge(c)
-							return
-						default:
-							fmt.Println("未知客户端")
-						}
-					}
-				}
-				GetV2ray(c)
-			}
+	userAgent := c.GetHeader("User-Agent")
+	if userAgent == "" {
+		fmt.Println("User-Agent为空")
+	}
+	for _, client := range []string{"clash", "surge"} {
+		if strings.Contains(strings.ToLower(userAgent), strings.ToLower(client)) {
+			return client
 		}
 	}
-}
-func GetV2ray(c *gin.Context) {
-	var sub models.Subcription
-	if SunName == "" {
-		c.Writer.WriteString("订阅名为空")
-		return
-	}
-	// subname := c.Param("subname")
-	// subname := SunName
-	// subname = node.Base64Decode(subname)
-	sub.Name = SunName
-	err := sub.Find()
-	if err != nil {
-		c.Writer.WriteString("找不到这个订阅:" + SunName)
-		return
-	}
-	err = sub.GetSub("v2ray")
-	if err != nil {
-		c.Writer.WriteString("读取错误")
-		return
-	}
-	baselist := ""
 
-	// 根据配置决定是否实时刷新用量信息
+	return "v2ray"
+}
+
+func dispatchPreparedClientResponse(c *gin.Context, prepared preparedClientResponse) {
+	switch prepared.ClientType {
+	case "clash", "mihomo":
+		renderPreparedClash(c, prepared)
+	case "surge":
+		renderPreparedSurge(c, prepared)
+	case "uri", "v2ray-uri":
+		renderPreparedConvertedClient(c, prepared)
+	default:
+		if substore.IsSupportedTarget(prepared.ClientType) {
+			renderPreparedConvertedClient(c, prepared)
+			return
+		}
+		renderPreparedV2ray(c, prepared)
+	}
+}
+
+func buildSyntheticFallbackResponse(clientType, message string) preparedClientResponse {
+	config, err := buildSyntheticFallbackConfig()
+	if err != nil {
+		utils.Warn("构造 synthetic fallback 配置失败: %v", err)
+	}
+	sub := models.Subcription{
+		Name:                  message,
+		Config:                config,
+		Nodes:                 buildSyntheticErrorNodes(message),
+		RefreshUsageOnRequest: false,
+	}
+	return preparedClientResponse{
+		ClientType:       clientType,
+		Mode:             clientResponseSyntheticFallback,
+		Subscription:     sub,
+		SubName:          sub.Name,
+		FallbackName:     message,
+		FallbackIdentity: fallbackIdentitySyntheticEnvelope,
+	}
+}
+
+func buildSyntheticErrorNodes(message string) []models.Node {
+	link := buildSyntheticErrorLink(message)
+	return []models.Node{{
+		ID:       -1,
+		Name:     message,
+		LinkName: message,
+		Link:     link,
+		Protocol: "ss",
+		Source:   "manual",
+		SourceID: 0,
+	}}
+}
+
+func buildSyntheticErrorLink(message string) string {
+	link := protocol.EncodeSSURL(protocol.Ss{
+		Name:   message,
+		Server: "placeholder.invalid",
+		Port:   80,
+		Param: protocol.Param{
+			Cipher:   "aes-128-gcm",
+			Password: "placeholder",
+		},
+	})
+	return strings.Replace(link, "#"+url.QueryEscape(message), "#"+message, 1)
+}
+
+func buildSyntheticFallbackConfig() (string, error) {
+	clashPath, surgePath, err := getSyntheticTemplatePaths()
+	if err != nil {
+		return "", err
+	}
+
+	config := map[string]string{
+		"clash": clashPath,
+		"surge": surgePath,
+	}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return "", err
+	}
+
+	return string(encoded), nil
+}
+
+func getSyntheticTemplatePaths() (string, string, error) {
+	syntheticTemplateOnce.Do(func() {
+		syntheticClashPath, syntheticTemplateErr = writeSyntheticTemplateFile("synthetic-clash-*.yaml", syntheticClashTemplate)
+		if syntheticTemplateErr != nil {
+			return
+		}
+		syntheticSurgePath, syntheticTemplateErr = writeSyntheticTemplateFile("synthetic-surge-*.conf", syntheticSurgeTemplate)
+	})
+
+	return syntheticClashPath, syntheticSurgePath, syntheticTemplateErr
+}
+
+func writeSyntheticTemplateFile(pattern, content string) (string, error) {
+	file, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+
+	if _, err := file.WriteString(content); err != nil {
+		return "", err
+	}
+
+	return file.Name(), nil
+}
+
+func buildPreparedResponseFromSubscription(sub models.Subcription, clientType string, shareID int) (preparedClientResponse, bool) {
+	preparedSub := sub
+	materializeClientType := clientType
+	if substore.IsSupportedTarget(clientType) || clientType == "uri" || clientType == "v2ray-uri" || clientType == "mihomo" {
+		materializeClientType = "clash"
+	}
+	if err := preparedSub.GetSub(materializeClientType); err != nil {
+		return preparedClientResponse{}, false
+	}
+	return preparedClientResponse{
+		ClientType:       clientType,
+		Mode:             clientResponseNormal,
+		Subscription:     preparedSub,
+		SubName:          preparedSub.Name,
+		ShareID:          shareID,
+		FallbackIdentity: fallbackIdentityOriginalEnvelope,
+	}, true
+}
+
+func buildPreparedExpiredShareResponse(sub models.Subcription, clientType, message string, shareID int) (preparedClientResponse, bool) {
+	prepared, ok := buildPreparedResponseFromSubscription(sub, clientType, shareID)
+	if !ok {
+		return preparedClientResponse{}, false
+	}
+	prepared.Mode = clientResponseSyntheticFallback
+	prepared.FallbackName = message
+	prepared.FallbackIdentity = fallbackIdentityOriginalEnvelope
+	return prepared, true
+}
+
+func applyPreparedResponseMode(prepared preparedClientResponse) resolvedPreparedResponse {
+	sub := prepared.Subscription
+	subName := prepared.SubName
+
+	switch prepared.Mode {
+	case clientResponseSyntheticFallback:
+		sub.Nodes = buildSyntheticErrorNodes(prepared.FallbackName)
+		sub.RefreshUsageOnRequest = false
+		if prepared.FallbackIdentity == fallbackIdentitySyntheticEnvelope {
+			sub.Name = prepared.FallbackName
+			subName = prepared.FallbackName
+		}
+	}
+
+	return resolvedPreparedResponse{
+		Subscription: sub,
+		SubName:      subName,
+	}
+}
+
+// buildNodeExportName 计算节点导出到客户端时使用的最终名称。
+// 原来在 buildRenamedNodeLink 内部直接计算并写回链接；现在先拆出名称计算，
+// 让导出阶段可以先规划最终名称，再用同一个结果重写链接和代理组引用。
+// 这里只保留现有命名规则语义：无模板时使用节点有效名，有模板时按模板渲染。
+func buildNodeExportName(node models.Node, processedLinkName, nodeNameRule, link string, index int) string {
+	return models.BuildNodeExportName(node, processedLinkName, nodeNameRule, protocol.GetProtocolFromLink(link), index, 0)
+}
+
+func buildRenamedNodeLink(node models.Node, processedLinkName, nodeNameRule, link string, index int) string {
+	newName := buildNodeExportName(node, processedLinkName, nodeNameRule, link, index)
+	return utils.RenameNodeLink(link, newName)
+}
+
+func buildClientNodeNamePlan(sub models.Subcription) models.NodeNamePlan {
+	return models.BuildNodeNamePlan(sub.Nodes, sub.NodeNamePreprocess, sub.NodeNameRule, protocol.GetProtocolFromLink)
+}
+
+// buildClashNodeNameMap 预先计算每个节点最终可引用的代理名称。
+// 后续节点链接重命名、代理组和 dialer-proxy 都复用这张表，保证引用名称一致。
+func buildClashNodeNameMap(sub models.Subcription) map[int]string {
+	return buildClientNodeNamePlan(sub).NodeNameMap
+}
+
+func addDialerProxyNameAlias(aliasToFinal map[string]string, conflicts map[string]bool, alias, finalName string) {
+	alias = strings.TrimSpace(alias)
+	finalName = strings.TrimSpace(finalName)
+	if alias == "" || finalName == "" || conflicts[alias] {
+		return
+	}
+	if existing, exists := aliasToFinal[alias]; exists && existing != finalName {
+		delete(aliasToFinal, alias)
+		conflicts[alias] = true
+		return
+	}
+	aliasToFinal[alias] = finalName
+}
+
+func buildDialerProxyNameMap(nodes []models.Node, nodeNameMap map[int]string) map[string]string {
+	aliasToFinal := make(map[string]string)
+	conflicts := make(map[string]bool)
+	for _, n := range nodes {
+		finalName := nodeNameMap[n.ID]
+		addDialerProxyNameAlias(aliasToFinal, conflicts, finalName, finalName)
+		addDialerProxyNameAlias(aliasToFinal, conflicts, n.EffectiveName(), finalName)
+		addDialerProxyNameAlias(aliasToFinal, conflicts, n.Name, finalName)
+		addDialerProxyNameAlias(aliasToFinal, conflicts, n.LinkName, finalName)
+	}
+	return aliasToFinal
+}
+
+func normalizeDialerProxyName(name string, dialerProxyNameMap map[string]string) string {
+	trimmedName := strings.TrimSpace(name)
+	if trimmedName == "" {
+		return ""
+	}
+	if finalName, ok := dialerProxyNameMap[trimmedName]; ok {
+		return finalName
+	}
+	return trimmedName
+}
+
+func resolveClashDialerProxy(node models.Node, finalNodeName string, chainNodeDialerMap map[string]string, targetNodeDialerMap map[int]string, dialerProxyNameMap map[string]string) string {
+	dialerProxy := strings.TrimSpace(node.DialerProxyName)
+	if chainDialer, exists := chainNodeDialerMap[finalNodeName]; exists {
+		dialerProxy = chainDialer
+	} else if targetDialer, exists := targetNodeDialerMap[node.ID]; exists {
+		dialerProxy = targetDialer
+	}
+	return normalizeDialerProxyName(dialerProxy, dialerProxyNameMap)
+}
+
+func prepareRendererResponse(c *gin.Context, prepared preparedClientResponse) (resolvedPreparedResponse, bool) {
+	resolved := applyPreparedResponseMode(prepared)
+	sub := resolved.Subscription
 	if sub.RefreshUsageOnRequest {
 		node.RefreshUsageForSubscriptionNodes(sub.Nodes)
 	}
 	c.Writer.Header().Set("subscription-userinfo", getSubscriptionUsage(sub.Nodes))
-	// 如果是HEAD请求将不进行订阅内容相关输出
+	if prepared.ClientType == "clash" {
+		c.Writer.Header().Set("profile-update-interval", strconv.Itoa(resolveSubscriptionUpdateIntervalHours(sub.UpdateInterval)))
+		c.Writer.Header().Set("profile-title", url.QueryEscape(resolved.SubName))
+	}
+	c.Set("subname", resolved.SubName)
 	if c.Request.Method == "HEAD" {
+		return resolved, false
+	}
+	return resolved, true
+}
+
+func resolveSubscriptionUpdateIntervalHours(interval int) int {
+	if interval > maxSubscriptionUpdateIntervalHours {
+		return maxSubscriptionUpdateIntervalHours
+	}
+	if interval > 0 {
+		return interval
+	}
+	return defaultSubscriptionUpdateIntervalHours
+}
+
+func resolveSubscriptionUpdateIntervalSeconds(interval int) int {
+	return resolveSubscriptionUpdateIntervalHours(interval) * 60 * 60
+}
+
+func withSurgeManagedConfigInterval(config string, seconds int) string {
+	lines := strings.Split(config, "\n")
+	for i, line := range lines {
+		if !strings.Contains(line, "#!MANAGED-CONFIG") {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		intervalField := fmt.Sprintf("interval=%d", seconds)
+		for j, field := range fields {
+			if strings.HasPrefix(field, "interval=") {
+				fields[j] = intervalField
+				lines[i] = strings.Join(fields, " ")
+				return strings.Join(lines, "\n")
+			}
+		}
+		fields = append(fields, intervalField)
+		lines[i] = strings.Join(fields, " ")
+		return strings.Join(lines, "\n")
+	}
+	return config
+}
+
+func GetV2ray(c *gin.Context) {
+	subName, ok := resolvedSubscriptionNameOrWriteError(c)
+	if !ok {
 		return
 	}
+	var sub models.Subcription
+	sub.Name = subName
+	if err := sub.Find(); err != nil {
+		_, _ = c.Writer.WriteString("找不到这个订阅:" + subName)
+		return
+	}
+	prepared, ok := buildPreparedResponseFromSubscription(sub, "v2ray", 0)
+	if !ok {
+		_, _ = c.Writer.WriteString("读取错误")
+		return
+	}
+	renderPreparedV2ray(c, prepared)
+}
+
+func renderPreparedV2ray(c *gin.Context, prepared preparedClientResponse) {
+	resolved, shouldWriteBody := prepareRendererResponse(c, prepared)
+	subName := resolved.SubName
+	filename := fmt.Sprintf("%s.txt", subName)
+	encodedFilename := url.QueryEscape(filename)
+	c.Writer.Header().Set("Content-Disposition", "inline; filename*=utf-8''"+encodedFilename)
+	c.Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if !shouldWriteBody {
+		return
+	}
+	sub := resolved.Subscription
+	baselist := ""
+	nodeNamePlan := buildClientNodeNamePlan(sub)
 
 	for idx, v := range sub.Nodes {
-		// 应用预处理规则到 LinkName
-		processedLinkName := utils.PreprocessNodeName(sub.NodeNamePreprocess, v.LinkName)
-		// 应用重命名规则
-		nodeLink := v.Link
-		if sub.NodeNameRule != "" {
-			newName := utils.RenameNode(sub.NodeNameRule, utils.NodeInfo{
-				Name:        v.Name,
-				LinkName:    processedLinkName,
-				LinkCountry: v.LinkCountry,
-				Speed:       v.Speed,
-				DelayTime:   v.DelayTime,
-				Group:       v.Group,
-				Source:      v.Source,
-				Index:       idx + 1,
-				Protocol:    utils.GetProtocolFromLink(v.Link),
-				Tags:        v.Tags,
-			})
-			nodeLink = utils.RenameNodeLink(v.Link, newName)
-		}
+		finalNodeName := nodeNamePlan.NodeNameAt(idx, v.ID)
+		nodeLink := utils.RenameNodeLink(v.Link, finalNodeName)
 		switch {
 		// 如果包含多条节点
 		case strings.Contains(v.Link, ","):
 			links := strings.Split(v.Link, ",")
-			// 对每个链接应用重命名
-			if sub.NodeNameRule != "" {
-				for i, link := range links {
-					newName := utils.RenameNode(sub.NodeNameRule, utils.NodeInfo{
-						Name:        v.Name,
-						LinkName:    processedLinkName,
-						LinkCountry: v.LinkCountry,
-						Speed:       v.Speed,
-						DelayTime:   v.DelayTime,
-						Group:       v.Group,
-						Source:      v.Source,
-						Index:       idx + 1,
-						Protocol:    utils.GetProtocolFromLink(link),
-						Tags:        v.Tags,
-					})
-					links[i] = utils.RenameNodeLink(link, newName)
+			splitNames := nodeNamePlan.SplitNamesAt(idx)
+			// 对每个链接应用节点名称模式和重命名规则。
+			for i, link := range links {
+				linkName := finalNodeName
+				if i < len(splitNames) && splitNames[i] != "" {
+					linkName = splitNames[i]
 				}
+				links[i] = utils.RenameNodeLink(link, linkName)
 			}
-			baselist += strings.Join(links, "\n") + "\n"
+			compatibleLinks := filterV2rayCompatibleLinks(links)
+			if len(compatibleLinks) > 0 {
+				baselist += strings.Join(compatibleLinks, "\n") + "\n"
+			}
 			continue
-		//如果是订阅转换（以 http:// 或 https:// 开头）
-		case strings.HasPrefix(v.Link, "http://") || strings.HasPrefix(v.Link, "https://"):
-			resp, err := http.Get(v.Link)
+		//如果是订阅转换（以 http:// 或 https:// 开头，但不是HTTP/HTTPS代理节点）
+		case (strings.HasPrefix(v.Link, "http://") || strings.HasPrefix(v.Link, "https://")) && !protocol.IsHTTPLink(v.Link):
+			resp, err := getRemoteSubscription(c.Request.Context(), v.Link)
 			if err != nil {
 				utils.Error("Error getting link: %v", err)
 				return
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			body, _ := io.ReadAll(resp.Body)
 			nodes := utils.Base64Decode(string(body))
-			baselist += nodes + "\n"
+			compatibleLinks := filterV2rayCompatibleLinks(strings.Split(nodes, "\n"))
+			if len(compatibleLinks) > 0 {
+				baselist += strings.Join(compatibleLinks, "\n") + "\n"
+			}
 		// 默认
 		default:
+			if shouldSkipV2rayLink(nodeLink) {
+				continue
+			}
 			baselist += nodeLink + "\n"
 		}
 	}
-	c.Set("subname", SunName)
-	filename := fmt.Sprintf("%s.txt", SunName)
-	encodedFilename := url.QueryEscape(filename)
-	c.Writer.Header().Set("Content-Disposition", "inline; filename*=utf-8''"+encodedFilename)
-	c.Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-
 	// 执行脚本
 	for _, script := range sub.ScriptsWithSort {
 		res, err := utils.RunScript(script.Content, baselist, "v2ray")
@@ -229,60 +584,78 @@ func GetV2ray(c *gin.Context) {
 		}
 		baselist = res
 	}
-	c.Writer.WriteString(utils.Base64Encode(baselist))
+	_, _ = c.Writer.WriteString(utils.Base64Encode(baselist))
 }
-func GetClash(c *gin.Context) {
-	var sub models.Subcription
-	// subname := c.Param("subname")
-	// subname := node.Base64Decode(SunName)
-	sub.Name = SunName
-	err := sub.Find()
-	if err != nil {
-		c.Writer.WriteString("找不到这个订阅:" + SunName)
-		return
-	}
-	err = sub.GetSub("clash")
-	if err != nil {
-		c.Writer.WriteString("读取错误")
-		return
-	}
-	var urls []protocol.Urls
 
-	// 根据配置决定是否实时刷新用量信息
-	if sub.RefreshUsageOnRequest {
-		node.RefreshUsageForSubscriptionNodes(sub.Nodes)
+func filterV2rayCompatibleLinks(links []string) []string {
+	filtered := make([]string, 0, len(links))
+	for _, link := range links {
+		link = strings.TrimSpace(link)
+		if link == "" || shouldSkipV2rayLink(link) {
+			continue
+		}
+		filtered = append(filtered, link)
 	}
-	c.Writer.Header().Set("subscription-userinfo", getSubscriptionUsage(sub.Nodes))
-	// 如果是HEAD请求将不进行订阅内容相关输出
-	if c.Request.Method == "HEAD" {
+	return filtered
+}
+
+func shouldSkipV2rayLink(link string) bool {
+	return !protocol.SupportsClientForLink(link, protocol.ClientV2ray)
+}
+
+func GetClash(c *gin.Context) {
+	subName, ok := resolvedSubscriptionNameOrWriteError(c)
+	if !ok {
 		return
 	}
+	var sub models.Subcription
+	sub.Name = subName
+	if err := sub.Find(); err != nil {
+		_, _ = c.Writer.WriteString("找不到这个订阅:" + subName)
+		return
+	}
+	prepared, ok := buildPreparedResponseFromSubscription(sub, "clash", 0)
+	if !ok {
+		_, _ = c.Writer.WriteString("读取错误")
+		return
+	}
+	renderPreparedClash(c, prepared)
+}
+
+func renderPreparedClash(c *gin.Context, prepared preparedClientResponse) {
+	bridge, shouldWriteBody, ok := buildPreparedMihomoYAML(c, prepared)
+	if !ok {
+		return
+	}
+	resolved := bridge.Resolved
+	subName := resolved.SubName
+	filename := fmt.Sprintf("%s.yaml", subName)
+	encodedFilename := url.QueryEscape(filename)
+	c.Writer.Header().Set("Content-Disposition", "inline; filename*=utf-8''"+encodedFilename)
+	c.Writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if !shouldWriteBody {
+		return
+	}
+	_, _ = c.Writer.WriteString(string(bridge.Body))
+}
+
+func buildPreparedMihomoYAML(c *gin.Context, prepared preparedClientResponse) (mihomoBridgeOutput, bool, bool) {
+	clashPrepared := prepared
+	clashPrepared.ClientType = "clash"
+	resolved, shouldWriteBody := prepareRendererResponse(c, clashPrepared)
+	if !shouldWriteBody {
+		return mihomoBridgeOutput{Resolved: resolved}, false, true
+	}
+	sub := resolved.Subscription
+	var urls []protocol.Urls
 
 	// 获取链式代理规则
 	chainRules := models.GetEnabledChainRulesBySubscriptionID(sub.ID)
 
 	// 构建节点ID到最终名称的映射（用于链式代理规则解析）
-	nodeNameMap := make(map[int]string)
-	for idx, v := range sub.Nodes {
-		// 计算节点最终名称
-		processedLinkName := utils.PreprocessNodeName(sub.NodeNamePreprocess, v.LinkName)
-		finalName := v.LinkName // 默认使用原始名称
-		if sub.NodeNameRule != "" {
-			finalName = utils.RenameNode(sub.NodeNameRule, utils.NodeInfo{
-				Name:        v.Name,
-				LinkName:    processedLinkName,
-				LinkCountry: v.LinkCountry,
-				Speed:       v.Speed,
-				DelayTime:   v.DelayTime,
-				Group:       v.Group,
-				Source:      v.Source,
-				Index:       idx + 1,
-				Protocol:    utils.GetProtocolFromLink(v.Link),
-				Tags:        v.Tags,
-			})
-		}
-		nodeNameMap[v.ID] = finalName
-	}
+	nodeNamePlan := buildClientNodeNamePlan(sub)
+	nodeNameMap := nodeNamePlan.NodeNameMap
+	dialerProxyNameMap := buildDialerProxyNameMap(sub.Nodes, nodeNameMap)
 
 	// 收集自定义代理组
 	customGroups := models.CollectCustomProxyGroups(chainRules, sub.Nodes, nodeNameMap)
@@ -323,61 +696,24 @@ func GetClash(c *gin.Context) {
 
 	// ========== 第二阶段：遍历节点生成配置 ==========
 	for idx, v := range sub.Nodes {
-		// 应用预处理规则到 LinkName
-		processedLinkName := utils.PreprocessNodeName(sub.NodeNamePreprocess, v.LinkName)
-		// 应用重命名规则
-		nodeLink := v.Link
-		if sub.NodeNameRule != "" {
-			newName := utils.RenameNode(sub.NodeNameRule, utils.NodeInfo{
-				Name:        v.Name,
-				LinkName:    processedLinkName,
-				LinkCountry: v.LinkCountry,
-				Speed:       v.Speed,
-				DelayTime:   v.DelayTime,
-				Group:       v.Group,
-				Source:      v.Source,
-				Index:       idx + 1,
-				Protocol:    utils.GetProtocolFromLink(v.Link),
-				Tags:        v.Tags,
-			})
-			nodeLink = utils.RenameNodeLink(v.Link, newName)
-		}
-
 		// 计算 dialer-proxy（链式代理规则）
-		dialerProxy := strings.TrimSpace(v.DialerProxyName)
-
 		// 优先级：中间节点映射 > 目标节点映射 > 节点自身设置
-		finalNodeName := nodeNameMap[v.ID]
-
-		// 检查是否作为链路中间节点（最高优先级）
-		if chainDialer, exists := chainNodeDialerMap[finalNodeName]; exists {
-			dialerProxy = chainDialer
-		} else if targetDialer, exists := targetNodeDialerMap[v.ID]; exists && dialerProxy == "" {
-			// 作为目标节点
-			dialerProxy = targetDialer
-		}
+		finalNodeName := nodeNamePlan.NodeNameAt(idx, v.ID)
+		// 使用最终名称重写链接，确保 proxy.name 与代理组、dialer-proxy 引用一致。
+		nodeLink := utils.RenameNodeLink(v.Link, finalNodeName)
+		dialerProxy := resolveClashDialerProxy(v, finalNodeName, chainNodeDialerMap, targetNodeDialerMap, dialerProxyNameMap)
 
 		switch {
 		// 如果包含多条节点
 		case strings.Contains(v.Link, ","):
 			links := strings.Split(v.Link, ",")
+			splitNames := nodeNamePlan.SplitNamesAt(idx)
 			for i, link := range links {
-				renamedLink := link
-				if sub.NodeNameRule != "" {
-					newName := utils.RenameNode(sub.NodeNameRule, utils.NodeInfo{
-						Name:        v.Name,
-						LinkName:    processedLinkName,
-						LinkCountry: v.LinkCountry,
-						Speed:       v.Speed,
-						DelayTime:   v.DelayTime,
-						Group:       v.Group,
-						Source:      v.Source,
-						Index:       idx + 1,
-						Protocol:    utils.GetProtocolFromLink(link),
-						Tags:        v.Tags,
-					})
-					renamedLink = utils.RenameNodeLink(link, newName)
+				linkName := finalNodeName
+				if i < len(splitNames) && splitNames[i] != "" {
+					linkName = splitNames[i]
 				}
+				renamedLink := utils.RenameNodeLink(link, linkName)
 				links[i] = renamedLink
 				urls = append(urls, protocol.Urls{
 					Url:             renamedLink,
@@ -385,14 +721,14 @@ func GetClash(c *gin.Context) {
 				})
 			}
 			continue
-		//如果是订阅转换（以 http:// 或 https:// 开头）
-		case strings.HasPrefix(v.Link, "http://") || strings.HasPrefix(v.Link, "https://"):
-			resp, err := http.Get(v.Link)
+		//如果是订阅转换（以 http:// 或 https:// 开头，但不是HTTP/HTTPS代理节点）
+		case (strings.HasPrefix(v.Link, "http://") || strings.HasPrefix(v.Link, "https://")) && !protocol.IsHTTPLink(v.Link):
+			resp, err := getRemoteSubscription(c.Request.Context(), v.Link)
 			if err != nil {
 				utils.Error("获取包含链接失败: %v", err)
 				continue
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			body, _ := io.ReadAll(resp.Body)
 			nodes := utils.Base64Decode(string(body))
 			links := strings.Split(nodes, "\n")
@@ -412,10 +748,10 @@ func GetClash(c *gin.Context) {
 	}
 
 	var configs protocol.OutputConfig
-	err = json.Unmarshal([]byte(sub.Config), &configs)
+	err := json.Unmarshal([]byte(sub.Config), &configs)
 	if err != nil {
-		c.Writer.WriteString("配置读取错误")
-		return
+		_, _ = c.Writer.WriteString("配置读取错误")
+		return mihomoBridgeOutput{}, false, false
 	}
 
 	// 如果启用 Host 替换，填充 HostMap
@@ -444,15 +780,9 @@ func GetClash(c *gin.Context) {
 
 	DecodeClash, err := protocol.EncodeClash(urls, configs)
 	if err != nil {
-		c.Writer.WriteString(err.Error())
-		return
+		_, _ = c.Writer.WriteString(err.Error())
+		return mihomoBridgeOutput{}, false, false
 	}
-	c.Set("subname", SunName)
-	filename := fmt.Sprintf("%s.yaml", SunName)
-	encodedFilename := url.QueryEscape(filename)
-	c.Writer.Header().Set("Content-Disposition", "inline; filename*=utf-8''"+encodedFilename)
-	c.Writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
-
 	// 执行脚本
 	for _, script := range sub.ScriptsWithSort {
 		res, err := utils.RunScript(script.Content, string(DecodeClash), "clash")
@@ -462,86 +792,107 @@ func GetClash(c *gin.Context) {
 		}
 		DecodeClash = []byte(res)
 	}
-	c.Writer.WriteString(string(DecodeClash))
+	return mihomoBridgeOutput{Body: DecodeClash, Resolved: resolved}, true, true
+}
+
+func renderPreparedConvertedClient(c *gin.Context, prepared preparedClientResponse) {
+	bridge, shouldWriteBody, ok := buildPreparedMihomoYAML(c, prepared)
+	if !ok {
+		return
+	}
+	filename := fmt.Sprintf("%s.%s", bridge.Resolved.SubName, extensionForConvertedClient(prepared.ClientType))
+	c.Writer.Header().Set("Content-Disposition", "inline; filename*=utf-8''"+url.QueryEscape(filename))
+	if !shouldWriteBody {
+		return
+	}
+	subStoreConfig, _ := substore.EffectiveConfig()
+	client, err := substore.NewClient(subStoreConfig)
+	if err != nil {
+		c.String(http.StatusServiceUnavailable, "Sub-Store sidecar is not configured")
+		return
+	}
+	converted, err := client.Convert(c.Request.Context(), string(bridge.Body), prepared.ClientType)
+	if err != nil {
+		c.String(http.StatusBadGateway, "Sub-Store conversion failed: %s", err.Error())
+		return
+	}
+	c.Writer.Header().Set("Content-Type", converted.ContentType)
+	_, _ = c.Writer.WriteString(converted.Body)
+}
+
+func extensionForConvertedClient(clientType string) string {
+	switch strings.ToLower(strings.TrimSpace(clientType)) {
+	case "json", "singbox", "sing-box":
+		return "json"
+	case "uri", "v2ray-uri":
+		return "txt"
+	case "stash", "mihomo", "clashmeta", "clash-meta", "egern":
+		return "yaml"
+	default:
+		return "conf"
+	}
 }
 
 func GetSurge(c *gin.Context) {
+	subName, ok := resolvedSubscriptionNameOrWriteError(c)
+	if !ok {
+		return
+	}
 	var sub models.Subcription
-	// subname := c.Param("subname")
-	// subname := node.Base64Decode(SunName)
-	sub.Name = SunName
-	err := sub.Find()
-	if err != nil {
-		c.Writer.WriteString("找不到这个订阅:" + SunName)
+	sub.Name = subName
+	if err := sub.Find(); err != nil {
+		_, _ = c.Writer.WriteString("找不到这个订阅:" + subName)
 		return
 	}
-	err = sub.GetSub("surge")
-	if err != nil {
-		c.Writer.WriteString("读取错误")
+	prepared, ok := buildPreparedResponseFromSubscription(sub, "surge", 0)
+	if !ok {
+		_, _ = c.Writer.WriteString("读取错误")
 		return
 	}
+	renderPreparedSurge(c, prepared)
+}
+
+func renderPreparedSurge(c *gin.Context, prepared preparedClientResponse) {
+	resolved, shouldWriteBody := prepareRendererResponse(c, prepared)
+	subName := resolved.SubName
+	filename := fmt.Sprintf("%s.conf", subName)
+	encodedFilename := url.QueryEscape(filename)
+	c.Writer.Header().Set("Content-Disposition", "inline; filename*=utf-8''"+encodedFilename)
+	c.Writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if !shouldWriteBody {
+		return
+	}
+	sub := resolved.Subscription
 	urls := []string{}
 
-	// 根据配置决定是否实时刷新用量信息
-	if sub.RefreshUsageOnRequest {
-		node.RefreshUsageForSubscriptionNodes(sub.Nodes)
-	}
-	c.Writer.Header().Set("subscription-userinfo", getSubscriptionUsage(sub.Nodes))
-	// 如果是HEAD请求将不进行订阅内容相关输出
-	if c.Request.Method == "HEAD" {
-		return
-	}
+	nodeNamePlan := buildClientNodeNamePlan(sub)
+
 	for idx, v := range sub.Nodes {
-		// 应用预处理规则到 LinkName
-		processedLinkName := utils.PreprocessNodeName(sub.NodeNamePreprocess, v.LinkName)
-		// 应用重命名规则
-		nodeLink := v.Link
-		if sub.NodeNameRule != "" {
-			newName := utils.RenameNode(sub.NodeNameRule, utils.NodeInfo{
-				Name:        v.Name,
-				LinkName:    processedLinkName,
-				LinkCountry: v.LinkCountry,
-				Speed:       v.Speed,
-				DelayTime:   v.DelayTime,
-				Group:       v.Group,
-				Source:      v.Source,
-				Index:       idx + 1,
-				Protocol:    utils.GetProtocolFromLink(v.Link),
-				Tags:        v.Tags,
-			})
-			nodeLink = utils.RenameNodeLink(v.Link, newName)
-		}
+		finalNodeName := nodeNamePlan.NodeNameAt(idx, v.ID)
+		// Surge 的 [Proxy] 左侧名称来自链接名称，也要复用最终名称。
+		nodeLink := utils.RenameNodeLink(v.Link, finalNodeName)
 		switch {
 		// 如果包含多条节点
 		case strings.Contains(v.Link, ","):
 			links := strings.Split(v.Link, ",")
+			splitNames := nodeNamePlan.SplitNamesAt(idx)
 			for i, link := range links {
-				if sub.NodeNameRule != "" {
-					newName := utils.RenameNode(sub.NodeNameRule, utils.NodeInfo{
-						Name:        v.Name,
-						LinkName:    processedLinkName,
-						LinkCountry: v.LinkCountry,
-						Speed:       v.Speed,
-						DelayTime:   v.DelayTime,
-						Group:       v.Group,
-						Source:      v.Source,
-						Index:       idx + 1,
-						Protocol:    utils.GetProtocolFromLink(link),
-						Tags:        v.Tags,
-					})
-					links[i] = utils.RenameNodeLink(link, newName)
+				linkName := finalNodeName
+				if i < len(splitNames) && splitNames[i] != "" {
+					linkName = splitNames[i]
 				}
+				links[i] = utils.RenameNodeLink(link, linkName)
 			}
 			urls = append(urls, links...)
 			continue
-		//如果是订阅转换（以 http:// 或 https:// 开头）
-		case strings.HasPrefix(v.Link, "http://") || strings.HasPrefix(v.Link, "https://"):
-			resp, err := http.Get(v.Link)
+		//如果是订阅转换（以 http:// 或 https:// 开头，但不是HTTP/HTTPS代理节点）
+		case (strings.HasPrefix(v.Link, "http://") || strings.HasPrefix(v.Link, "https://")) && !protocol.IsHTTPLink(v.Link):
+			resp, err := getRemoteSubscription(c.Request.Context(), v.Link)
 			if err != nil {
 				utils.Error("Error getting link: %v", err)
 				return
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			body, _ := io.ReadAll(resp.Body)
 			nodes := utils.Base64Decode(string(body))
 			links := strings.Split(nodes, "\n")
@@ -553,9 +904,9 @@ func GetSurge(c *gin.Context) {
 	}
 
 	var configs protocol.OutputConfig
-	err = json.Unmarshal([]byte(sub.Config), &configs)
+	err := json.Unmarshal([]byte(sub.Config), &configs)
 	if err != nil {
-		c.Writer.WriteString("配置读取错误")
+		_, _ = c.Writer.WriteString("配置读取错误")
 		return
 	}
 
@@ -567,24 +918,34 @@ func GetSurge(c *gin.Context) {
 	// log.Println("surge路径:", configs)
 	DecodeClash, err := protocol.EncodeSurge(urls, configs)
 	if err != nil {
-		c.Writer.WriteString(err.Error())
+		_, _ = c.Writer.WriteString(err.Error())
 		return
 	}
-	c.Set("subname", SunName)
-	filename := fmt.Sprintf("%s.conf", SunName)
-	encodedFilename := url.QueryEscape(filename)
-	c.Writer.Header().Set("Content-Disposition", "inline; filename*=utf-8''"+encodedFilename)
-	c.Writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
-
 	host := c.Request.Host
 	url := c.Request.URL.String()
 	// 如果包含头部更新信息
 	if strings.Contains(DecodeClash, "#!MANAGED-CONFIG") {
-		c.Writer.WriteString(DecodeClash)
+		DecodeClash = withSurgeManagedConfigInterval(DecodeClash, resolveSubscriptionUpdateIntervalSeconds(sub.UpdateInterval))
+		_, _ = c.Writer.WriteString(DecodeClash)
 		return
 	}
+	var domain string
+	if c.Request.TLS != nil {
+		domain = "https://" + host
+	} else {
+		domain = "http://" + host
+	}
+	proto := c.Request.Header.Get("X-Forwarded-Proto")
+	if proto != "" {
+		domain = proto + "://" + host
+	}
+
+	systemDomain, _ := models.GetSetting("system_domain")
+	if systemDomain != "" {
+		domain = systemDomain
+	}
 	// 否则就插入头部更新信息
-	interval := fmt.Sprintf("#!MANAGED-CONFIG %s interval=86400 strict=false", host+url)
+	interval := fmt.Sprintf("#!MANAGED-CONFIG %s interval=%d strict=false", domain+url, resolveSubscriptionUpdateIntervalSeconds(sub.UpdateInterval))
 	// 执行脚本
 	for _, script := range sub.ScriptsWithSort {
 		res, err := utils.RunScript(script.Content, DecodeClash, "surge")
@@ -594,7 +955,7 @@ func GetSurge(c *gin.Context) {
 		}
 		DecodeClash = res
 	}
-	c.Writer.WriteString(string(interval + "\n" + DecodeClash))
+	_, _ = c.Writer.WriteString(interval + "\n" + DecodeClash)
 }
 
 // getSubscriptionUsage 计算订阅的流量使用情况

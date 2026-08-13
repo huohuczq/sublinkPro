@@ -2,6 +2,11 @@ package dto
 
 import "time"
 
+type AirportRequestHeader struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 // 订阅节点排序请求体结构
 type SubcriptionNodeSortUpdate struct {
 	ID       int            `json:"ID" binding:"required"`
@@ -9,10 +14,11 @@ type SubcriptionNodeSortUpdate struct {
 }
 
 type NodeSortItem struct {
-	ID      int    `json:"ID"` // 节点ID（非分组时必需）
-	Name    string `json:"Name"`
-	Sort    int    `json:"Sort"`
-	IsGroup *bool  `json:"IsGroup"` // 标识是否为分组，使用指针以区分false和未设置
+	ID        int    `json:"ID"`
+	Name      string `json:"Name"`
+	Sort      int    `json:"Sort"`
+	IsGroup   *bool  `json:"IsGroup"`
+	IsAirport *bool  `json:"IsAirport"`
 }
 
 // UserAccessKey 用户访问密钥请求体结构
@@ -24,19 +30,23 @@ type UserAccessKey struct {
 
 // AirportRequest 机场添加/更新请求体结构
 type AirportRequest struct {
-	ID                int    `json:"id"`
-	Name              string `json:"name" binding:"required"`
-	URL               string `json:"url" binding:"required,url"`
-	CronExpr          string `json:"cronExpr" binding:"required"`
-	Enabled           bool   `json:"enabled"`
-	Group             string `json:"group"`
-	DownloadWithProxy bool   `json:"downloadWithProxy"`
-	ProxyLink         string `json:"proxyLink"`
-	UserAgent         string `json:"userAgent"`
-	FetchUsageInfo    bool   `json:"fetchUsageInfo"` // 是否获取用量信息
-	SkipTLSVerify     bool   `json:"skipTLSVerify"`  // 是否跳过TLS证书验证
-	Remark            string `json:"remark"`         // 备注信息
-	Logo              string `json:"logo"`           // Logo配置
+	ID                           int                    `json:"id"`
+	Name                         string                 `json:"name" binding:"required"`
+	URL                          string                 `json:"url" binding:"required,url"`
+	CronExpr                     string                 `json:"cronExpr" binding:"required"`
+	Enabled                      bool                   `json:"enabled"`
+	Group                        string                 `json:"group"`
+	DownloadWithProxy            bool                   `json:"downloadWithProxy"`
+	ProxyLink                    string                 `json:"proxyLink"`
+	UserAgent                    string                 `json:"userAgent"`
+	RequestHeaders               []AirportRequestHeader `json:"requestHeaders"`
+	FetchUsageInfo               bool                   `json:"fetchUsageInfo"`               // 是否获取用量信息
+	SkipTLSVerify                bool                   `json:"skipTLSVerify"`                // 是否跳过TLS证书验证
+	UpdateAfterDetect            bool                   `json:"updateAfterDetect"`            // 更新后是否自动执行节点检测
+	UpdateAfterDetectProfileID   int                    `json:"updateAfterDetectProfileId"`   // 更新后检测使用的节点检测策略ID
+	UpdateAfterDetectChangedOnly bool                   `json:"updateAfterDetectChangedOnly"` // 更新后仅检测变化/新增节点
+	Remark                       string                 `json:"remark"`                       // 备注信息
+	Logo                         string                 `json:"logo"`                         // Logo配置
 	// 节点过滤规则（拉取时生效）
 	NodeNameWhitelist string `json:"nodeNameWhitelist"` // 节点名称白名单 (JSON数组)
 	NodeNameBlacklist string `json:"nodeNameBlacklist"` // 节点名称黑名单 (JSON数组)
@@ -47,8 +57,26 @@ type AirportRequest struct {
 	// 去重规则
 	DeduplicationRule string `json:"deduplicationRule"` // 去重规则配置(JSON)
 	// 节点名称唯一化
-	NodeNameUniquify bool   `json:"nodeNameUniquify"` // 是否开启节点名称唯一化
-	NodeNamePrefix   string `json:"nodeNamePrefix"`   // 自定义名称前缀（可选）
+	NodeNameUniquify      bool   `json:"nodeNameUniquify"`      // 是否开启节点名称唯一化
+	NodeNamePrefix        string `json:"nodeNamePrefix"`        // 自定义名称前缀（可选）
+	NodeNameIntraUniquify bool   `json:"nodeNameIntraUniquify"` // 是否开启机场内节点名称唯一化
+	// 国家自动填充（拉取时生效）
+	AutoFillCountry         bool `json:"autoFillCountry"`         // 新节点自动填充国家
+	BackfillExistingCountry bool `json:"backfillExistingCountry"` // 回填现存节点国家
+}
+
+// AirportBatchUpdateRequest 机场批量更新请求体结构
+type AirportBatchUpdateRequest struct {
+	IDs           []int  `json:"ids" binding:"required"`
+	ApplyGroup    bool   `json:"applyGroup"`
+	Group         string `json:"group"`
+	ApplySchedule bool   `json:"applySchedule"`
+	CronExpr      string `json:"cronExpr"`
+}
+
+// AirportPullAllRequest 机场批量拉取请求体结构（可选）
+type AirportPullAllRequest struct {
+	IDs []int `json:"ids"` // 可选：要拉取的机场ID列表，为空时拉取所有已启用的机场
 }
 
 // BatchSortRequest 批量排序请求

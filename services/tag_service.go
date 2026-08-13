@@ -3,7 +3,7 @@ package services
 import (
 	"fmt"
 	"sublink/models"
-	"sublink/services/sse"
+	"sublink/services/notifications"
 	"sublink/utils"
 )
 
@@ -83,7 +83,7 @@ func ApplyAutoTagRules(nodes []models.Node, triggerType string) {
 
 		// 更新进度（仅SSE广播，不写数据库）
 		if taskID != "" {
-			tm.UpdateProgress(taskID, processedCount, rule.Name, map[string]interface{}{
+			_ = tm.UpdateProgress(taskID, processedCount, rule.Name, map[string]any{
 				"matched": len(matchedNodeIDs),
 				"removed": len(unmatchedNodeIDs),
 			})
@@ -93,7 +93,7 @@ func ApplyAutoTagRules(nodes []models.Node, triggerType string) {
 	// 完成任务
 	if taskID != "" {
 		message := fmt.Sprintf("自动标签完成: 标记 %d 个节点, 移除 %d 个标签", taggedCount, removedCount)
-		tm.CompleteTask(taskID, message, map[string]interface{}{
+		_ = tm.CompleteTask(taskID, message, map[string]any{
 			"taggedCount":  taggedCount,
 			"removedCount": removedCount,
 			"totalNodes":   len(nodes),
@@ -104,11 +104,10 @@ func ApplyAutoTagRules(nodes []models.Node, triggerType string) {
 	if taggedCount > 0 || removedCount > 0 {
 		utils.Info("自动标签规则应用完成: 共标记 %d 个节点, 移除 %d 个标签", taggedCount, removedCount)
 		// 广播事件
-		sse.GetSSEBroker().BroadcastEvent("task_update", sse.NotificationPayload{
-			Event:   "auto_tag",
+		notifications.Publish("task.auto_tag_completed", notifications.Payload{
 			Title:   "自动标签完成",
 			Message: fmt.Sprintf("自动标签规则【%s】应用完成，执行规则【%s】: 共标记 %d 个节点", triggerType, ruleNames, taggedCount),
-			Data: map[string]interface{}{
+			Data: map[string]any{
 				"status":       "success",
 				"error":        fmt.Sprintf("自动标签规则【%s】应用完成: 共标记 %d 个节点", triggerType, taggedCount),
 				"triggerType":  triggerType,
@@ -151,7 +150,7 @@ func TriggerTagRule(ruleID int) error {
 	conditions, err := models.ParseConditions(rule.Conditions)
 	if err != nil {
 		// 使用 TaskManager 报告失败
-		tm.FailTask(taskID, fmt.Sprintf("规则条件解析失败: %v", err))
+		_ = tm.FailTask(taskID, fmt.Sprintf("规则条件解析失败: %v", err))
 		return err
 	}
 
@@ -175,7 +174,7 @@ func TriggerTagRule(ruleID int) error {
 
 		// 更新进度（TaskManager 内置节流策略）- 基于内存计数，保持实时性
 		currentProgress := i + 1
-		tm.UpdateProgress(taskID, currentProgress, n.Name, map[string]interface{}{
+		_ = tm.UpdateProgress(taskID, currentProgress, n.Name, map[string]any{
 			"status":  resultStatus,
 			"matched": matched,
 		})
@@ -204,18 +203,17 @@ func TriggerTagRule(ruleID int) error {
 	}
 
 	// 使用 TaskManager 完成任务
-	tm.CompleteTask(taskID, fmt.Sprintf("规则执行完成: 匹配 %d 个节点, 移除 %d 个节点标签", matchedCount, removedCount), map[string]interface{}{
+	_ = tm.CompleteTask(taskID, fmt.Sprintf("规则执行完成: 匹配 %d 个节点, 移除 %d 个节点标签", matchedCount, removedCount), map[string]any{
 		"matchedCount": matchedCount,
 		"removedCount": removedCount,
 		"totalCount":   totalNodes,
 	})
 
 	// 广播通知消息，让用户在通知中心看到完成通知
-	sse.GetSSEBroker().BroadcastEvent("task_update", sse.NotificationPayload{
-		Event:   "tag_rule",
+	notifications.Publish("task.tag_rule_completed", notifications.Payload{
 		Title:   "标签规则执行完成",
 		Message: fmt.Sprintf("规则【%s】执行完成: 匹配 %d 个节点, 移除 %d 个节点标签", rule.Name, matchedCount, removedCount),
-		Data: map[string]interface{}{
+		Data: map[string]any{
 			"status":       "success",
 			"matchedCount": matchedCount,
 			"removedCount": removedCount,

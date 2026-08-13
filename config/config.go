@@ -29,6 +29,15 @@ const (
 	DefaultCaptchaMode      = CaptchaModeTraditional // 默认传统验证码
 )
 
+var DefaultTrustedProxies = []string{
+	"127.0.0.1",
+	"::1",
+	"10.0.0.0/8",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+	"100.64.0.0/10",
+}
+
 // 验证码模式常量
 const (
 	CaptchaModeDisabled    = 1 // 关闭验证码
@@ -38,27 +47,31 @@ const (
 
 // AppConfig 应用配置结构
 type AppConfig struct {
-	Port               int    `yaml:"port"`                 // 服务端口
-	JwtSecret          string `yaml:"jwt_secret"`           // JWT密钥
-	APIEncryptionKey   string `yaml:"api_encryption_key"`   // API加密密钥
-	ExpireDays         int    `yaml:"expire_days"`          // Token过期天数
-	LoginFailCount     int    `yaml:"login_fail_count"`     // 登录失败次数限制
-	LoginFailWindow    int    `yaml:"login_fail_window"`    // 登录失败窗口时间(分钟)
-	LoginBanDuration   int    `yaml:"login_ban_duration"`   // 登录失败封禁时间(分钟)
-	DBPath             string `yaml:"db_path"`              // 数据库目录
-	LogPath            string `yaml:"log_path"`             // 日志目录
-	LogLevel           string `yaml:"log_level"`            // 日志等级 (debug/info/warn/error/fatal)
-	GeoIPPath          string `yaml:"geoip_path"`           // GeoIP数据库路径
-	CaptchaMode        int    `yaml:"captcha_mode"`         // 验证码模式 (1=关闭, 2=传统, 3=Turnstile)
-	TurnstileSiteKey   string `yaml:"turnstile_site_key"`   // Cloudflare Turnstile Site Key
-	TurnstileSecretKey string `yaml:"turnstile_secret_key"` // Cloudflare Turnstile Secret Key
-	TurnstileProxyLink string `yaml:"turnstile_proxy_link"` // Turnstile 验证代理链接（mihomo 格式）
-	WebBasePath        string `yaml:"web_base_path"`        // 前端基础路径（用于隐藏站点入口）
+	Port               int      `yaml:"port"`                 // 服务端口
+	JwtSecret          string   `yaml:"jwt_secret"`           // JWT密钥
+	APIEncryptionKey   string   `yaml:"api_encryption_key"`   // API加密密钥
+	ExpireDays         int      `yaml:"expire_days"`          // Token过期天数
+	LoginFailCount     int      `yaml:"login_fail_count"`     // 登录失败次数限制
+	LoginFailWindow    int      `yaml:"login_fail_window"`    // 登录失败窗口时间(分钟)
+	LoginBanDuration   int      `yaml:"login_ban_duration"`   // 登录失败封禁时间(分钟)
+	DSN                string   `yaml:"dsn"`                  // 数据库 DSN（支持 sqlite/mysql/postgres）
+	DBPath             string   `yaml:"db_path"`              // 本地数据目录 / SQLite 默认数据库目录
+	LogPath            string   `yaml:"log_path"`             // 日志目录
+	LogLevel           string   `yaml:"log_level"`            // 日志等级 (debug/info/warn/error/fatal)
+	GeoIPPath          string   `yaml:"geoip_path"`           // GeoIP数据库路径
+	CaptchaMode        int      `yaml:"captcha_mode"`         // 验证码模式 (1=关闭, 2=传统, 3=Turnstile)
+	TurnstileSiteKey   string   `yaml:"turnstile_site_key"`   // Cloudflare Turnstile Site Key
+	TurnstileSecretKey string   `yaml:"turnstile_secret_key"` // Cloudflare Turnstile Secret Key
+	TurnstileProxyLink string   `yaml:"turnstile_proxy_link"` // Turnstile 验证代理链接（mihomo 格式）
+	WebBasePath        string   `yaml:"web_base_path"`        // 前端基础路径（用于隐藏站点入口）
+	TrustedProxies     []string `yaml:"trusted_proxies"`      // 可信反向代理列表（支持 IP/CIDR）
+	MFAResetSecret     string   `yaml:"-"`
 }
 
 // CommandLineConfig 命令行配置（仅存储用户指定的值）
 type CommandLineConfig struct {
 	Port       int
+	DSN        string
 	DBPath     string
 	LogPath    string
 	LogLevel   string
@@ -71,7 +84,6 @@ var (
 	configMutex      sync.RWMutex                  // 读写锁保护配置
 	secretGetterFunc func(key string) string       // 从数据库获取敏感配置的函数
 	secretSetterFunc func(key, value string) error // 向数据库写入敏感配置的函数
-	initialized      bool
 )
 
 // SetCommandLineConfig 设置命令行配置（在 main 函数中调用）
@@ -90,11 +102,15 @@ func SetSecretAccessors(getter func(key string) string, setter func(key, value s
 	secretSetterFunc = setter
 }
 
-// GetDBPath 获取数据库路径（在初始化前可用）
+// GetDBPath 获取本地数据目录 / SQLite 默认数据库目录（在初始化前可用）
 func GetDBPath() string {
 	configMutex.RLock()
 	defer configMutex.RUnlock()
 
+	// 已加载配置时，直接使用最终配置值
+	if globalConfig != nil && globalConfig.DBPath != "" {
+		return globalConfig.DBPath
+	}
 	// 命令行参数优先
 	if cmdConfig != nil && cmdConfig.DBPath != "" {
 		return cmdConfig.DBPath
@@ -112,6 +128,10 @@ func GetLogPath() string {
 	configMutex.RLock()
 	defer configMutex.RUnlock()
 
+	// 已加载配置时，直接使用最终配置值
+	if globalConfig != nil && globalConfig.LogPath != "" {
+		return globalConfig.LogPath
+	}
 	// 命令行参数优先
 	if cmdConfig != nil && cmdConfig.LogPath != "" {
 		return cmdConfig.LogPath
@@ -130,8 +150,13 @@ func GetGeoIPPath() string {
 	defer configMutex.RUnlock()
 
 	// 如果已加载配置，从配置中获取
-	if globalConfig != nil && globalConfig.GeoIPPath != "" {
-		return globalConfig.GeoIPPath
+	if globalConfig != nil {
+		if globalConfig.GeoIPPath != "" {
+			return globalConfig.GeoIPPath
+		}
+		if globalConfig.DBPath != "" {
+			return globalConfig.DBPath + "/GeoLite2-City.mmdb"
+		}
 	}
 	// 命令行参数优先（暂不支持命令行设置 GeoIPPath）
 	// 环境变量次之
@@ -164,6 +189,23 @@ func GetConfigFilePath() string {
 	return dbPath + "/" + configFile
 }
 
+// GetDSN 获取数据库 DSN（在基础配置加载后可用）
+func GetDSN() string {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+
+	if globalConfig != nil && globalConfig.DSN != "" {
+		return globalConfig.DSN
+	}
+	if cmdConfig != nil && cmdConfig.DSN != "" {
+		return cmdConfig.DSN
+	}
+	if envDSN := os.Getenv(envPrefix + "DSN"); envDSN != "" {
+		return envDSN
+	}
+	return ""
+}
+
 // getDBPathInternal 内部获取数据库路径（不加锁）
 func getDBPathInternal() string {
 	configMutex.RLock()
@@ -189,28 +231,32 @@ func Load() *AppConfig {
 	configMutex.Lock()
 	defer configMutex.Unlock()
 
-	cfg := &AppConfig{}
-
-	// 第一步：应用默认值
-	applyDefaults(cfg)
-
-	// 第二步：从配置文件加载
-	loadFromFileInternal(cfg, configPath)
-
-	// 第三步：从环境变量加载（覆盖配置文件）
-	loadFromEnvInternal(cfg)
-
-	// 第四步：从命令行加载（覆盖环境变量）
-	loadFromCmdLineInternal(cfg)
+	cfg := buildBaseConfigInternal(configPath)
 
 	// 第五步：处理敏感配置（JWT Secret、API加密密钥）
 	handleSecretsInternal(cfg)
 
 	globalConfig = cfg
-	initialized = true
 
 	log.Printf("配置加载完成: Port=%d, ExpireDays=%d, DBPath=%s, LogPath=%s",
 		cfg.Port, cfg.ExpireDays, cfg.DBPath, cfg.LogPath)
+
+	return cfg
+}
+
+// LoadBootstrap 加载数据库初始化前需要的基础配置
+// 仅应用 默认值/配置文件/环境变量/命令行，不访问数据库中的敏感配置。
+func LoadBootstrap() *AppConfig {
+	configPath := GetConfigFilePath()
+
+	configMutex.Lock()
+	defer configMutex.Unlock()
+
+	cfg := buildBaseConfigInternal(configPath)
+	globalConfig = cfg
+
+	log.Printf("基础配置加载完成: Port=%d, DBPath=%s, LogPath=%s, DSN=%t",
+		cfg.Port, cfg.DBPath, cfg.LogPath, cfg.DSN != "")
 
 	return cfg
 }
@@ -255,6 +301,24 @@ func GetAPIEncryptionKey() string {
 	// 如果配置尚未加载，尝试从环境变量获取
 	if key := os.Getenv(envPrefix + "API_ENCRYPTION_KEY"); key != "" {
 		return key
+	}
+	if secretGetterFunc != nil {
+		if key := secretGetterFunc("api_encryption_key"); key != "" {
+			return key
+		}
+	}
+	return ""
+}
+
+func GetMFAResetSecret() string {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+
+	if secret := os.Getenv(envPrefix + "MFA_RESET_SECRET"); secret != "" {
+		return secret
+	}
+	if globalConfig != nil && globalConfig.MFAResetSecret != "" {
+		return globalConfig.MFAResetSecret
 	}
 	return ""
 }
@@ -374,12 +438,25 @@ func applyDefaults(cfg *AppConfig) {
 	cfg.LoginFailCount = DefaultLoginFailCount
 	cfg.LoginFailWindow = DefaultLoginFailWindow
 	cfg.LoginBanDuration = DefaultLoginBanDuration
+	cfg.DSN = ""
 	cfg.DBPath = DefaultDBPath
 	cfg.LogPath = DefaultLogPath
 	cfg.LogLevel = DefaultLogLevel
 	cfg.GeoIPPath = "" // 默认为空，运行时通过 GetGeoIPPath() 计算
 	cfg.CaptchaMode = DefaultCaptchaMode
 	cfg.WebBasePath = "" // 默认为空，表示根路径
+	cfg.TrustedProxies = append([]string(nil), DefaultTrustedProxies...)
+	cfg.MFAResetSecret = ""
+}
+
+// buildBaseConfigInternal 构建不依赖数据库的基础配置
+func buildBaseConfigInternal(configPath string) *AppConfig {
+	cfg := &AppConfig{}
+	applyDefaults(cfg)
+	loadFromFileInternal(cfg, configPath)
+	loadFromEnvInternal(cfg)
+	loadFromCmdLineInternal(cfg)
+	return cfg
 }
 
 // loadFromFileInternal 从配置文件加载（内部使用，不获取锁）
@@ -416,6 +493,9 @@ func loadFromFileInternal(cfg *AppConfig, configPath string) {
 	if fileCfg.LoginBanDuration != 0 {
 		cfg.LoginBanDuration = fileCfg.LoginBanDuration
 	}
+	if fileCfg.DSN != "" {
+		cfg.DSN = fileCfg.DSN
+	}
 	if fileCfg.DBPath != "" {
 		cfg.DBPath = fileCfg.DBPath
 	}
@@ -424,6 +504,9 @@ func loadFromFileInternal(cfg *AppConfig, configPath string) {
 	}
 	if fileCfg.LogLevel != "" {
 		cfg.LogLevel = fileCfg.LogLevel
+	}
+	if fileCfg.GeoIPPath != "" {
+		cfg.GeoIPPath = fileCfg.GeoIPPath
 	}
 	// 验证码配置
 	if fileCfg.CaptchaMode != 0 {
@@ -435,6 +518,9 @@ func loadFromFileInternal(cfg *AppConfig, configPath string) {
 	if fileCfg.TurnstileSecretKey != "" {
 		cfg.TurnstileSecretKey = fileCfg.TurnstileSecretKey
 	}
+	if fileCfg.TurnstileProxyLink != "" {
+		cfg.TurnstileProxyLink = fileCfg.TurnstileProxyLink
+	}
 	// 敏感配置也从文件读取（用于迁移）
 	if fileCfg.JwtSecret != "" {
 		cfg.JwtSecret = fileCfg.JwtSecret
@@ -445,6 +531,9 @@ func loadFromFileInternal(cfg *AppConfig, configPath string) {
 	// 站点隐藏配置
 	if fileCfg.WebBasePath != "" {
 		cfg.WebBasePath = normalizeBasePath(fileCfg.WebBasePath)
+	}
+	if fileCfg.TrustedProxies != nil {
+		cfg.TrustedProxies = normalizeTrustedProxies(fileCfg.TrustedProxies)
 	}
 }
 
@@ -475,6 +564,9 @@ func loadFromEnvInternal(cfg *AppConfig) {
 			cfg.LoginBanDuration = d
 		}
 	}
+	if dsn := os.Getenv(envPrefix + "DSN"); dsn != "" {
+		cfg.DSN = dsn
+	}
 	if dbPath := os.Getenv(envPrefix + "DB_PATH"); dbPath != "" {
 		cfg.DBPath = dbPath
 	}
@@ -493,6 +585,9 @@ func loadFromEnvInternal(cfg *AppConfig) {
 	}
 	if key := os.Getenv(envPrefix + "API_ENCRYPTION_KEY"); key != "" {
 		cfg.APIEncryptionKey = key
+	}
+	if secret := os.Getenv(envPrefix + "MFA_RESET_SECRET"); secret != "" {
+		cfg.MFAResetSecret = secret
 	}
 	// 验证码配置
 	if mode := os.Getenv(envPrefix + "CAPTCHA_MODE"); mode != "" {
@@ -513,6 +608,9 @@ func loadFromEnvInternal(cfg *AppConfig) {
 	if webBasePath := os.Getenv(envPrefix + "WEB_BASE_PATH"); webBasePath != "" {
 		cfg.WebBasePath = normalizeBasePath(webBasePath)
 	}
+	if trustedProxies, ok := os.LookupEnv(envPrefix + "TRUSTED_PROXIES"); ok {
+		cfg.TrustedProxies = normalizeTrustedProxies(strings.Split(trustedProxies, ","))
+	}
 }
 
 // loadFromCmdLineInternal 从命令行参数加载（内部使用，不获取锁）
@@ -522,6 +620,9 @@ func loadFromCmdLineInternal(cfg *AppConfig) {
 	}
 	if cmdConfig.Port > 0 {
 		cfg.Port = cmdConfig.Port
+	}
+	if cmdConfig.DSN != "" {
+		cfg.DSN = cmdConfig.DSN
 	}
 	if cmdConfig.DBPath != "" {
 		cfg.DBPath = cmdConfig.DBPath
@@ -664,17 +765,28 @@ func SaveToFile() error {
 
 	// 创建用于保存的配置（不包含敏感信息）
 	saveCfg := &AppConfig{
-		Port:             cfg.Port,
-		ExpireDays:       cfg.ExpireDays,
-		LoginFailCount:   cfg.LoginFailCount,
-		LoginFailWindow:  cfg.LoginFailWindow,
-		LoginBanDuration: cfg.LoginBanDuration,
+		Port:               cfg.Port,
+		ExpireDays:         cfg.ExpireDays,
+		LoginFailCount:     cfg.LoginFailCount,
+		LoginFailWindow:    cfg.LoginFailWindow,
+		LoginBanDuration:   cfg.LoginBanDuration,
+		DSN:                cfg.DSN,
+		DBPath:             cfg.DBPath,
+		LogPath:            cfg.LogPath,
+		LogLevel:           cfg.LogLevel,
+		GeoIPPath:          cfg.GeoIPPath,
+		CaptchaMode:        cfg.CaptchaMode,
+		TurnstileSiteKey:   cfg.TurnstileSiteKey,
+		TurnstileProxyLink: cfg.TurnstileProxyLink,
+		WebBasePath:        cfg.WebBasePath,
+		TrustedProxies:     append([]string(nil), cfg.TrustedProxies...),
 	}
 
 	// 生成 YAML 内容（包含注释）
 	comment := `# SublinkPro 配置文件
 # 敏感配置（jwt_secret, api_encryption_key）已存储在数据库中
 # 如需覆盖，请使用环境变量 SUBLINK_JWT_SECRET 和 SUBLINK_API_ENCRYPTION_KEY
+# 可选受限应急配置：仅支持环境变量 SUBLINK_MFA_RESET_SECRET，不会写入配置文件
 `
 	data, err := yaml.Marshal(saveCfg)
 	if err != nil {
@@ -682,6 +794,27 @@ func SaveToFile() error {
 	}
 
 	return os.WriteFile(configPath, []byte(comment+string(data)), 0644)
+}
+
+func normalizeTrustedProxies(values []string) []string {
+	if values == nil {
+		return nil
+	}
+
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 // MigrateFromOldConfig 从旧配置迁移敏感数据到数据库
@@ -726,7 +859,7 @@ func MigrateFromOldConfig() bool {
 }
 
 // GetEnabledFeatures 获取启用的功能列表
-// 从环境变量 SUBLINK_FEATURE 读取，格式为逗号分隔的功能名（如 SubNodePreview,FeatureA,FeatureB）
+// 从环境变量 SUBLINK_FEATURE 读取，格式为逗号分隔的功能名（如 FeatureA,FeatureB）
 func GetEnabledFeatures() []string {
 	featureStr := os.Getenv(envPrefix + "FEATURE")
 	if featureStr == "" {

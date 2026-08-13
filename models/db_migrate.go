@@ -3,12 +3,15 @@ package models
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sublink/database"
 	"sublink/node/protocol"
 	"sublink/utils"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -20,133 +23,405 @@ func md5Hash(src string) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
+func legacyUserAISettingsShouldMigrate() bool {
+	enabled, _ := GetSetting(systemAIEnabledKey)
+	baseURL, _ := GetSetting(systemAIBaseURLKey)
+	model, _ := GetSetting(systemAIModelKey)
+	apiKey, _ := GetSetting(systemAIAPIKeyKey)
+
+	return strings.TrimSpace(enabled) == "" &&
+		strings.TrimSpace(baseURL) == "" &&
+		strings.TrimSpace(model) == "" &&
+		strings.TrimSpace(apiKey) == ""
+}
+
+func normalizeHostnamesAndDeduplicate(db *gorm.DB) error {
+	if db == nil || !db.Migrator().HasTable(&Host{}) {
+		return nil
+	}
+
+	return db.Transaction(func(tx *gorm.DB) error {
+		var hosts []Host
+		if err := tx.Order("id ASC").Find(&hosts).Error; err != nil {
+			return fmt.Errorf("查询 Host 失败: %w", err)
+		}
+
+		seen := make(map[string]struct{}, len(hosts))
+		duplicateIDs := make([]int, 0)
+		hostsToUpdate := make([]Host, 0, len(hosts))
+		for _, host := range hosts {
+			originalHostname := host.Hostname
+			normalizedHostname := normalizeHostHostname(host.Hostname)
+			if normalizedHostname == "" {
+				duplicateIDs = append(duplicateIDs, host.ID)
+				continue
+			}
+			if _, exists := seen[normalizedHostname]; exists {
+				duplicateIDs = append(duplicateIDs, host.ID)
+				continue
+			}
+			seen[normalizedHostname] = struct{}{}
+			host.Hostname = normalizedHostname
+			if originalHostname != normalizedHostname {
+				hostsToUpdate = append(hostsToUpdate, host)
+			}
+		}
+
+		if len(duplicateIDs) > 0 {
+			if err := tx.Where("id IN ?", duplicateIDs).Delete(&Host{}).Error; err != nil {
+				return fmt.Errorf("删除重复 Host 失败: %w", err)
+			}
+		}
+
+		for _, host := range hostsToUpdate {
+			if err := tx.Model(&Host{}).Where("id = ?", host.ID).Update("hostname", host.Hostname).Error; err != nil {
+				return fmt.Errorf("更新 Host hostname 失败(id=%d): %w", host.ID, err)
+			}
+		}
+
+		return nil
+	})
+}
+
+func migrateLegacyUserAISettingsToSystemSettings() error {
+	if database.DB == nil || !legacyUserAISettingsShouldMigrate() {
+		return nil
+	}
+
+	var user User
+	if err := database.DB.Where("ai_enabled = ? OR ai_base_url <> '' OR ai_model <> '' OR ai_api_key_encrypted <> ''", true).
+		Order("ai_enabled DESC, id ASC").
+		First(&user).Error; err != nil {
+		return nil
+	}
+	if err := SetSetting(systemAIEnabledKey, strconv.FormatBool(user.AIEnabled)); err != nil {
+		return err
+	}
+	if err := SetSetting(systemAIBaseURLKey, strings.TrimSpace(user.AIBaseURL)); err != nil {
+		return err
+	}
+	if err := SetSetting(systemAIModelKey, strings.TrimSpace(user.AIModel)); err != nil {
+		return err
+	}
+	if err := SetSetting(systemAIAPIKeyKey, strings.TrimSpace(user.AIAPIKeyEncrypted)); err != nil {
+		return err
+	}
+	if err := SetSetting(systemAITemperatureKey, strconv.FormatFloat(user.AITemperature, 'f', -1, 64)); err != nil {
+		return err
+	}
+	if err := SetSetting(systemAIMaxTokensKey, strconv.Itoa(user.AIMaxTokens)); err != nil {
+		return err
+	}
+	if err := SetSetting(systemAIExtraHeadersKey, strings.TrimSpace(user.AIExtraHeaders)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func repairHTTPHTTPSNodeProtocolFromLink(db *gorm.DB) error {
+	type nodeProtocolRow struct {
+		ID       int
+		Link     string
+		Protocol string
+	}
+
+	return db.Transaction(func(tx *gorm.DB) error {
+		var nodes []nodeProtocolRow
+		if err := tx.Model(&Node{}).
+			Select("id", "link", "protocol").
+			Where("link LIKE ? OR link LIKE ?", "http://%", "https://%").
+			Find(&nodes).Error; err != nil {
+			return fmt.Errorf("查询 HTTP/HTTPS 节点失败: %w", err)
+		}
+
+		protoGroups := make(map[string][]int)
+		for _, node := range nodes {
+			wantProtocol := protocol.GetProtocolFromLink(node.Link)
+			if wantProtocol != "http" && wantProtocol != "https" {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(node.Protocol), wantProtocol) {
+				continue
+			}
+			protoGroups[wantProtocol] = append(protoGroups[wantProtocol], node.ID)
+		}
+
+		updatedCount := 0
+		for protoType, ids := range protoGroups {
+			if err := tx.Model(&Node{}).Where("id IN ?", ids).Update("protocol", protoType).Error; err != nil {
+				return fmt.Errorf("批量修复协议类型 %s 失败: %w", protoType, err)
+			}
+			updatedCount += len(ids)
+		}
+
+		if updatedCount > 0 {
+			utils.Info("已修复 %d 个 HTTP/HTTPS 节点协议字段", updatedCount)
+		}
+		return nil
+	})
+}
+
 // RunMigrations 执行所有数据库迁移
-// 此函数必须在 database.InitSqlite() 之后调用
-func RunMigrations() {
+// 此函数必须在 database.Init() 之后调用
+func RunMigrations() error {
 	db := database.DB
 	if db == nil {
-		utils.Error("数据库未初始化，无法执行迁移")
-		return
+		return fmt.Errorf("数据库未初始化，无法执行迁移")
 	}
 
 	// 检查是否已经初始化
 	if database.IsInitialized {
 		utils.Info("数据库已经初始化，无需重复初始化")
-		return
+		return nil
 	}
 
-	// 基础数据库初始化
-	if err := db.AutoMigrate(&User{}); err != nil {
-		utils.Error("基础数据表User迁移失败: %v", err)
-	} else {
-		utils.Info("数据表User创建成功")
+	baseTables := []struct {
+		name  string
+		model any
+	}{
+		{name: "User", model: &User{}},
+		{name: "MFALoginChallenge", model: &MFALoginChallenge{}},
+		{name: "Subcription", model: &Subcription{}},
+		{name: "Node", model: &Node{}},
+		{name: "SubLogs", model: &SubLogs{}},
+		{name: "AccessKey", model: &AccessKey{}},
+		{name: "SystemSetting", model: &SystemSetting{}},
+		{name: "Webhook", model: &Webhook{}},
+		{name: "Script", model: &Script{}},
+		{name: "SubcriptionGroup", model: &SubcriptionGroup{}},
+		{name: "SubcriptionAirport", model: &SubcriptionAirport{}},
+		{name: "SubcriptionScript", model: &SubcriptionScript{}},
+		{name: "Template", model: &Template{}},
+		{name: "Tag", model: &Tag{}},
+		{name: "TagRule", model: &TagRule{}},
+		{name: "Task", model: &Task{}},
+		{name: "IPInfo", model: &IPInfo{}},
+		{name: "Host", model: &Host{}},
+		{name: "SubscriptionShare", model: &SubscriptionShare{}},
+		{name: "SubscriptionChainRule", model: &SubscriptionChainRule{}},
+		{name: "Airport", model: &Airport{}},
+		{name: "GroupAirportSort", model: &GroupAirportSort{}},
+		{name: "NodeCheckProfile", model: &NodeCheckProfile{}},
+		{name: "CountryRule", model: &CountryRule{}},
 	}
-	if err := db.AutoMigrate(&Subcription{}); err != nil {
-		utils.Error("基础数据表Subcription迁移失败: %v", err)
-	} else {
-		utils.Info("数据表Subcription创建成功")
-	}
-	if err := db.AutoMigrate(&Node{}); err != nil {
-		utils.Error("基础数据表Node迁移失败: %v", err)
-	} else {
-		utils.Info("数据表Node创建成功")
-	}
-	if err := db.AutoMigrate(&SubLogs{}); err != nil {
-		utils.Error("基础数据表SubLogs迁移失败: %v", err)
-	} else {
-		utils.Info("数据表SubLogs创建成功")
-	}
-	if err := db.AutoMigrate(&AccessKey{}); err != nil {
-		utils.Error("基础数据表AccessKey迁移失败: %v", err)
-	} else {
-		utils.Info("数据表AccessKey创建成功")
-	}
-	//if err := db.AutoMigrate(&SubScheduler{}); err != nil {
-	//	utils.Error("基础数据表SubScheduler迁移失败: %v", err)
-	//} else {
-	//	utils.Info("数据表SubScheduler创建成功")
-	//}
-	if err := db.AutoMigrate(&SystemSetting{}); err != nil {
-		utils.Error("基础数据表SystemSetting迁移失败: %v", err)
-	} else {
-		utils.Info("数据表SystemSetting创建成功")
-	}
-	if err := db.AutoMigrate(&Script{}); err != nil {
-		utils.Error("基础数据表Script迁移失败: %v", err)
-	} else {
-		utils.Info("数据表Script创建成功")
-	}
-	if err := db.AutoMigrate(&SubcriptionGroup{}); err != nil {
-		utils.Error("基础数据表SubcriptionGroup迁移失败: %v", err)
-	} else {
-		utils.Info("数据表SubcriptionGroup创建成功")
-	}
-	/*
-		if err := db.AutoMigrate(&SubcriptionNode{}); err != nil {
-			utils.Error("基础数据表SubcriptionNode迁移失败: %v", err)
-		} else {
-			utils.Info("数据表SubcriptionNode创建成功")
+
+	for _, table := range baseTables {
+		if err := db.AutoMigrate(table.model); err != nil {
+			utils.Error("基础数据表%s迁移失败: %v", table.name, err)
+			return fmt.Errorf("基础数据表%s迁移失败: %w", table.name, err)
 		}
-	*/
-	if err := db.AutoMigrate(&SubcriptionScript{}); err != nil {
-		utils.Error("基础数据表SubcriptionScript迁移失败: %v", err)
-	} else {
-		utils.Info("数据表SubcriptionScript创建成功")
+		utils.Info("数据表%s创建成功", table.name)
 	}
-	if err := db.AutoMigrate(&Template{}); err != nil {
-		utils.Error("基础数据表Template迁移失败: %v", err)
-	} else {
-		utils.Info("数据表Template创建成功")
+
+	if err := database.RunCustomMigration("0027_add_user_pending_mfa_columns", func() error {
+		if !db.Migrator().HasColumn(&User{}, "totp_pending_recovery_codes") {
+			if err := db.Migrator().AddColumn(&User{}, "TOTPPendingRecoveryCodes"); err != nil {
+				return err
+			}
+		}
+		if result := db.Exec("UPDATE users SET totp_pending_recovery_codes = '[]' WHERE totp_pending_recovery_codes IS NULL OR totp_pending_recovery_codes = ''"); result.Error != nil {
+			return result.Error
+		}
+		return nil
+	}); err != nil {
+		utils.Error("执行迁移 0027_add_user_pending_mfa_columns 失败: %v", err)
 	}
-	if err := db.AutoMigrate(&Tag{}); err != nil {
-		utils.Error("基础数据表Tag迁移失败: %v", err)
-	} else {
-		utils.Info("数据表Tag创建成功")
+
+	if err := database.RunCustomMigration("0028_backfill_node_quality_status", func() error {
+		if !db.Migrator().HasColumn(&Node{}, "QualityStatus") {
+			if err := db.Migrator().AddColumn(&Node{}, "QualityStatus"); err != nil {
+				return err
+			}
+		}
+		if !db.Migrator().HasColumn(&Node{}, "QualityFamily") {
+			if err := db.Migrator().AddColumn(&Node{}, "QualityFamily"); err != nil {
+				return err
+			}
+		}
+
+		if err := db.Model(&Node{}).Where("quality_status IS NULL OR quality_status = ''").Updates(map[string]any{
+			"quality_status": gorm.Expr("CASE WHEN fraud_score >= 0 THEN 'success' ELSE 'untested' END"),
+			"quality_family": gorm.Expr("CASE WHEN landing_ip LIKE '%:%' THEN 'ipv6' WHEN landing_ip IS NOT NULL AND landing_ip != '' THEN 'ipv4' ELSE '' END"),
+		}).Error; err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		utils.Error("执行迁移 0028_backfill_node_quality_status 失败: %v", err)
 	}
-	if err := db.AutoMigrate(&TagRule{}); err != nil {
-		utils.Error("基础数据表TagRule迁移失败: %v", err)
-	} else {
-		utils.Info("数据表TagRule创建成功")
+
+	if err := database.RunCustomMigration("0029_add_user_ai_settings_columns", func() error {
+		return db.AutoMigrate(&User{})
+	}); err != nil {
+		utils.Error("执行迁移 0029_add_user_ai_settings_columns 失败: %v", err)
 	}
-	if err := db.AutoMigrate(&Task{}); err != nil {
-		utils.Error("基础数据表Task迁移失败: %v", err)
-	} else {
-		utils.Info("数据表Task创建成功")
+
+	if err := database.RunCustomMigration("0031_migrate_user_ai_settings_to_system_settings", func() error {
+		return migrateLegacyUserAISettingsToSystemSettings()
+	}); err != nil {
+		utils.Error("执行迁移 0031_migrate_user_ai_settings_to_system_settings 失败: %v", err)
 	}
-	if err := db.AutoMigrate(&IPInfo{}); err != nil {
-		utils.Error("基础数据表IPInfo迁移失败: %v", err)
-	} else {
-		utils.Info("数据表IPInfo创建成功")
+
+	if err := database.RunCustomMigration("0030_add_unlock_check_columns", func() error {
+		if err := db.AutoMigrate(&Node{}, &NodeCheckProfile{}); err != nil {
+			return err
+		}
+		if err := db.Model(&Node{}).Where("unlock_summary IS NULL").Update("unlock_summary", "").Error; err != nil {
+			return err
+		}
+		if err := db.Model(&NodeCheckProfile{}).Where("unlock_providers IS NULL").Update("unlock_providers", "").Error; err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		utils.Error("执行迁移 0030_add_unlock_check_columns 失败: %v", err)
 	}
-	if err := db.AutoMigrate(&RememberToken{}); err != nil {
-		utils.Error("基础数据表RememberToken迁移失败: %v", err)
-	} else {
-		utils.Info("数据表RememberToken创建成功")
+
+	if err := database.RunCustomMigration("0032_backfill_node_name_mode", func() error {
+		if !db.Migrator().HasColumn(&Node{}, "NameMode") {
+			if err := db.Migrator().AddColumn(&Node{}, "NameMode"); err != nil {
+				return err
+			}
+		}
+
+		result := db.Model(&Node{}).Where("1 = 1").Update("name_mode", gorm.Expr(
+			"CASE WHEN TRIM(COALESCE(name, '')) <> '' AND TRIM(COALESCE(link_name, '')) <> '' AND TRIM(name) <> TRIM(link_name) THEN ? ELSE ? END",
+			NodeNameModeRemark,
+			NodeNameModeLink,
+		))
+		if result.Error != nil {
+			return result.Error
+		}
+		utils.Info("已回填 %d 个节点的名称模式", result.RowsAffected)
+		return nil
+	}); err != nil {
+		utils.Error("执行迁移 0032_backfill_node_name_mode 失败: %v", err)
 	}
-	if err := db.AutoMigrate(&Host{}); err != nil {
-		utils.Error("基础数据表Host迁移失败: %v", err)
-	} else {
-		utils.Info("数据表Host创建成功")
+
+	if err := database.RunCustomMigration("0033_make_node_names_unique", func() error {
+		var nodes []Node
+		if err := db.Order("id ASC").Find(&nodes).Error; err != nil {
+			return err
+		}
+		reservedNames := make(map[string]bool, len(nodes))
+		updatedCount := 0
+		for _, node := range nodes {
+			currentName := strings.TrimSpace(node.Name)
+			if currentName == "" {
+				currentName = strings.TrimSpace(node.LinkName)
+			}
+			uniqueName := GenerateUniqueNodeNameWithSource(currentName, node.Source, node.ID, reservedNames)
+			if uniqueName == node.Name {
+				continue
+			}
+			if err := db.Model(&Node{}).Where("id = ?", node.ID).Update("name", uniqueName).Error; err != nil {
+				return err
+			}
+			updatedCount++
+		}
+		if updatedCount > 0 {
+			utils.Info("已为 %d 个重复节点备注追加编号", updatedCount)
+		}
+		return nil
+	}); err != nil {
+		utils.Error("执行迁移 0033_make_node_names_unique 失败: %v", err)
 	}
-	if err := db.AutoMigrate(&SubscriptionShare{}); err != nil {
-		utils.Error("基础数据表SubscriptionShare迁移失败: %v", err)
-	} else {
-		utils.Info("数据表SubscriptionShare创建成功")
+
+	// 0034_add_airport_country_fill_columns - 添加机场国家自动填充字段
+	if err := database.RunCustomMigration("0034_add_airport_country_fill_columns", func() error {
+		if !db.Migrator().HasColumn(&Airport{}, "AutoFillCountry") {
+			if err := db.Migrator().AddColumn(&Airport{}, "AutoFillCountry"); err != nil {
+				return err
+			}
+		}
+		if !db.Migrator().HasColumn(&Airport{}, "BackfillExistingCountry") {
+			if err := db.Migrator().AddColumn(&Airport{}, "BackfillExistingCountry"); err != nil {
+				return err
+			}
+		}
+		utils.Info("已添加机场国家自动填充字段")
+		return nil
+	}); err != nil {
+		utils.Error("执行迁移 0034_add_airport_country_fill_columns 失败: %v", err)
 	}
-	if err := db.AutoMigrate(&SubscriptionChainRule{}); err != nil {
-		utils.Error("基础数据表SubscriptionChainRule迁移失败: %v", err)
-	} else {
-		utils.Info("数据表SubscriptionChainRule创建成功")
+
+	// 0035_seed_default_country_rules - 添加默认国家规则
+	if err := database.RunCustomMigration("0035_seed_default_country_rules", func() error {
+		return seedDefaultCountryRules(db)
+	}); err != nil {
+		utils.Error("执行迁移 0035_seed_default_country_rules 失败: %v", err)
 	}
-	if err := db.AutoMigrate(&Airport{}); err != nil {
-		utils.Error("基础数据表Airport迁移失败: %v", err)
-	} else {
-		utils.Info("数据表Airport创建成功")
+
+	if err := database.RunCustomMigration("0036_repair_http_https_node_protocol", func() error {
+		return repairHTTPHTTPSNodeProtocolFromLink(db)
+	}); err != nil {
+		utils.Error("执行迁移 0036_repair_http_https_node_protocol 失败: %v", err)
 	}
-	if err := db.AutoMigrate(&NodeCheckProfile{}); err != nil {
-		utils.Error("基础数据表NodeCheckProfile迁移失败: %v", err)
-	} else {
-		utils.Info("数据表NodeCheckProfile创建成功")
+
+	if err := database.RunCustomMigration("0037_normalize_host_hostnames", func() error {
+		return normalizeHostnamesAndDeduplicate(db)
+	}); err != nil {
+		utils.Error("执行迁移 0037_normalize_host_hostnames 失败: %v", err)
+	}
+
+	if err := database.RunCustomMigration("0024_migrate_legacy_webhook_settings", func() error {
+		legacyURL, _ := GetSetting("webhook_url")
+		legacyMethod, _ := GetSetting("webhook_method")
+		legacyContentType, _ := GetSetting("webhook_content_type")
+		legacyHeaders, _ := GetSetting("webhook_headers")
+		legacyBody, _ := GetSetting("webhook_body")
+		legacyEnabled, _ := GetSetting("webhook_enabled")
+		legacyEventKeys, _ := GetSetting("webhook_event_keys")
+
+		if strings.TrimSpace(legacyURL) == "" && strings.TrimSpace(legacyHeaders) == "" && strings.TrimSpace(legacyBody) == "" {
+			return nil
+		}
+
+		var count int64
+		if err := db.Model(&Webhook{}).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return nil
+		}
+
+		method := strings.ToUpper(strings.TrimSpace(legacyMethod))
+		if method == "" {
+			method = "POST"
+		}
+		contentType := strings.TrimSpace(legacyContentType)
+		if contentType == "" {
+			contentType = "application/json"
+		}
+
+		config := Webhook{
+			Name:        "默认 Webhook",
+			URL:         strings.TrimSpace(legacyURL),
+			Method:      method,
+			ContentType: contentType,
+			Headers:     legacyHeaders,
+			Body:        legacyBody,
+			Enabled:     legacyEnabled == "true",
+			EventKeys:   legacyEventKeys,
+		}
+		return db.Create(&config).Error
+	}); err != nil {
+		utils.Error("执行迁移 0024_migrate_legacy_webhook_settings 失败: %v", err)
+	}
+
+	if err := database.RunCustomMigration("0025_drop_remember_tokens_table", func() error {
+		if !db.Migrator().HasTable("remember_tokens") {
+			return nil
+		}
+		return db.Migrator().DropTable("remember_tokens")
+	}); err != nil {
+		utils.Error("执行迁移 0025_drop_remember_tokens_table 失败: %v", err)
+	}
+
+	if err := database.RunCustomMigration("0026_add_user_totp_columns", func() error {
+		return db.AutoMigrate(&User{})
+	}); err != nil {
+		utils.Error("执行迁移 0026_add_user_totp_columns 失败: %v", err)
 	}
 
 	// 检查并删除 idx_name_id 索引
@@ -167,8 +442,16 @@ func RunMigrations() {
 
 	// 0008_node_created_at_fill - 补全空的 CreatedAt 字段
 	if err := database.RunCustomMigration("0008_node_created_at_fill", func() error {
-		// 查找所有 CreatedAt 为零值的节点并设置为当前时间
-		result := db.Exec("UPDATE nodes SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL OR created_at = '' OR created_at = '0001-01-01 00:00:00+00:00'")
+		// 兼容不同数据库方言，避免 timestamp 字段与空字符串比较时报错
+		query := db.Model(&Node{}).
+			Where("created_at IS NULL").
+			Or("created_at = ?", time.Time{}).
+			Or("created_at = ?", "0001-01-01 00:00:00+00:00")
+		if database.IsSQLite() {
+			query = query.Or("created_at = ?", "")
+		}
+
+		result := query.Update("created_at", gorm.Expr("CURRENT_TIMESTAMP"))
 		if result.Error != nil {
 			return result.Error
 		}
@@ -335,7 +618,11 @@ DIRECT = direct
 		// 检查 last_check 列是否存在
 		if db.Migrator().HasColumn(&Node{}, "last_check") {
 			// 将 last_check 数据复制到 latency_check_at 和 speed_check_at
-			result := db.Exec("UPDATE nodes SET latency_check_at = last_check, speed_check_at = last_check WHERE last_check IS NOT NULL AND last_check != ''")
+			condition := "last_check IS NOT NULL"
+			if database.IsSQLite() {
+				condition += " AND last_check != ''"
+			}
+			result := db.Exec("UPDATE nodes SET latency_check_at = last_check, speed_check_at = last_check WHERE " + condition)
 			if result.Error != nil {
 				utils.Error("迁移 last_check 数据失败: %v", result.Error)
 				return result.Error
@@ -343,7 +630,7 @@ DIRECT = direct
 			utils.Info("已将 %d 条 last_check 数据迁移到新字段", result.RowsAffected)
 
 			// 删除 last_check 列
-			if err := db.Exec("ALTER TABLE nodes DROP COLUMN last_check").Error; err != nil {
+			if err := db.Migrator().DropColumn("nodes", "last_check"); err != nil {
 				utils.Error("删除 last_check 列失败: %v", err)
 				// 不返回错误，因为某些数据库可能不支持 DROP COLUMN
 			} else {
@@ -423,74 +710,87 @@ DIRECT = direct
 
 		utils.Info("开始迁移 SubcriptionNode 表从 NodeName 到 NodeID...")
 
-		// 1. 备份原表 (如果存在先删除)
-		_ = db.Exec("DROP TABLE IF EXISTS subcription_nodes_backup")
-		if err := db.Exec("CREATE TABLE subcription_nodes_backup AS SELECT * FROM subcription_nodes").Error; err != nil {
-			utils.Warn("备份表创建失败: %v", err)
-			return fmt.Errorf("备份表失败: %w", err)
-		} else {
-			utils.Info("已创建备份表 subcription_nodes_backup")
+		type legacySubcriptionNode struct {
+			SubcriptionID int
+			NodeName      string
+			NodeID        int
+			Sort          int
 		}
 
-		// 2. 添加 node_id 列（如果不存在）
-		if !db.Migrator().HasColumn(&SubcriptionNode{}, "node_id") {
-			if err := db.Exec("ALTER TABLE subcription_nodes ADD COLUMN node_id INTEGER").Error; err != nil {
-				return fmt.Errorf("添加 node_id 列失败: %w", err)
+		var legacyRecords []legacySubcriptionNode
+		if err := db.Table("subcription_nodes").Find(&legacyRecords).Error; err != nil {
+			return fmt.Errorf("读取旧版 SubcriptionNode 数据失败: %w", err)
+		}
+
+		var nodes []struct {
+			ID   int
+			Name string
+		}
+		if err := db.Model(&Node{}).Select("id", "name").Find(&nodes).Error; err != nil {
+			return fmt.Errorf("读取节点名称映射失败: %w", err)
+		}
+
+		nodeNameToID := make(map[string]int, len(nodes))
+		for _, node := range nodes {
+			if node.Name == "" {
+				continue
+			}
+			if _, exists := nodeNameToID[node.Name]; !exists {
+				nodeNameToID[node.Name] = node.ID
 			}
 		}
 
-		// 3. 通过 JOIN 更新 node_id
-		result := db.Exec(`
-			UPDATE subcription_nodes 
-			SET node_id = (
-				SELECT nodes.id FROM nodes 
-				WHERE nodes.name = subcription_nodes.node_name
-				LIMIT 1
-			)
-			WHERE node_id IS NULL OR node_id = 0
-		`)
-		if result.Error != nil {
-			return fmt.Errorf("更新 node_id 失败: %w", result.Error)
-		}
-		utils.Info("已更新 %d 条记录的 node_id", result.RowsAffected)
+		convertedRecords := make([]SubcriptionNode, 0, len(legacyRecords))
+		seen := make(map[string]struct{}, len(legacyRecords))
+		skippedCount := 0
+		for _, legacy := range legacyRecords {
+			nodeID := legacy.NodeID
+			if nodeID <= 0 {
+				nodeID = nodeNameToID[legacy.NodeName]
+			}
+			if nodeID <= 0 {
+				skippedCount++
+				continue
+			}
 
-		// 4. 清理无效关联（node_name 对应的节点已不存在）
-		cleanResult := db.Exec("DELETE FROM subcription_nodes WHERE node_id IS NULL OR node_id = 0")
-		if cleanResult.Error != nil {
-			utils.Warn("清理无效关联失败: %v", cleanResult.Error)
-		} else if cleanResult.RowsAffected > 0 {
-			utils.Info("已清理 %d 条无效关联（节点已删除）", cleanResult.RowsAffected)
-		}
+			key := fmt.Sprintf("%d:%d", legacy.SubcriptionID, nodeID)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
 
-		// 5. 重建表（SQLite 不支持 DROP COLUMN）
-		if err := db.Exec(`
-			CREATE TABLE subcription_nodes_new (
-				subcription_id INTEGER NOT NULL,
-				node_id INTEGER NOT NULL,
-				sort INTEGER DEFAULT 0,
-				PRIMARY KEY (subcription_id, node_id)
-			)
-		`).Error; err != nil {
-			return fmt.Errorf("创建新表失败: %w", err)
+			convertedRecords = append(convertedRecords, SubcriptionNode{
+				SubcriptionID: legacy.SubcriptionID,
+				NodeID:        nodeID,
+				Sort:          legacy.Sort,
+			})
 		}
 
-		if err := db.Exec(`
-			INSERT INTO subcription_nodes_new (subcription_id, node_id, sort)
-			SELECT subcription_id, node_id, sort FROM subcription_nodes
-			WHERE node_id IS NOT NULL AND node_id > 0
-		`).Error; err != nil {
-			return fmt.Errorf("迁移数据失败: %w", err)
+		if db.Migrator().HasTable("subcription_nodes_backup") {
+			if err := db.Migrator().DropTable("subcription_nodes_backup"); err != nil {
+				return fmt.Errorf("删除旧备份表失败: %w", err)
+			}
 		}
 
-		if err := db.Exec("DROP TABLE subcription_nodes").Error; err != nil {
-			return fmt.Errorf("删除旧表失败: %w", err)
+		if err := db.Migrator().RenameTable("subcription_nodes", "subcription_nodes_backup"); err != nil {
+			return fmt.Errorf("备份旧表失败: %w", err)
+		}
+		utils.Info("已创建备份表 subcription_nodes_backup")
+
+		if err := db.AutoMigrate(&SubcriptionNode{}); err != nil {
+			return fmt.Errorf("创建新版 SubcriptionNode 表失败: %w", err)
 		}
 
-		if err := db.Exec("ALTER TABLE subcription_nodes_new RENAME TO subcription_nodes").Error; err != nil {
-			return fmt.Errorf("重命名表失败: %w", err)
+		if len(convertedRecords) > 0 {
+			if err := db.Create(&convertedRecords).Error; err != nil {
+				return fmt.Errorf("迁移 SubcriptionNode 数据失败: %w", err)
+			}
 		}
 
-		utils.Info("SubcriptionNode 表迁移完成")
+		if skippedCount > 0 {
+			utils.Warn("有 %d 条旧版订阅节点关联因找不到对应节点而被跳过", skippedCount)
+		}
+		utils.Info("SubcriptionNode 表迁移完成，共迁移 %d 条记录", len(convertedRecords))
 		return nil
 	}); err != nil {
 		utils.Error("执行迁移 0014_migrate_subcription_node_to_id_v2 失败: %v", err)
@@ -835,6 +1135,61 @@ DIRECT = direct
 		utils.Error("执行迁移 0021_recalculate_node_content_hash 失败: %v", err)
 	}
 
+	// 0022_fill_node_link_hash - 为历史数据回填 LinkHash，供跨数据库唯一约束使用
+	if err := database.RunCustomMigration("0022_fill_node_link_hash", func() error {
+		if !db.Migrator().HasTable(&Node{}) || !db.Migrator().HasColumn(&Node{}, "link_hash") {
+			return nil
+		}
+
+		var rows []struct {
+			ID       int
+			Link     string
+			LinkHash string
+		}
+		if err := db.Model(&Node{}).Select("id", "link", "link_hash").Find(&rows).Error; err != nil {
+			return fmt.Errorf("读取节点 LinkHash 失败: %w", err)
+		}
+
+		updated := 0
+		for _, row := range rows {
+			if row.Link == "" || row.LinkHash != "" {
+				continue
+			}
+			if err := db.Model(&Node{}).Where("id = ?", row.ID).Update("link_hash", hashNodeLink(row.Link)).Error; err != nil {
+				return fmt.Errorf("回填节点 LinkHash 失败(id=%d): %w", row.ID, err)
+			}
+			updated++
+		}
+
+		utils.Info("节点 LinkHash 回填完成，共更新 %d 条记录", updated)
+		return nil
+	}); err != nil {
+		utils.Error("执行迁移 0022_fill_node_link_hash 失败: %v", err)
+	}
+
+	// 0023_normalize_subscription_share_timestamps - 清理分享表中的零时间/无效时间占位
+	if err := database.RunCustomMigration("0023_normalize_subscription_share_timestamps", func() error {
+		if !db.Migrator().HasTable(&SubscriptionShare{}) {
+			return nil
+		}
+
+		if err := db.Model(&SubscriptionShare{}).
+			Where("expire_type <> ?", ExpireTypeDateTime).
+			Update("expire_at", nil).Error; err != nil {
+			return fmt.Errorf("清理非日期分享 expire_at 失败: %w", err)
+		}
+
+		if err := db.Model(&SubscriptionShare{}).
+			Where("access_count <= ?", 0).
+			Update("last_access_at", nil).Error; err != nil {
+			return fmt.Errorf("清理未访问分享 last_access_at 失败: %w", err)
+		}
+
+		return nil
+	}); err != nil {
+		utils.Error("执行迁移 0023_normalize_subscription_share_timestamps 失败: %v", err)
+	}
+
 	// 初始化用户数据
 	err := db.First(&User{}).Error
 	if err == gorm.ErrRecordNotFound {
@@ -871,40 +1226,131 @@ DIRECT = direct
 	// 设置初始化标志为 true
 	database.IsInitialized = true
 	utils.Info("数据库初始化成功")
+	return nil
 }
 
-// Rollback0014_migrate_subcription_node_to_id_v2 回滚迁移 0014
-// 此函数需要手动调用，用于出现问题时回滚
-func Rollback0014_migrate_subcription_node_to_id_v2() error {
-	db := database.DB
-	if db == nil {
-		return fmt.Errorf("数据库未初始化")
+// seedDefaultCountryRules 添加默认国家规则
+func seedDefaultCountryRules(db *gorm.DB) error {
+	utils.Info("开始添加默认国家规则")
+
+	defaultRules := []CountryRule{
+		// 常见地区 - 使用正则表达式
+		{CountryCode: "HK", CountryName: "香港", Pattern: "(?i)香港|HK|Hong Kong|🇭🇰", Priority: 0, Enabled: true},
+		{CountryCode: "TW", CountryName: "台湾", Pattern: "(?i)台湾|TW|Taiwan|臺灣|🇹🇼", Priority: 0, Enabled: true},
+		{CountryCode: "JP", CountryName: "日本", Pattern: "(?i)日本|JP|Japan|东京|Tokyo|大阪|Osaka|京都|Kyoto|名古屋|Nagoya|横滨|Yokohama|福冈|Fukuoka|札幌|Sapporo|神户|Kobe|🇯🇵", Priority: 0, Enabled: true},
+		{CountryCode: "SG", CountryName: "新加坡", Pattern: "(?i)新加坡|SG|Singapore|狮城|🇸🇬", Priority: 0, Enabled: true},
+		{CountryCode: "US", CountryName: "美国", Pattern: "(?i)美国|US|USA|United States|洛杉矶|Los Angeles|LA|纽约|New York|NYC|旧金山|San Francisco|硅谷|Silicon Valley|西雅图|Seattle|芝加哥|Chicago|达拉斯|Dallas|迈阿密|Miami|华盛顿|Washington DC|波士顿|Boston|丹佛|Denver|亚特兰大|Atlanta|🇺🇸", Priority: 0, Enabled: true},
+		{CountryCode: "KR", CountryName: "韩国", Pattern: "(?i)韩国|KR|Korea|首尔|Seoul|🇰🇷", Priority: 0, Enabled: true},
+
+		// 其他亚洲地区
+		{CountryCode: "MY", CountryName: "马来西亚", Pattern: "(?i)马来西亚|MY|Malaysia|🇲🇾", Priority: 0, Enabled: true},
+		{CountryCode: "TH", CountryName: "泰国", Pattern: "(?i)泰国|TH|Thailand|曼谷|Bangkok|🇹🇭", Priority: 0, Enabled: true},
+		{CountryCode: "PH", CountryName: "菲律宾", Pattern: "(?i)菲律宾|PH|Philippines|🇵🇭", Priority: 0, Enabled: true},
+		{CountryCode: "VN", CountryName: "越南", Pattern: "(?i)越南|VN|Vietnam|🇻🇳", Priority: 0, Enabled: true},
+		{CountryCode: "IN", CountryName: "印度", Pattern: "(?i)印度|IN|India|孟买|Mumbai|🇮🇳", Priority: 0, Enabled: true},
+		{CountryCode: "ID", CountryName: "印度尼西亚", Pattern: "(?i)印度尼西亚|ID|Indonesia|印尼|雅加达|Jakarta|🇮🇩", Priority: 0, Enabled: true},
+		{CountryCode: "BD", CountryName: "孟加拉国", Pattern: "(?i)孟加拉国|BD|Bangladesh|孟加拉|达卡|Dhaka|🇧🇩", Priority: 0, Enabled: true},
+		{CountryCode: "PK", CountryName: "巴基斯坦", Pattern: "(?i)巴基斯坦|PK|Pakistan|巴铁|卡拉奇|Karachi|伊斯兰堡|Islamabad|🇵🇰", Priority: 0, Enabled: true},
+		{CountryCode: "MO", CountryName: "澳门", Pattern: "(?i)澳门|MO|Macao|Macau|🇲🇴", Priority: 0, Enabled: true},
+		{CountryCode: "KZ", CountryName: "哈萨克斯坦", Pattern: "(?i)哈萨克斯坦|KZ|Kazakhstan|哈萨克|阿拉木图|Almaty|🇰🇿", Priority: 0, Enabled: true},
+
+		// 欧洲地区
+		{CountryCode: "GB", CountryName: "英国", Pattern: "(?i)英国|GB|UK|United Kingdom|伦敦|London|🇬🇧", Priority: 0, Enabled: true},
+		{CountryCode: "DE", CountryName: "德国", Pattern: "(?i)德国|DE|Germany|法兰克福|Frankfurt|🇩🇪", Priority: 0, Enabled: true},
+		{CountryCode: "FR", CountryName: "法国", Pattern: "(?i)法国|FR|France|巴黎|Paris|🇫🇷", Priority: 0, Enabled: true},
+		{CountryCode: "NL", CountryName: "荷兰", Pattern: "(?i)荷兰|NL|Netherlands|阿姆斯特丹|Amsterdam|🇳🇱", Priority: 0, Enabled: true},
+		{CountryCode: "RU", CountryName: "俄罗斯", Pattern: "(?i)俄罗斯|RU|Russia|莫斯科|Moscow|🇷🇺", Priority: 0, Enabled: true},
+
+		// 美洲其他地区
+		{CountryCode: "CA", CountryName: "加拿大", Pattern: "(?i)加拿大|CA|Canada|🇨🇦", Priority: 0, Enabled: true},
+		{CountryCode: "BR", CountryName: "巴西", Pattern: "(?i)巴西|BR|Brazil|🇧🇷", Priority: 0, Enabled: true},
+		{CountryCode: "AR", CountryName: "阿根廷", Pattern: "(?i)阿根廷|AR|Argentina|🇦🇷", Priority: 0, Enabled: true},
+		{CountryCode: "MX", CountryName: "墨西哥", Pattern: "(?i)墨西哥|MX|Mexico|墨城|Mexico City|🇲🇽", Priority: 0, Enabled: true},
+		{CountryCode: "CL", CountryName: "智利", Pattern: "(?i)智利|CL|Chile|圣地亚哥|Santiago|🇨🇱", Priority: 0, Enabled: true},
+		{CountryCode: "CO", CountryName: "哥伦比亚", Pattern: "(?i)哥伦比亚|CO|Colombia|波哥大|Bogota|🇨🇴", Priority: 0, Enabled: true},
+
+		// 大洋洲
+		{CountryCode: "AU", CountryName: "澳大利亚", Pattern: "(?i)澳大利亚|澳洲|AU|Australia|悉尼|墨尔本|Sydney|Melbourne|🇦🇺", Priority: 0, Enabled: true},
+		{CountryCode: "NZ", CountryName: "新西兰", Pattern: "(?i)新西兰|NZ|New Zealand|🇳🇿", Priority: 0, Enabled: true},
+
+		// 中东
+		{CountryCode: "TR", CountryName: "土耳其", Pattern: "(?i)土耳其|TR|Turkey|🇹🇷", Priority: 0, Enabled: true},
+		{CountryCode: "AE", CountryName: "阿联酋", Pattern: "(?i)阿联酋|UAE|迪拜|Dubai|🇦🇪", Priority: 0, Enabled: true},
+		{CountryCode: "IL", CountryName: "以色列", Pattern: "(?i)以色列|IL|Israel|特拉维夫|Tel Aviv|耶路撒冷|Jerusalem|🇮🇱", Priority: 0, Enabled: true},
+		{CountryCode: "SA", CountryName: "沙特阿拉伯", Pattern: "(?i)沙特阿拉伯|沙特|SA|Saudi Arabia|Saudi|利雅得|Riyadh|🇸🇦", Priority: 0, Enabled: true},
+		{CountryCode: "QA", CountryName: "卡塔尔", Pattern: "(?i)卡塔尔|QA|Qatar|多哈|Doha|🇶🇦", Priority: 0, Enabled: true},
+		{CountryCode: "KW", CountryName: "科威特", Pattern: "(?i)科威特|KW|Kuwait|🇰🇼", Priority: 0, Enabled: true},
+
+		// 中国大陆
+		{CountryCode: "CN", CountryName: "中国", Pattern: "(?i)中国|CN|China|大陆|Mainland", Priority: 0, Enabled: true},
+
+		// 非洲地区
+		{CountryCode: "ZA", CountryName: "南非", Pattern: "(?i)南非|ZA|South Africa|约翰内斯堡|Johannesburg|开普敦|Cape Town|🇿🇦", Priority: 0, Enabled: true},
+		{CountryCode: "EG", CountryName: "埃及", Pattern: "(?i)埃及|EG|Egypt|开罗|Cairo|🇪🇬", Priority: 0, Enabled: true},
+		{CountryCode: "NG", CountryName: "尼日利亚", Pattern: "(?i)尼日利亚|NG|Nigeria|拉各斯|Lagos|🇳🇬", Priority: 0, Enabled: true},
+		{CountryCode: "KE", CountryName: "肯尼亚", Pattern: "(?i)肯尼亚|KE|Kenya|内罗毕|Nairobi|🇰🇪", Priority: 0, Enabled: true},
+
+		// 其他欧洲国家
+		{CountryCode: "IT", CountryName: "意大利", Pattern: "(?i)意大利|IT|Italy|🇮🇹", Priority: 0, Enabled: true},
+		{CountryCode: "ES", CountryName: "西班牙", Pattern: "(?i)西班牙|ES|Spain|🇪🇸", Priority: 0, Enabled: true},
+		{CountryCode: "SE", CountryName: "瑞典", Pattern: "(?i)瑞典|SE|Sweden|🇸🇪", Priority: 0, Enabled: true},
+		{CountryCode: "CH", CountryName: "瑞士", Pattern: "(?i)瑞士|CH|Switzerland|🇨🇭", Priority: 0, Enabled: true},
+		{CountryCode: "PL", CountryName: "波兰", Pattern: "(?i)波兰|PL|Poland|🇵🇱", Priority: 0, Enabled: true},
+		{CountryCode: "PT", CountryName: "葡萄牙", Pattern: "(?i)葡萄牙|PT|Portugal|里斯本|Lisbon|🇵🇹", Priority: 0, Enabled: true},
+		{CountryCode: "IE", CountryName: "爱尔兰", Pattern: "(?i)爱尔兰|IE|Ireland|都柏林|Dublin|🇮🇪", Priority: 0, Enabled: true},
+		{CountryCode: "NO", CountryName: "挪威", Pattern: "(?i)挪威|NO|Norway|奥斯陆|Oslo|🇳🇴", Priority: 0, Enabled: true},
+		{CountryCode: "FI", CountryName: "芬兰", Pattern: "(?i)芬兰|FI|Finland|赫尔辛基|Helsinki|🇫🇮", Priority: 0, Enabled: true},
+		{CountryCode: "DK", CountryName: "丹麦", Pattern: "(?i)丹麦|DK|Denmark|哥本哈根|Copenhagen|🇩🇰", Priority: 0, Enabled: true},
+		{CountryCode: "AT", CountryName: "奥地利", Pattern: "(?i)奥地利|AT|Austria|维也纳|Vienna|🇦🇹", Priority: 0, Enabled: true},
+		{CountryCode: "BE", CountryName: "比利时", Pattern: "(?i)比利时|BE|Belgium|布鲁塞尔|Brussels|🇧🇪", Priority: 0, Enabled: true},
+		{CountryCode: "GR", CountryName: "希腊", Pattern: "(?i)希腊|GR|Greece|雅典|Athens|🇬🇷", Priority: 0, Enabled: true},
+		{CountryCode: "CZ", CountryName: "捷克", Pattern: "(?i)捷克|CZ|Czech|Czechia|布拉格|Prague|🇨🇿", Priority: 0, Enabled: true},
+		{CountryCode: "RO", CountryName: "罗马尼亚", Pattern: "(?i)罗马尼亚|RO|Romania|布加勒斯特|Bucharest|🇷🇴", Priority: 0, Enabled: true},
+		{CountryCode: "UA", CountryName: "乌克兰", Pattern: "(?i)乌克兰|UA|Ukraine|基辅|Kiev|Kyiv|🇺🇦", Priority: 0, Enabled: true},
+		{CountryCode: "HU", CountryName: "匈牙利", Pattern: "(?i)匈牙利|HU|Hungary|布达佩斯|Budapest|🇭🇺", Priority: 0, Enabled: true},
+		{CountryCode: "HR", CountryName: "克罗地亚", Pattern: "(?i)克罗地亚|HR|Croatia|萨格勒布|Zagreb|🇭🇷", Priority: 0, Enabled: true},
+		{CountryCode: "RS", CountryName: "塞尔维亚", Pattern: "(?i)塞尔维亚|RS|Serbia|贝尔格莱德|Belgrade|🇷🇸", Priority: 0, Enabled: true},
+		{CountryCode: "BG", CountryName: "保加利亚", Pattern: "(?i)保加利亚|BG|Bulgaria|索非亚|Sofia|🇧🇬", Priority: 0, Enabled: true},
+		{CountryCode: "SK", CountryName: "斯洛伐克", Pattern: "(?i)斯洛伐克|SK|Slovakia|布拉迪斯拉发|Bratislava|🇸🇰", Priority: 0, Enabled: true},
+		{CountryCode: "SI", CountryName: "斯洛文尼亚", Pattern: "(?i)斯洛文尼亚|SI|Slovenia|卢布尔雅那|Ljubljana|🇸🇮", Priority: 0, Enabled: true},
+		{CountryCode: "LU", CountryName: "卢森堡", Pattern: "(?i)卢森堡|LU|Luxembourg|🇱🇺", Priority: 0, Enabled: true},
+		// IS 代码段用大写边界限定，避免误匹配 Paris/Bristol/Island 等含 "is" 的名称
+		{CountryCode: "IS", CountryName: "冰岛", Pattern: `(?i)冰岛|Iceland|雷克雅未克|Reykjavik|🇮🇸|(?:^|[^a-zA-Z])(?-i:IS)(?:[^a-zA-Z]|$)`, Priority: 0, Enabled: true},
+
+		// 波罗的海地区
+		{CountryCode: "EE", CountryName: "爱沙尼亚", Pattern: "(?i)爱沙尼亚|EE|Estonia|塔林|Tallinn|🇪🇪", Priority: 0, Enabled: true},
+		{CountryCode: "LV", CountryName: "拉脱维亚", Pattern: "(?i)拉脱维亚|LV|Latvia|里加|Riga|🇱🇻", Priority: 0, Enabled: true},
+		{CountryCode: "LT", CountryName: "立陶宛", Pattern: "(?i)立陶宛|LT|Lithuania|维尔纽斯|Vilnius|🇱🇹", Priority: 0, Enabled: true},
 	}
 
-	utils.Info("开始回滚 SubcriptionNode 表迁移...")
+	addedCount := 0
+	for _, rule := range defaultRules {
+		// 检查是否已存在相同的规则（基于国家代码和匹配模式）
+		var exists CountryRule
+		err := db.Where("country_code = ? AND pattern = ?",
+			rule.CountryCode, rule.Pattern).First(&exists).Error
 
-	// 检查备份表是否存在
-	var count int64
-	db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='subcription_nodes_backup'").Scan(&count)
-	if count == 0 {
-		return fmt.Errorf("备份表 subcription_nodes_backup 不存在，无法回滚")
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// 规则不存在，创建新规则
+				if err := db.Create(&rule).Error; err != nil {
+					utils.Warn("添加默认国家规则失败 [%s - %s]: %v", rule.CountryCode, rule.CountryName, err)
+					continue
+				}
+				addedCount++
+			} else {
+				// 其他数据库错误
+				utils.Warn("查询国家规则失败 [%s]: %v", rule.CountryCode, err)
+			}
+		}
+		// 规则已存在，跳过
 	}
 
-	// 1. 删除当前表
-	if err := db.Exec("DROP TABLE IF EXISTS subcription_nodes").Error; err != nil {
-		return fmt.Errorf("删除当前表失败: %w", err)
+	if addedCount > 0 {
+		utils.Info("成功添加 %d 条默认国家规则", addedCount)
+	} else {
+		utils.Info("默认国家规则已存在，无需添加")
 	}
 
-	// 2. 从备份恢复
-	if err := db.Exec("CREATE TABLE subcription_nodes AS SELECT * FROM subcription_nodes_backup").Error; err != nil {
-		return fmt.Errorf("从备份恢复失败: %w", err)
-	}
-
-	// 3. 删除迁移记录
-	if err := db.Exec("DELETE FROM schema_migrations WHERE version = '0014_migrate_subcription_node_to_id_v2'").Error; err != nil {
-		utils.Warn("删除迁移记录失败: %v", err)
-	}
-
-	utils.Info("回滚完成，已恢复到原表结构")
 	return nil
 }
